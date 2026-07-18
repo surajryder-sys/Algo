@@ -409,9 +409,9 @@ uint BlockedHash(const ENUM_TIMEFRAMES tf)
 
 int SetupTFMinutes(const TradeSetup &setup)
 {
-   if(StringFind(setup.zone_key,"M5|")==0) return 5;
-   if(StringFind(setup.zone_key,"M3|")==0) return 3;
-   if(StringFind(setup.zone_key,"M1|")==0) return 1;
+   if(StringFind(setup.zone_key,TFText(InpHTF1)+"|")==0) return TFMinutes(InpHTF1);
+   if(StringFind(setup.zone_key,TFText(InpHTF2)+"|")==0) return TFMinutes(InpHTF2);
+   if(StringFind(setup.zone_key,TFText(InpLTF)+"|")==0) return TFMinutes(InpLTF);
    return 0;
 }
 
@@ -1093,9 +1093,9 @@ int PositionTFMinutesFromComment()
    if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) return 0;
 
    const string comment=PositionGetString(POSITION_COMMENT);
-   if(StringFind(comment,"HTF-M5")>=0) return 5;
-   if(StringFind(comment,"HTF-M3")>=0) return 3;
-   if(StringFind(comment,"LTF-M1")>=0) return 1;
+   if(StringFind(comment,"HTF-"+TFText(InpHTF1))>=0) return TFMinutes(InpHTF1);
+   if(StringFind(comment,"HTF-"+TFText(InpHTF2))>=0) return TFMinutes(InpHTF2);
+   if(StringFind(comment,"LTF-"+TFText(InpLTF))>=0) return TFMinutes(InpLTF);
    return 0;
 }
 
@@ -1269,9 +1269,9 @@ void CreateResetButton(const string name,const string text,const int x)
 void CreateResetButtons()
 {
    if(!InpShowResetButtons) return;
-   CreateResetButton(G_ButtonM5,"RESET M5",5);
-   CreateResetButton(G_ButtonM3,"RESET M3",92);
-   CreateResetButton(G_ButtonM1,"RESET M1",179);
+   CreateResetButton(G_ButtonM5,"RESET "+TFText(InpHTF1),5);
+   CreateResetButton(G_ButtonM3,"RESET "+TFText(InpHTF2),92);
+   CreateResetButton(G_ButtonM1,"RESET "+TFText(InpLTF),179);
 }
 
 void DeleteResetButtons()
@@ -1304,7 +1304,7 @@ void DrawPanel()
            "M1 sequence: ",sequence,"\n",
            "Exposure: ",exposure," | Pending: ",(HasPending()?"YES":"NO")," | Trading: ",(InpEnableTrading?"ENABLED":"READ ONLY"),"\n",
            "Queued setup: ",queued,"\n",
-           "Manual blocks: M5=",BlockText(InpHTF1)," | M3=",BlockText(InpHTF2)," | M1=",BlockText(InpLTF));
+           "Manual blocks: ",TFText(InpHTF1),"=",BlockText(InpHTF1)," | ",TFText(InpHTF2),"=",BlockText(InpHTF2)," | ",TFText(InpLTF),"=",BlockText(InpLTF));
 }
 
 int OnInit()
