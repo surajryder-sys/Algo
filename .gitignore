@@ -4,3 +4,9 @@ __pycache__/
 .venv/
 venv/
 *.log
+ob_mtf_bot_state.json
+reversal_trader_*.json
+reversal_trader_log.txt
+structure_log.txt
+zone_signals_log.txt
+zone_watch_state.json
