@@ -234,7 +234,14 @@ def check_zone_breaks(cap: ReversalCapTracker, zones, c: dict) -> None:
 
 
 def run() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # Logs to both console and file - a crash traceback must survive even if
+    # the console window is later closed (this is how the previous crash's
+    # cause was almost lost).
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[logging.StreamHandler(), logging.FileHandler("reversal_trader_crash.log")],
+    )
     cfg = load_config()
     connect(cfg)
     ensure_symbol(cfg.symbol)
@@ -276,8 +283,20 @@ def run() -> None:
                             update_trailing_stop(cfg, cfg.symbol, zones, price)
 
                         cap.save()
-                    except FileNotFoundError as exc:
-                        log.warning("Bridge file not ready yet: %s", exc)
+                    except OSError as exc:
+                        # Covers the bridge file being mid-write by the MQL5
+                        # aggregator (PermissionError, a transient lock - it
+                        # writes every ~2s) as well as it not existing yet
+                        # (FileNotFoundError). Either way, skip this cycle
+                        # and retry on the next poll rather than crash.
+                        log.warning("Bridge read failed this cycle, will retry: %s", exc)
+                    except Exception:
+                        # A live trading loop must never die on an unexpected
+                        # bug - a crash here previously left a position
+                        # unmanaged for hours until its SL was hit. Log the
+                        # full traceback and keep running; the position (if
+                        # any) is still protected by its broker-side SL.
+                        log.exception("Unexpected error in trading cycle, continuing.")
                     prev_c = c
                     last_candle_time = c["time"]
             time.sleep(cfg.poll_seconds)

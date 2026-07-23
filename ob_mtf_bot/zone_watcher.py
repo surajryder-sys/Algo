@@ -99,7 +99,7 @@ def process_candle(watcher: ZoneWatcher, zone_type: str, tf: str, identity: str,
         return None
 
     if state == TOUCHING:
-        kind = check_bearish_zone(low, high, c) if direction == -1 else check_bullish_zone(low, high, c)
+        kind = check_bearish_zone(low, high, c, tf) if direction == -1 else check_bullish_zone(low, high, c, tf)
         engulf = prev_c is not None and touching_now and is_engulfing(prev_c, c, direction)
         if kind or engulf:
             watcher.set(key, FIRED)

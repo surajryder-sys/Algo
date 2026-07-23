@@ -15,6 +15,12 @@ approach from below and get rejected back down. A BULLISH zone (support)
 produces direction=1 (long) signals: price must approach from above and get
 rejected back up.
 
+H4/H2/H1 zones are wide and their own candle takes a long time to close, so
+for those a dominant wick alone (wick_rejection) is enough - no requirement
+for the candle to close back outside the zone. M30/M15/M5 zones keep the
+close-through requirement, since they're tight enough that it's achievable
+and meaningful.
+
 Read-only - identifies signals, does not place, modify, or close any orders.
 """
 from __future__ import annotations
@@ -26,6 +32,7 @@ import MetaTrader5 as mt5
 from ob_mtf_bot.bridge_reader import BridgeState
 
 WICK_REJECTION_MIN_RATIO = 1.5
+NO_CLOSE_REQUIRED_TFS = {"H4", "H2", "H1"}
 
 
 @dataclass(frozen=True)
@@ -51,29 +58,43 @@ def candle_dict(bar) -> dict:
     }
 
 
-def check_bearish_zone(zone_low: float, zone_high: float, c: dict) -> str | None:
-    """Resistance zone: price must trade up into it and close back below."""
+def check_bearish_zone(zone_low: float, zone_high: float, c: dict, tf: str) -> str | None:
+    """Resistance zone. On H4/H2/H1, a dominant wick into the zone is enough
+    on its own - no close-through required. On M30/M15/M5, price must also
+    close back below the zone."""
     if c["high"] < zone_low:
-        return None
-    if c["close"] >= zone_low:
         return None
 
     body = abs(c["close"] - c["open"])
     wick_into_zone = c["high"] - max(zone_low, c["open"], c["close"])
+
+    if tf in NO_CLOSE_REQUIRED_TFS:
+        if wick_into_zone > 0 and body > 0 and wick_into_zone >= WICK_REJECTION_MIN_RATIO * body:
+            return "wick_rejection"
+        return None
+
+    if c["close"] >= zone_low:
+        return None
     if wick_into_zone > 0 and body > 0 and wick_into_zone >= WICK_REJECTION_MIN_RATIO * body:
         return "wick_rejection"
     return "rejection_close"
 
 
-def check_bullish_zone(zone_low: float, zone_high: float, c: dict) -> str | None:
-    """Support zone: price must trade down into it and close back above."""
+def check_bullish_zone(zone_low: float, zone_high: float, c: dict, tf: str) -> str | None:
+    """Support zone. Same H4/H2/H1 vs M30/M15/M5 split as check_bearish_zone."""
     if c["low"] > zone_high:
-        return None
-    if c["close"] <= zone_high:
         return None
 
     body = abs(c["close"] - c["open"])
     wick_into_zone = min(zone_high, c["open"], c["close"]) - c["low"]
+
+    if tf in NO_CLOSE_REQUIRED_TFS:
+        if wick_into_zone > 0 and body > 0 and wick_into_zone >= WICK_REJECTION_MIN_RATIO * body:
+            return "wick_rejection"
+        return None
+
+    if c["close"] <= zone_high:
+        return None
     if wick_into_zone > 0 and body > 0 and wick_into_zone >= WICK_REJECTION_MIN_RATIO * body:
         return "wick_rejection"
     return "rejection_close"
@@ -99,7 +120,7 @@ def detect_signals(state: BridgeState, symbol: str, lookback_m1_bars: int = 30) 
 
     def _scan_zone(zone_type: str, tf: str, identity: str, direction: int, low: float, high: float) -> None:
         for i, c in enumerate(candles):
-            kind = check_bearish_zone(low, high, c) if direction == -1 else check_bullish_zone(low, high, c)
+            kind = check_bearish_zone(low, high, c, tf) if direction == -1 else check_bullish_zone(low, high, c, tf)
             if kind:
                 signals.append(ReversalSignal(zone_type, tf, identity, direction, kind, low, high,
                                                c["time"], c["open"], c["high"], c["low"], c["close"]))
