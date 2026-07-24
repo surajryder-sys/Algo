@@ -19,6 +19,29 @@ from algo.entries import (
 
 COMMENT_PREFIX = "SMC"
 
+# MT5 silently truncates order/deal comments to 16 characters on at least one
+# broker we tested against (confirmed empirically: a 27-char comment survived
+# order_send but came back truncated to exactly 16 chars on the live order).
+# "SMC|" + 1 tf code + 1 direction code + 6 base36 time digits = 12 chars,
+# safely under that limit with margin. Base36 seconds since a 2025 epoch
+# covers roughly 69 years before overflowing 6 digits.
+_COMMENT_EPOCH = 1735689600  # 2025-01-01T00:00:00Z
+_TF_CODE = {"M1": "1", "M3": "3", "M5": "5"}
+_CODE_TF = {v: k for k, v in _TF_CODE.items()}
+_DIR_CODE = {1: "B", -1: "S"}
+_CODE_DIR = {v: k for k, v in _DIR_CODE.items()}
+_BASE36_DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _to_base36(n: int) -> str:
+    if n <= 0:
+        return "0"
+    out = []
+    while n:
+        n, r = divmod(n, 36)
+        out.append(_BASE36_DIGITS[r])
+    return "".join(reversed(out))
+
 
 @dataclass(frozen=True)
 class TradeCandidate:
@@ -44,24 +67,37 @@ def _zone_key(source_tf: str, direction: int, event_time: int) -> str:
 
 
 def order_comment(candidate: TradeCandidate) -> str:
-    """Short, MT5-comment-safe identity written onto every order this bot
-    sends, so a restart can recover which zone a live order belongs to."""
-    return f"{COMMENT_PREFIX}|{candidate.zone_key}"
+    """Compact, MT5-comment-safe identity written onto every order this bot
+    sends, so the bot can recover which zone a live order belongs to (e.g.
+    after a restart, or when checking who owns a live pending order)."""
+    tf_code = _TF_CODE[candidate.source_tf]
+    dir_code = _DIR_CODE[candidate.direction]
+    time_code = _to_base36(candidate.event_time - _COMMENT_EPOCH)
+    return f"{COMMENT_PREFIX}|{tf_code}{dir_code}{time_code}"
 
 
 def parse_order_comment(comment: str) -> Optional[tuple]:
-    """Returns (zone_key, event_time) or None if this isn't our comment format."""
+    """Returns (zone_key, event_time) or None if this isn't our comment format.
+    zone_key is reconstructed in the same format _zone_key() produces, so it
+    compares equal to one built fresh from live zone data."""
     if not comment or not comment.startswith(COMMENT_PREFIX + "|"):
         return None
     rest = comment[len(COMMENT_PREFIX) + 1:]
-    parts = rest.split("|")
-    if len(parts) != 3:
+    if len(rest) < 3:
         return None
+
+    source_tf = _CODE_TF.get(rest[0])
+    direction = _CODE_DIR.get(rest[1])
+    time_code = rest[2:]
+    if source_tf is None or direction is None or not time_code:
+        return None
+
     try:
-        event_time = int(parts[2])
+        event_time = int(time_code, 36) + _COMMENT_EPOCH
     except ValueError:
         return None
-    return rest, event_time
+
+    return _zone_key(source_tf, direction, event_time), event_time
 
 
 def current_zone_key(source_tf: str, snap: Optional[OBSnapshot], direction: int) -> Optional[str]:
