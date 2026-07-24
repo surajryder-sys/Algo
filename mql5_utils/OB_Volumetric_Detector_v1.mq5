@@ -204,6 +204,37 @@ void TrimZones(OBZone &arr[], const int max_count)
 }
 
 //+------------------------------------------------------------------+
+// A bullish (support) zone is invalidated once price closes below its low;
+// a bearish (resistance) zone is invalidated once price closes above its
+// high. This is a full break-through, stronger than a mere wick-mitigation
+// touch, and removes the zone outright instead of just marking it tested -
+// otherwise a zone price has decisively moved past keeps lingering on the
+// chart long after it stopped being relevant.
+void RemoveInvalidatedZones(OBZone &arr[], const bool bullish)
+{
+   double last_close = iClose(_Symbol, _Period, 1);
+   int    n           = ArraySize(arr);
+   int    write        = 0;
+
+   for(int i = 0; i < n; i++)
+   {
+      bool invalidated = bullish ? (last_close < arr[i].low) : (last_close > arr[i].high);
+      if(invalidated)
+      {
+         ObjectDelete(0, arr[i].name);
+         ObjectDelete(0, arr[i].name + "_AVG");
+         continue;
+      }
+      if(write != i)
+         arr[write] = arr[i];
+      write++;
+   }
+
+   if(write != n)
+      ArrayResize(arr, write);
+}
+
+//+------------------------------------------------------------------+
 void UpdateMitigation(OBZone &arr[])
 {
    for(int i = 0; i < ArraySize(arr); i++)
@@ -444,6 +475,9 @@ void Recalculate()
 
    UpdateMitigation(g_bull);
    UpdateMitigation(g_bear);
+
+   RemoveInvalidatedZones(g_bull, true);
+   RemoveInvalidatedZones(g_bear, false);
 
    TrimZones(g_bull, InpBullishOBCount);
    TrimZones(g_bear, InpBearishOBCount);
