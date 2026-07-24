@@ -36,7 +36,7 @@ input color            InpAverageColor       = clrGray;
 input ENUM_LINE_STYLE   InpAverageLineStyle   = STYLE_DASH;
 input int               InpAverageLineWidth   = 1;
 input bool              InpDrawOutline        = true;
-input bool              InpFreezeAtMitigation = true; // stop extending a zone once mitigated
+input bool              InpFreezeAtMitigation = false; // stop extending a zone once mitigated
 
 input group "Publishing"
 input bool   InpPublishGlobalVariables = true;
