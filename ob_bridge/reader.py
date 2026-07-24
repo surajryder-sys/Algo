@@ -1,9 +1,10 @@
-"""Reads OB zone snapshots published by OB_StatePublisher_Indicator (v1.10)
+"""Reads OB zone snapshots published by OB_StatePublisher_Indicator (v2.00)
 through the MT5 Common Files JSON bridge.
 
-The indicator runs once per timeframe chart and writes
-<CommonFiles>/OBBridge/OBSTATE_<symbol>_<tf_minutes>.json on every scan.
-This module only reads those files; it does not talk to the terminal.
+The indicator runs once, attached to a single chart, and writes
+<CommonFiles>/OBBridge/OBSTATE_<symbol>_<tf_minutes>.json per configured
+timeframe on every scan. This module only reads those files; it does not
+talk to the terminal.
 """
 from __future__ import annotations
 
@@ -28,10 +29,13 @@ def bridge_root() -> Path:
 
 
 @dataclass
-class ZoneEdge:
+class Zone:
     high: float
     low: float
     virgin: bool
+    start_time: int
+    detected_time: int
+    detected_price: float
 
 
 @dataclass
@@ -48,8 +52,8 @@ class OBSnapshot:
     detected_price: float
     visit_time: int
     validation_time: int
-    bull: ZoneEdge
-    bear: ZoneEdge
+    bull: list[Zone]   # newest first, up to ZoneHistoryDepth entries
+    bear: list[Zone]   # newest first, up to ZoneHistoryDepth entries
 
     def age_seconds(self) -> float:
         return time.time() - self.updated
@@ -57,11 +61,28 @@ class OBSnapshot:
     def is_stale(self, max_age_seconds: float = 30.0) -> bool:
         return self.updated == 0 or self.age_seconds() > max_age_seconds
 
+    def latest_untested(self, direction: str) -> Optional[Zone]:
+        """First virgin zone in bull/bear history (newest first), or None."""
+        history = self.bull if direction == "bull" else self.bear
+        for zone in history:
+            if zone.virgin:
+                return zone
+        return None
+
+
+def _parse_zone(raw: dict) -> Zone:
+    return Zone(
+        high=raw["high"],
+        low=raw["low"],
+        virgin=raw["virgin"],
+        start_time=raw["start_time"],
+        detected_time=raw["detected_time"],
+        detected_price=raw["detected_price"],
+    )
+
 
 def _parse(raw: dict) -> OBSnapshot:
     latest = raw["latest"]
-    bull = raw["bull"]
-    bear = raw["bear"]
     return OBSnapshot(
         symbol=raw["symbol"],
         timeframe_minutes=raw["timeframe_minutes"],
@@ -75,8 +96,8 @@ def _parse(raw: dict) -> OBSnapshot:
         detected_price=latest["detected_price"],
         visit_time=latest["visit_time"],
         validation_time=latest["validation_time"],
-        bull=ZoneEdge(bull["high"], bull["low"], bull["virgin"]),
-        bear=ZoneEdge(bear["high"], bear["low"], bear["virgin"]),
+        bull=[_parse_zone(z) for z in raw["bull"]],
+        bear=[_parse_zone(z) for z in raw["bear"]],
     )
 
 
@@ -92,6 +113,6 @@ def read_zone(symbol: str, tf_minutes: int) -> Optional[OBSnapshot]:
 
 
 def read_all(symbol: str) -> dict[str, Optional[OBSnapshot]]:
-    """One snapshot per configured timeframe label (M1..D1); None where the
+    """One snapshot per configured timeframe label (M1..H4); None where the
     indicator hasn't published for that timeframe yet."""
     return {label: read_zone(symbol, minutes) for label, minutes in TIMEFRAMES.items()}

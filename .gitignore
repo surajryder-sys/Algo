@@ -10,3 +10,5 @@ reversal_trader_log.txt
 structure_log.txt
 zone_signals_log.txt
 zone_watch_state.json
+smc_bot_state.json
+smc_bot_blocks.json
