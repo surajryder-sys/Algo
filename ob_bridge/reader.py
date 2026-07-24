@@ -102,12 +102,14 @@ def _parse(raw: dict) -> OBSnapshot:
 
 
 def read_zone(symbol: str, tf_minutes: int) -> Optional[OBSnapshot]:
-    """Returns None if the file is missing or was read mid-write (rare, since
-    the indicator writes to a .tmp file and renames it into place)."""
+    """Returns None if the file is missing, was read mid-write, or is briefly
+    locked by Windows during the indicator's write-then-rename (OSError
+    covers PermissionError here) -- all transient, safe to just retry next
+    poll rather than aborting the caller's whole cycle."""
     path = bridge_root() / f"OBSTATE_{symbol}_{tf_minutes}.json"
     try:
         raw = json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, KeyError):
         return None
     return _parse(raw)
 
