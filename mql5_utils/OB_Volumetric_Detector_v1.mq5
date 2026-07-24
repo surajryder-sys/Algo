@@ -378,8 +378,24 @@ void Recalculate()
    if(max_shift < min_shift)
       return;
 
-   int last_pivot_high_shift = -1;
-   int last_pivot_low_shift  = -1;
+   int    last_pivot_high_shift = -1;
+   double last_pivot_high_price = 0.0;
+   int    last_pivot_low_shift  = -1;
+   double last_pivot_low_price  = 0.0;
+
+   // A candidate is the leg leading INTO a fresh pivot (the standard OB
+   // location), but it is only turned into an actual zone once price later
+   // closes back beyond that leg's own opposite extreme - i.e. a genuine
+   // break of structure. A raw pivot alone is not enough: that fires on
+   // every micro-swing inside flat/ranging price and floods the chart with
+   // noise zones a real displacement never validated.
+   bool   pending_bull_active = false;
+   int    pending_bull_shift  = -1;
+   double pending_bull_level  = 0.0; // confirms once close > this (the leg's own high)
+
+   bool   pending_bear_active = false;
+   int    pending_bear_shift  = -1;
+   double pending_bear_level  = 0.0; // confirms once close < this (the leg's own low)
 
    // Scan chronologically: s decreases from the oldest usable candidate to
    // the most recently confirmable one.
@@ -387,22 +403,42 @@ void Recalculate()
    {
       if(IsPivotHigh(s, L))
       {
+         // Up-leg into this new high is the candidate bearish OB leg.
          if(last_pivot_low_shift > s)
          {
-            int ob_shift = FindMaxVolumeShift(s, last_pivot_low_shift);
-            AddZone(g_bear, false, ob_shift);
+            pending_bear_active = true;
+            pending_bear_shift  = FindMaxVolumeShift(s, last_pivot_low_shift);
+            pending_bear_level  = last_pivot_low_price;
          }
          last_pivot_high_shift = s;
+         last_pivot_high_price = iHigh(_Symbol, _Period, s);
       }
 
       if(IsPivotLow(s, L))
       {
+         // Down-leg into this new low is the candidate bullish OB leg.
          if(last_pivot_high_shift > s)
          {
-            int ob_shift = FindMaxVolumeShift(s, last_pivot_high_shift);
-            AddZone(g_bull, true, ob_shift);
+            pending_bull_active = true;
+            pending_bull_shift  = FindMaxVolumeShift(s, last_pivot_high_shift);
+            pending_bull_level  = last_pivot_high_price;
          }
          last_pivot_low_shift = s;
+         last_pivot_low_price = iLow(_Symbol, _Period, s);
+      }
+
+      double c = iClose(_Symbol, _Period, s);
+
+      if(pending_bull_active && c > pending_bull_level)
+      {
+         AddZone(g_bull, true, pending_bull_shift);
+         pending_bull_active = false;
+      }
+
+      if(pending_bear_active && c < pending_bear_level)
+      {
+         AddZone(g_bear, false, pending_bear_shift);
+         pending_bear_active = false;
       }
    }
 
