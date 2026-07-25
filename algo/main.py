@@ -18,7 +18,7 @@ import MetaTrader5 as mt5
 from ob_bridge.reader import read_zone, OBSnapshot
 from algo import broker
 from algo.bias import compute_bias, TFBias, allowed_entry_sources
-from algo.blocking import BlockedZoneStore
+from algo.blocking import BlockedZoneStore, check_reset_requests
 from algo.candidates import (
     build_m1_candidate, build_m3_candidate, build_m5_candidate,
     choose_winning_candidate, should_replace_pending, current_zone_key,
@@ -115,6 +115,9 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = (bid + ask) / 2.0
 
+    # Always check for a chart reset-button press, regardless of trading mode.
+    check_reset_requests(blocked)
+
     if cfg.enable_trading:
         # 0a. Confirm any pending orders that filled since the last poll.
         sync_filled_zones(cfg, store)
@@ -202,6 +205,18 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         if not result.ok:
             print(f"[REPLACE] cancel failed: {result.retcode} {result.comment}")
             return
+
+    # A stale pending order left over in the OPPOSITE direction (e.g. from
+    # before bias flipped) isn't a committed trade -- only open positions get
+    # the Strong/ShortTerm coexistence protection. Clear it before entering
+    # the new direction so it can't unexpectedly fill later on its own.
+    for order in broker.get_pending_orders_by_direction(cfg.symbol, cfg.magic_number, -bias.direction):
+        print(f"[REPLACE] cancelling stale opposite-direction pending #{order.ticket} for new "
+              f"{winner.source_tf} {'BUY' if winner.direction == 1 else 'SELL'} setup")
+        if cfg.enable_trading:
+            result = broker.cancel_pending_order(order.ticket)
+            if not result.ok:
+                print(f"[REPLACE] opposite-direction cancel failed: {result.retcode} {result.comment}")
 
     comment = order_comment(winner)
 

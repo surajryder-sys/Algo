@@ -19,6 +19,7 @@ input string TargetTimeframes               = "H4,H2,H1,M30,M15,M5,M3,M1";
 input bool   ShowPanel                      = true;
 input int    ScanEverySeconds               = 1;
 input int    MaxZonesToShow                 = 4;
+input int    ZoneHistoryDepth               = 5;   // recent zones per direction published to the JSON bridge
 
 input int    DirectionColorMinChannel       = 20;
 input int    DirectionColorGap              = 8;
@@ -48,6 +49,14 @@ input string BiasLabelFont                  = "Arial Bold";
 input color  BullishBiasColor               = clrLime;
 input color  BearishBiasColor               = clrRed;
 input color  NeutralBiasColor               = clrSilver;
+
+input bool   ShowVirginObList               = true;   // untested-only OB list per timeframe, under the bias labels
+input int    VirginObListYGap               = 10;
+
+input bool   ShowResetButtons               = true;   // RESET M1/M3/M5 buttons -> write a flag file the Python bot polls
+input int    ResetButtonCorner              = 0;      // 0=left top, 1=right top, 2=left bottom, 3=right bottom -- matches BiasLabelCorner by default so they sit in the same column
+input int    ResetButtonX                   = 480;    // matches BiasLabelX by default
+input int    ResetButtonYGap                = 15;     // gap below the virgin-OB list's current bottom row
 
 struct OBZone
 {
@@ -102,6 +111,7 @@ TFTarget g_targets[];
 TFState  g_state[];
 bool     g_first_scan[];
 string   g_panel_section[];
+int      g_vob_slot_count = 0;
 
 //+------------------------------------------------------------------+
 string EffectiveSymbol()
@@ -214,6 +224,8 @@ int OnInit()
    if(PublishToFile)
       FolderCreate(FileBridgeFolder, FILE_COMMON);
 
+   CreateResetButtons();
+
    if(ScanEverySeconds > 0)
       EventSetTimer(ScanEverySeconds);
 
@@ -227,7 +239,27 @@ void OnDeinit(const int reason)
    EventKillTimer();
    for(int i = 0; i < ArraySize(g_targets); i++)
       ObjectDelete(0, BiasLabelName(i));
+   for(int i = 0; i < g_vob_slot_count; i++)
+      ObjectDelete(0, "OBSP_VOB_" + IntegerToString(i));
+   DeleteResetButtons();
    Comment("");
+}
+
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+{
+   if(id != CHARTEVENT_OBJECT_CLICK)
+      return;
+
+   string tf = "";
+   if(sparam == "OBSP_RESET_M1")      tf = "M1";
+   else if(sparam == "OBSP_RESET_M3") tf = "M3";
+   else if(sparam == "OBSP_RESET_M5") tf = "M5";
+   else return;
+
+   ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
+   WriteResetRequest(tf);
+   ChartRedraw();
 }
 
 //+------------------------------------------------------------------+
@@ -262,8 +294,132 @@ void ScanAndPublishAll()
 
    UpdateBiasLabels();
 
+   int vob_bottom_y = BiasLabelYStart + ArraySize(g_targets) * BiasLabelRowHeight + VirginObListYGap;
+   if(ShowVirginObList)
+      vob_bottom_y = UpdateVirginObLabels();
+
+   RepositionResetButtons(vob_bottom_y + ResetButtonYGap);
+
    if(ShowPanel)
       DrawCombinedPanel(symbol);
+}
+
+//+------------------------------------------------------------------+
+void CreateResetButton(const string name, const string text, const int x, const int y)
+{
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_BUTTON, 0, 0, 0);
+   ObjectSetInteger(0, name, OBJPROP_CORNER, ResetButtonCorner);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_XSIZE, 82);
+   ObjectSetInteger(0, name, OBJPROP_YSIZE, 22);
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+}
+
+//+------------------------------------------------------------------+
+void CreateResetButtons()
+{
+   if(!ShowResetButtons)
+      return;
+   // Placed at a default Y here; RepositionResetButtons() moves them under
+   // the virgin-OB list every poll, once that list's height is known.
+   CreateResetButton("OBSP_RESET_M1", "RESET M1", ResetButtonX, BiasLabelYStart);
+   CreateResetButton("OBSP_RESET_M3", "RESET M3", ResetButtonX + 87, BiasLabelYStart);
+   CreateResetButton("OBSP_RESET_M5", "RESET M5", ResetButtonX + 174, BiasLabelYStart);
+}
+
+//+------------------------------------------------------------------+
+void RepositionResetButtons(const int y)
+{
+   if(!ShowResetButtons)
+      return;
+   ObjectSetInteger(0, "OBSP_RESET_M1", OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, "OBSP_RESET_M3", OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, "OBSP_RESET_M5", OBJPROP_YDISTANCE, y);
+}
+
+//+------------------------------------------------------------------+
+void DeleteResetButtons()
+{
+   ObjectDelete(0, "OBSP_RESET_M1");
+   ObjectDelete(0, "OBSP_RESET_M3");
+   ObjectDelete(0, "OBSP_RESET_M5");
+}
+
+//+------------------------------------------------------------------+
+void WriteResetRequest(const string tf)
+{
+   // The block state this releases lives in the Python bot's own store, not
+   // here -- this just drops a flag file for it to pick up on its next poll
+   // and delete, same direction as the JSON bridge but reversed.
+   FolderCreate(FileBridgeFolder, FILE_COMMON);
+   string name = FileBridgeFolder + "\\RESET_" + tf + ".flag";
+   int handle = FileOpen(name, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(handle == INVALID_HANDLE)
+   {
+      Print("Reset request write failed: ", name, " | error=", GetLastError());
+      return;
+   }
+   FileWriteString(handle, IntegerToString((long)TimeCurrent()));
+   FileClose(handle);
+   Print("Reset requested for ", tf, " -- flag written: ", name);
+}
+
+//+------------------------------------------------------------------+
+void SetVirginObLabel(const int slot, const string text, const color clr, const int y)
+{
+   string name = "OBSP_VOB_" + IntegerToString(slot);
+   if(ObjectFind(0, name) < 0)
+   {
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+      ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   }
+   ObjectSetInteger(0, name, OBJPROP_CORNER, BiasLabelCorner);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, BiasLabelX);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, BiasLabelFontSize);
+   ObjectSetString(0, name, OBJPROP_FONT, BiasLabelFont);
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+}
+
+//+------------------------------------------------------------------+
+// Returns the Y position immediately after the last row drawn, so callers
+// can place further UI elements below this list without overlapping it.
+int UpdateVirginObLabels()
+{
+   int slot = 0;
+   int y = BiasLabelYStart + ArraySize(g_targets) * BiasLabelRowHeight + VirginObListYGap;
+
+   for(int i = 0; i < ArraySize(g_targets); i++)
+   {
+      if(g_state[i].bull_virgin > 0.5)
+      {
+         SetVirginObLabel(slot, g_targets[i].label + " Demand: " + PriceText(g_state[i].bull_high, g_state[i].bull_low),
+                          BullishBiasColor, y);
+         y += BiasLabelRowHeight;
+         slot++;
+      }
+
+      if(g_state[i].bear_virgin > 0.5)
+      {
+         SetVirginObLabel(slot, g_targets[i].label + " Supply: " + PriceText(g_state[i].bear_high, g_state[i].bear_low),
+                          BearishBiasColor, y);
+         y += BiasLabelRowHeight;
+         slot++;
+      }
+   }
+
+   for(int i = slot; i < g_vob_slot_count; i++)
+      ObjectDelete(0, "OBSP_VOB_" + IntegerToString(i));
+
+   g_vob_slot_count = slot;
+   return y;
 }
 
 //+------------------------------------------------------------------+
@@ -327,13 +483,18 @@ void ProcessTimeframe(const int idx, const string symbol)
    st.zone_count = ArraySize(zones);
    g_state[idx] = st;
 
+   OBZone bull_history[];
+   OBZone bear_history[];
+   CollectRecentZones("BULLISH", ZoneHistoryDepth, bull_history);
+   CollectRecentZones("BEARISH", ZoneHistoryDepth, bear_history);
+
    if(PublishGlobalVariables)
       PublishGVFor(st, symbol, minutes);
 
    if(PublishToFile)
-      PublishFileFor(st, symbol, minutes);
+      PublishFileFor(st, symbol, minutes, bull_history, bear_history);
 
-   BuildPanelSection(idx, symbol, has_bull, latest_bull, has_bear, latest_bear);
+   BuildPanelSection(idx, symbol, has_bull, latest_bull, has_bear, latest_bear, bull_history, bear_history);
 }
 
 //+------------------------------------------------------------------+
@@ -805,6 +966,45 @@ bool GetLatestZone(string direction_filter, OBZone &z)
 }
 
 //+------------------------------------------------------------------+
+// Newest-first list of up to max_count zones for one direction, from the
+// zones[] scratch array already scanned for the current timeframe.
+void CollectRecentZones(const string direction_filter, const int max_count, OBZone &out[])
+{
+   ArrayResize(out, 0);
+
+   int n = ArraySize(zones);
+   bool used[];
+   ArrayResize(used, n);
+   ArrayInitialize(used, false);
+
+   while(ArraySize(out) < max_count)
+   {
+      int best = -1;
+      datetime best_time = 0;
+
+      for(int i = 0; i < n; i++)
+      {
+         if(used[i] || zones[i].direction != direction_filter)
+            continue;
+
+         if(best < 0 || zones[i].start_time > best_time)
+         {
+            best = i;
+            best_time = zones[i].start_time;
+         }
+      }
+
+      if(best < 0)
+         break;
+
+      used[best] = true;
+      int idx = ArraySize(out);
+      ArrayResize(out, idx + 1);
+      out[idx] = zones[best];
+   }
+}
+
+//+------------------------------------------------------------------+
 string GVBaseFor(const string symbol, const int minutes)
 {
    return GlobalVariablePrefix + "_" + symbol + "_" + IntegerToString(minutes);
@@ -840,7 +1040,28 @@ void PublishGVFor(const TFState &st, const string symbol, const int minutes)
 string JsonNumber(const double v){ return DoubleToString(v, 8); }
 
 //+------------------------------------------------------------------+
-string BuildStateJsonFor(const TFState &st, const string symbol, const int minutes)
+string JsonZoneArray(OBZone &arr[])
+{
+   string j = "[";
+   for(int i = 0; i < ArraySize(arr); i++)
+   {
+      if(i > 0) j += ",";
+      j += "{";
+      j += "\"high\":" + JsonNumber(arr[i].high) + ",";
+      j += "\"low\":" + JsonNumber(arr[i].low) + ",";
+      j += "\"virgin\":" + (arr[i].virgin ? "true" : "false") + ",";
+      j += "\"start_time\":" + IntegerToString((long)arr[i].start_time) + ",";
+      j += "\"detected_time\":" + IntegerToString((long)arr[i].detected_time) + ",";
+      j += "\"detected_price\":" + JsonNumber(arr[i].detected_price);
+      j += "}";
+   }
+   j += "]";
+   return j;
+}
+
+//+------------------------------------------------------------------+
+string BuildStateJsonFor(const TFState &st, const string symbol, const int minutes,
+                         OBZone &bull_hist[], OBZone &bear_hist[])
 {
    string j = "{";
    j += "\"symbol\":\"" + symbol + "\",";
@@ -857,16 +1078,15 @@ string BuildStateJsonFor(const TFState &st, const string symbol, const int minut
    j += "\"visit_time\":" + IntegerToString((long)st.latest_visit_time) + ",";
    j += "\"validation_time\":" + IntegerToString((long)st.latest_validation_time);
    j += "},";
-   j += "\"bull\":{\"high\":" + JsonNumber(st.bull_high) + ",\"low\":" + JsonNumber(st.bull_low) +
-        ",\"virgin\":" + (st.bull_virgin > 0.5 ? "true" : "false") + "},";
-   j += "\"bear\":{\"high\":" + JsonNumber(st.bear_high) + ",\"low\":" + JsonNumber(st.bear_low) +
-        ",\"virgin\":" + (st.bear_virgin > 0.5 ? "true" : "false") + "}";
+   j += "\"bull\":" + JsonZoneArray(bull_hist) + ",";
+   j += "\"bear\":" + JsonZoneArray(bear_hist);
    j += "}";
    return j;
 }
 
 //+------------------------------------------------------------------+
-void PublishFileFor(const TFState &st, const string symbol, const int minutes)
+void PublishFileFor(const TFState &st, const string symbol, const int minutes,
+                    OBZone &bull_hist[], OBZone &bear_hist[])
 {
    const string final_name = FileBridgeFolder + "\\" + GVBaseFor(symbol, minutes) + ".json";
    const string tmp_name   = final_name + ".tmp";
@@ -878,7 +1098,7 @@ void PublishFileFor(const TFState &st, const string symbol, const int minutes)
       return;
    }
 
-   FileWriteString(handle, BuildStateJsonFor(st, symbol, minutes));
+   FileWriteString(handle, BuildStateJsonFor(st, symbol, minutes, bull_hist, bear_hist));
    FileClose(handle);
 
    // Write-then-rename so an external reader (e.g. Python) can never observe
@@ -946,7 +1166,8 @@ void UpdateBiasLabels()
 //+------------------------------------------------------------------+
 void BuildPanelSection(const int idx, const string symbol,
                        bool has_bull, OBZone &latest_bull,
-                       bool has_bear, OBZone &latest_bear)
+                       bool has_bear, OBZone &latest_bear,
+                       OBZone &bull_hist[], OBZone &bear_hist[])
 {
    string text = "";
    text += "-- " + g_targets[idx].label + " --\n";
@@ -965,36 +1186,19 @@ void BuildPanelSection(const int idx, const string symbol,
    else
       text += "Supply: none\n";
 
-   int demand_count = 0, supply_count = 0;
-   for(int i = 0; i < ArraySize(zones); i++)
-   {
-      if(zones[i].direction == "BULLISH") demand_count++;
-      else if(zones[i].direction == "BEARISH") supply_count++;
-   }
+   int shown_demand = MathMin(ArraySize(bull_hist), MaxZonesToShow);
+   for(int i = 0; i < shown_demand; i++)
+      text += "  D" + IntegerToString(i + 1) + ") " +
+              PriceText(bull_hist[i].high, bull_hist[i].low) +
+              " | Virgin: " + BoolText(bull_hist[i].virgin) +
+              " | Detected: " + DetectionText(bull_hist[i]) + "\n";
 
-   int shown_demand = 0;
-   for(int i = ArraySize(zones) - 1; i >= 0 && shown_demand < MaxZonesToShow; i--)
-   {
-      if(zones[i].direction != "BULLISH")
-         continue;
-      text += "  D" + IntegerToString(shown_demand + 1) + ") " +
-              PriceText(zones[i].high, zones[i].low) +
-              " | Virgin: " + BoolText(zones[i].virgin) +
-              " | Detected: " + DetectionText(zones[i]) + "\n";
-      shown_demand++;
-   }
-
-   int shown_supply = 0;
-   for(int i = ArraySize(zones) - 1; i >= 0 && shown_supply < MaxZonesToShow; i--)
-   {
-      if(zones[i].direction != "BEARISH")
-         continue;
-      text += "  S" + IntegerToString(shown_supply + 1) + ") " +
-              PriceText(zones[i].high, zones[i].low) +
-              " | Virgin: " + BoolText(zones[i].virgin) +
-              " | Detected: " + DetectionText(zones[i]) + "\n";
-      shown_supply++;
-   }
+   int shown_supply = MathMin(ArraySize(bear_hist), MaxZonesToShow);
+   for(int i = 0; i < shown_supply; i++)
+      text += "  S" + IntegerToString(i + 1) + ") " +
+              PriceText(bear_hist[i].high, bear_hist[i].low) +
+              " | Virgin: " + BoolText(bear_hist[i].virgin) +
+              " | Detected: " + DetectionText(bear_hist[i]) + "\n";
 
    g_panel_section[idx] = text;
 }
