@@ -43,7 +43,7 @@ def load_config() -> Config:
 
     return Config(
         symbol=os.getenv("ETH_SMC_SYMBOL", "ETHUSD"),
-        lots=float(os.getenv("ETH_SMC_LOTS", "0.01")),
+        lots=float(os.getenv("ETH_SMC_LOTS", "1.0")),
         magic_number=int(os.getenv("ETH_SMC_MAGIC_NUMBER", "26072701")),
         deviation_points=int(os.getenv("ETH_SMC_DEVIATION_POINTS", "30")),
         poll_seconds=float(os.getenv("ETH_SMC_POLL_SECONDS", "1")),
