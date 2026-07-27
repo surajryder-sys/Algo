@@ -1,0 +1,99 @@
+"""Entry price / SL calculation for the ETHUSD SMC bot.
+
+Only one entry mechanism, applied uniformly to all three source timeframes
+(M5/M15/M30 -- no M1, no zone+buffer pending style): market order if price
+is close enough to the zone, otherwise a 48% pullback entry, otherwise no
+trade. Each timeframe has its own market-distance and pullback-range
+cutoffs, tuned for ETHUSD's price scale (unlike XAUUSD's algo/entries.py,
+these are plain USD distances, not scaled off a ratio).
+
+SL is always OB-structure-based: whichever of M5/M15/M30's current same-
+direction OB edge is closest to the entry price, minus/plus a fixed buffer.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional
+
+SL_BUFFER = 3.0
+PULLBACK_PCT = 0.48
+
+M5_MARKET_MAX = 10.0
+M5_PULLBACK_MIN = 10.0
+M5_PULLBACK_MAX = 25.0
+
+M15_MARKET_MAX = 10.0
+M15_PULLBACK_MIN = 10.0
+M15_PULLBACK_MAX = 30.0
+
+M30_MARKET_MAX = 10.0
+M30_PULLBACK_MIN = 10.0
+M30_PULLBACK_MAX = 30.0
+
+
+class EntryMode(Enum):
+    NONE = "NONE"
+    MARKET = "MARKET"
+    PENDING = "PENDING"
+
+
+@dataclass(frozen=True)
+class EntryPlan:
+    mode: EntryMode
+    entry_price: Optional[float]  # None when mode is MARKET (fill at send time) or NONE
+
+
+def market_or_pullback_entry(direction: int, ob_edge: float, detected_price: float,
+                             market_max: float, pullback_min: float, pullback_max: float,
+                             pullback_pct: float = PULLBACK_PCT) -> EntryPlan:
+    """direction: 1 bullish (ob_edge = ob.high), -1 bearish (ob_edge = ob.low).
+    distance is always measured as how far price ran away from the zone edge."""
+    if direction == 1:
+        distance = detected_price - ob_edge
+    else:
+        distance = ob_edge - detected_price
+
+    if distance < 0:
+        return EntryPlan(EntryMode.NONE, None)
+
+    if distance <= market_max:
+        return EntryPlan(EntryMode.MARKET, None)
+
+    if pullback_min < distance < pullback_max:
+        pullback_amount = distance * pullback_pct
+        if direction == 1:
+            entry = detected_price - pullback_amount   # == ob_edge + distance*(1-pct)
+        else:
+            entry = detected_price + pullback_amount
+        return EntryPlan(EntryMode.PENDING, entry)
+
+    return EntryPlan(EntryMode.NONE, None)
+
+
+def m5_entry(direction: int, ob_edge: float, detected_price: float) -> EntryPlan:
+    return market_or_pullback_entry(direction, ob_edge, detected_price,
+                                    M5_MARKET_MAX, M5_PULLBACK_MIN, M5_PULLBACK_MAX)
+
+
+def m15_entry(direction: int, ob_edge: float, detected_price: float) -> EntryPlan:
+    return market_or_pullback_entry(direction, ob_edge, detected_price,
+                                    M15_MARKET_MAX, M15_PULLBACK_MIN, M15_PULLBACK_MAX)
+
+
+def m30_entry(direction: int, ob_edge: float, detected_price: float) -> EntryPlan:
+    return market_or_pullback_entry(direction, ob_edge, detected_price,
+                                    M30_MARKET_MAX, M30_PULLBACK_MIN, M30_PULLBACK_MAX)
+
+
+def select_sl(direction: int, entry_price: float, candidate_edges: dict) -> Optional[float]:
+    """candidate_edges: {"M5": edge_or_None, "M15": edge_or_None, "M30": edge_or_None}
+    where each edge is that timeframe's current same-direction OB low (bullish)
+    or OB high (bearish). Picks whichever is closest to entry_price."""
+    available = {tf: edge for tf, edge in candidate_edges.items() if edge is not None}
+    if not available:
+        return None
+
+    closest_tf = min(available, key=lambda tf: abs(available[tf] - entry_price))
+    edge = available[closest_tf]
+    return edge - SL_BUFFER if direction == 1 else edge + SL_BUFFER
