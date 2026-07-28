@@ -10,6 +10,10 @@ Released three ways:
   - manually, via `python -m algo.reset_block <M1|M3|M5|all>`
   - manually, via the RESET M1/M3/M5 buttons on the bridge indicator's chart
     (see check_reset_requests() below)
+
+Block state is Python-side only, so it's also published to a small JSON
+status file the indicator reads and displays next to its reset buttons
+(see publish_status_file()) -- the reverse direction of the reset flags.
 """
 from __future__ import annotations
 
@@ -20,24 +24,36 @@ from typing import Optional
 from ob_bridge.reader import bridge_root
 
 RESET_FLAG_TIMEFRAMES = ("M1", "M3", "M5")
+STATUS_FILE_NAME = "BLOCK_STATUS.json"
 
 
 class BlockedZoneStore:
     def __init__(self, path: str):
         self._path = Path(path)
         self._blocked: dict = {}   # source_tf -> zone_key
+        self._reasons: dict = {}  # source_tf -> reason string
         self._load()
+        self.publish_status_file()
 
     def _load(self) -> None:
         if not self._path.exists():
             return
         try:
-            self._blocked = json.loads(self._path.read_text())
+            data = json.loads(self._path.read_text())
         except (json.JSONDecodeError, OSError):
-            self._blocked = {}
+            return
+
+        if "blocked" in data:
+            self._blocked = data.get("blocked", {})
+            self._reasons = data.get("reasons", {})
+        else:
+            # Older format: a flat {source_tf: zone_key} dict, no reasons.
+            self._blocked = data
+            self._reasons = {}
 
     def _save(self) -> None:
-        self._path.write_text(json.dumps(self._blocked))
+        self._path.write_text(json.dumps({"blocked": self._blocked, "reasons": self._reasons}))
+        self.publish_status_file()
 
     def blocked_zone_key(self, source_tf: str) -> Optional[str]:
         return self._blocked.get(source_tf)
@@ -45,12 +61,14 @@ class BlockedZoneStore:
     def is_blocked(self, source_tf: str, zone_key: str) -> bool:
         return self._blocked.get(source_tf) == zone_key
 
-    def block(self, source_tf: str, zone_key: str) -> None:
+    def block(self, source_tf: str, zone_key: str, reason: str = "unknown") -> None:
         self._blocked[source_tf] = zone_key
+        self._reasons[source_tf] = reason
         self._save()
 
     def release(self, source_tf: str) -> Optional[str]:
         removed = self._blocked.pop(source_tf, None)
+        self._reasons.pop(source_tf, None)
         if removed is not None:
             self._save()
         return removed
@@ -70,6 +88,30 @@ class BlockedZoneStore:
         if current_latest_zone_key is not None and current_latest_zone_key != blocked:
             print(f"[BLOCK] auto-released {source_tf} block ({blocked}): new same-direction zone superseded it")
             self.release(source_tf)
+
+    def publish_status_file(self) -> None:
+        """Writes a small status file the indicator polls to show BLOCKED/
+        CLEAR (and why) next to its RESET M1/M3/M5 buttons."""
+        status = {
+            tf: {
+                "blocked": tf in self._blocked,
+                "reason": self._reasons.get(tf),
+                "zone_key": self._blocked.get(tf),
+            }
+            for tf in RESET_FLAG_TIMEFRAMES
+        }
+
+        final_path = bridge_root() / STATUS_FILE_NAME
+        tmp_path = final_path.with_suffix(".json.tmp")
+        try:
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            # Compact (no spaces) -- the indicator's hand-written MQL5 parser
+            # assumes this exact format, matching how the OB bridge JSON is
+            # authored on the MQL5 side.
+            tmp_path.write_text(json.dumps(status, separators=(",", ":")))
+            tmp_path.replace(final_path)
+        except OSError:
+            pass
 
 
 def check_reset_requests(blocked: BlockedZoneStore) -> None:

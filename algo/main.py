@@ -37,6 +37,11 @@ class RuntimeState:
     classified as filled / bot-cancelled / manually cancelled."""
     seen_pending_tickets: set = field(default_factory=set)
     seen_position_tickets: set = field(default_factory=set)
+    # Tickets the bot itself just cancelled -- checked (and consumed) by
+    # check_manual_pending_cancellations so a bot-initiated cancel is never
+    # mistaken for a manual one. ORDER_REASON can't be used for this (it
+    # reflects who created the order, not who cancelled it).
+    expected_cancellations: set = field(default_factory=set)
 
 
 def _tf_bias(snap: Optional[OBSnapshot]) -> TFBias:
@@ -84,14 +89,14 @@ def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore, runtime: Ru
     disappeared_positions = runtime.seen_position_tickets - current_positions
 
     if disappeared_pending:
-        for source_tf, zone_key in check_manual_pending_cancellations(disappeared_pending):
+        for source_tf, zone_key in check_manual_pending_cancellations(disappeared_pending, runtime.expected_cancellations):
             print(f"[BLOCK] manual pending cancellation -> blocking {source_tf} zone {zone_key}")
-            blocked.block(source_tf, zone_key)
+            blocked.block(source_tf, zone_key, reason="manual_cancel")
 
     if disappeared_positions:
         for source_tf, zone_key in check_manual_position_closes(disappeared_positions):
             print(f"[BLOCK] manual position close -> blocking {source_tf} zone {zone_key}")
-            blocked.block(source_tf, zone_key)
+            blocked.block(source_tf, zone_key, reason="manual_close")
 
     runtime.seen_pending_tickets = current_pending
     runtime.seen_position_tickets = current_positions
@@ -138,6 +143,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         for order in broker.get_pending_orders_by_direction(cfg.symbol, cfg.magic_number, exit_dir):
             print(f"[EXIT] cancelling pending #{order.ticket}: Strong bias flip")
             if cfg.enable_trading:
+                runtime.expected_cancellations.add(order.ticket)
                 broker.cancel_pending_order(order.ticket)
 
     # 2. Trail every open position in its own direction, regardless of which
@@ -180,27 +186,29 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         if eligible(c):
             candidates.append(c)
 
-    winner = choose_winning_candidate(candidates)
+    winner = choose_winning_candidate(candidates, current_price)
     if winner is None:
         return
 
     pending_orders = broker.get_pending_orders_by_direction(cfg.symbol, cfg.magic_number, bias.direction)
     pending_ticket = None
     pending_zone_key = None
-    pending_event_time = None
+    pending_entry_price = None
     if pending_orders:
         pending_ticket = pending_orders[0].ticket
+        pending_entry_price = pending_orders[0].price_open
         parsed = parse_order_comment(pending_orders[0].comment)
         if parsed is not None:
-            pending_zone_key, pending_event_time = parsed
+            pending_zone_key, _pending_event_time = parsed
 
-    if not should_replace_pending(winner, pending_zone_key, pending_event_time):
+    if not should_replace_pending(winner, pending_zone_key, pending_entry_price, current_price):
         return
 
     if pending_ticket is not None:
-        print(f"[REPLACE] cancelling pending #{pending_ticket} for newer {winner.source_tf} setup")
+        print(f"[REPLACE] cancelling pending #{pending_ticket} for closer {winner.source_tf} setup")
         if not cfg.enable_trading:
             return  # dry run: never place the replacement without a real cancel first
+        runtime.expected_cancellations.add(pending_ticket)
         result = broker.cancel_pending_order(pending_ticket)
         if not result.ok:
             print(f"[REPLACE] cancel failed: {result.retcode} {result.comment}")
@@ -214,6 +222,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         print(f"[REPLACE] cancelling stale opposite-direction pending #{order.ticket} for new "
               f"{winner.source_tf} {'BUY' if winner.direction == 1 else 'SELL'} setup")
         if cfg.enable_trading:
+            runtime.expected_cancellations.add(order.ticket)
             result = broker.cancel_pending_order(order.ticket)
             if not result.ok:
                 print(f"[REPLACE] opposite-direction cancel failed: {result.retcode} {result.comment}")
@@ -262,6 +271,19 @@ def main() -> None:
                 run_once(cfg, store, blocked, runtime)
             except Exception as exc:
                 print(f"[ERROR] {exc}")
+                # The MT5 IPC channel can get stuck without the process
+                # crashing (seen live: a fresh connection works fine while
+                # this process's own channel keeps failing every poll).
+                # Reconnecting here means a degraded connection self-heals
+                # on the next cycle instead of failing silently forever.
+                # NOTE: calling shutdown() first hung the process live (the
+                # channel was already broken, and closing+reopening it
+                # blocked indefinitely) -- re-initialize only, no shutdown.
+                try:
+                    broker.connect(cfg)
+                    print("[RECOVERY] reconnected to MT5")
+                except Exception as reconnect_exc:
+                    print(f"[RECOVERY] reconnect failed: {reconnect_exc}")
             time.sleep(cfg.poll_seconds)
     except KeyboardInterrupt:
         pass

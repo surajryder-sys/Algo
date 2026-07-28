@@ -129,16 +129,45 @@ def _htf_edges(direction: int, m15: Optional[OBSnapshot], m5: Optional[OBSnapsho
     return {"M15": edge(m15), "M5": edge(m5), "M3": edge(m3)}
 
 
+def _overall_latest_and_previous(snap: OBSnapshot):
+    """The two most recent M1 zones OVERALL, mixing bull and bear, sorted by
+    origin time -- not "the two most recent in one direction's filtered
+    list", which would silently skip over opposite-direction zones that
+    happened in between and falsely call it a sequence. Returns
+    ((direction, zone), (direction, zone)) for (latest, previous), or None
+    if fewer than two zones exist total."""
+    tagged = [(1, z) for z in snap.bull] + [(-1, z) for z in snap.bear]
+    if len(tagged) < 2:
+        return None
+    tagged.sort(key=lambda t: t[1].start_time, reverse=True)
+    return tagged[0], tagged[1]
+
+
 def build_m1_candidate(direction: int, m1: Optional[OBSnapshot],
                        m15: Optional[OBSnapshot], m5: Optional[OBSnapshot],
                        m3: Optional[OBSnapshot]) -> Optional[TradeCandidate]:
     if m1 is None:
         return None
 
-    zone = m1.latest_untested(_direction_key(direction))
-    if zone is None:
+    # M1 requires a genuine two-OB sequence: the newest AND second-newest
+    # zones OVERALL (regardless of direction) must both match the bias
+    # direction -- mirrors the old EA's ValidLTFSequence check exactly. An
+    # opposite-direction zone sitting in between breaks the sequence. Only
+    # the latest zone's virgin status is checked -- no fallback to the
+    # previous one as an alternate entry; it exists purely to confirm the
+    # sequence, matching the old EA (which never used it as an entry source).
+    pair = _overall_latest_and_previous(m1)
+    if pair is None:
         return None
 
+    (latest_dir, latest_zone), (prev_dir, _prev_zone) = pair
+    if latest_dir != direction or prev_dir != direction:
+        return None
+
+    if not latest_zone.virgin:
+        return None
+
+    zone = latest_zone
     ob_edge = zone.high if direction == 1 else zone.low
     entry = m1_entry_price(direction, ob_edge)
 
@@ -158,10 +187,17 @@ def _build_m3_or_m5_candidate(source_tf: str, entry_fn, direction: int,
     if snap is None:
         return None
 
-    zone = snap.latest_untested(_direction_key(direction))
-    # A zone with no live detection (still "baseline") has no detected_price
-    # to measure distance from -- can't classify market/pending/none yet.
-    if zone is None or zone.detected_time <= 0:
+    # Unlike M1, M3/M5 never fall back to an older zone in history. If the
+    # single most recent OB isn't virgin (or isn't live-detected yet), there
+    # is no candidate this cycle -- jumping to an older zone would mean
+    # trading a setup whose distance/detection-price math has nothing to do
+    # with why price is where it currently is.
+    history = snap.bull if direction == 1 else snap.bear
+    if not history:
+        return None
+
+    zone = history[0]
+    if not zone.virgin or zone.detected_time <= 0:
         return None
 
     ob_edge = zone.high if direction == 1 else zone.low
@@ -189,27 +225,40 @@ def build_m5_candidate(direction: int, m5: Optional[OBSnapshot], m15: Optional[O
     return _build_m3_or_m5_candidate("M5", m5_entry, direction, m5, m15, m5, m3, current_price)
 
 
-def choose_winning_candidate(candidates: list) -> Optional[TradeCandidate]:
+def _distance_to_price(candidate: TradeCandidate, current_price: float) -> float:
+    """MARKET-mode candidates fire immediately at current price -- zero
+    distance, so they always win over any PENDING candidate at a real
+    distance away."""
+    if candidate.entry_price is None:
+        return 0.0
+    return abs(candidate.entry_price - current_price)
+
+
+def choose_winning_candidate(candidates: list, current_price: float) -> Optional[TradeCandidate]:
     """Among currently-valid candidates (already filtered to allowed sources
-    and to un-traded zones by the caller), the newest by event_time wins."""
+    and to un-traded zones by the caller), whichever entry price sits
+    closest to the current price wins -- not whichever is newest. Newest
+    event_time only breaks an exact distance tie."""
     valid = [c for c in candidates if c is not None]
     if not valid:
         return None
-    return max(valid, key=lambda c: c.event_time)
+    return min(valid, key=lambda c: (_distance_to_price(c, current_price), -c.event_time))
 
 
 def should_replace_pending(winning: Optional[TradeCandidate],
                            pending_zone_key: Optional[str],
-                           pending_event_time: Optional[int]) -> bool:
-    """True only if a genuinely newer setup should cancel-and-replace the
-    live pending order. The caller must compute `winning` BEFORE cancelling
-    anything, and only actually cancel once this returns True."""
+                           pending_entry_price: Optional[float],
+                           current_price: float) -> bool:
+    """True only if the winning candidate should cancel-and-replace the live
+    pending order -- i.e. its entry price is genuinely closer to the current
+    price than the pending order's. The caller must compute `winning` BEFORE
+    cancelling anything, and only actually cancel once this returns True."""
     if winning is None:
         return False
     if pending_zone_key is None:
         return True  # nothing pending yet -- just place it
     if winning.zone_key == pending_zone_key:
         return False  # same setup already owns the pending order
-    if pending_event_time is None:
+    if pending_entry_price is None:
         return False  # unknown ownership -- never blind-cancel
-    return winning.event_time > pending_event_time
+    return _distance_to_price(winning, current_price) < abs(pending_entry_price - current_price)
