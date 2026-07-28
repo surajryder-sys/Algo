@@ -44,6 +44,11 @@ class RuntimeState:
     classified as filled / bot-cancelled / manually cancelled."""
     seen_pending_tickets: set = field(default_factory=set)
     seen_position_tickets: set = field(default_factory=set)
+    # Tickets the bot itself just cancelled -- checked (and consumed) by
+    # check_manual_pending_cancellations so a bot-initiated cancel is never
+    # mistaken for a manual one. ORDER_REASON can't be used for this (it
+    # reflects who created the order, not who cancelled it).
+    expected_cancellations: set = field(default_factory=set)
 
 
 def _tf_bias(snap: Optional[OBSnapshot]) -> TFBias:
@@ -91,7 +96,7 @@ def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore, runtime: Ru
     disappeared_positions = runtime.seen_position_tickets - current_positions
 
     if disappeared_pending:
-        for source_tf, zone_key in check_manual_pending_cancellations(disappeared_pending):
+        for source_tf, zone_key in check_manual_pending_cancellations(disappeared_pending, runtime.expected_cancellations):
             print(f"[BLOCK] manual pending cancellation -> blocking {source_tf} zone {zone_key}")
             blocked.block(source_tf, zone_key, reason="manual_cancel")
 
@@ -144,6 +149,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         for order in broker.get_pending_orders_by_direction(cfg.symbol, cfg.magic_number, exit_dir):
             print(f"[EXIT] cancelling pending #{order.ticket}: Strong bias flip")
             if cfg.enable_trading:
+                runtime.expected_cancellations.add(order.ticket)
                 broker.cancel_pending_order(order.ticket)
 
     # 2. Trail every open position in its own direction, regardless of which
@@ -208,6 +214,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         print(f"[REPLACE] cancelling pending #{pending_ticket} for closer {winner.source_tf} setup")
         if not cfg.enable_trading:
             return  # dry run: never place the replacement without a real cancel first
+        runtime.expected_cancellations.add(pending_ticket)
         result = broker.cancel_pending_order(pending_ticket)
         if not result.ok:
             print(f"[REPLACE] cancel failed: {result.retcode} {result.comment}")
@@ -221,6 +228,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         print(f"[REPLACE] cancelling stale opposite-direction pending #{order.ticket} for new "
               f"{winner.source_tf} {'BUY' if winner.direction == 1 else 'SELL'} setup")
         if cfg.enable_trading:
+            runtime.expected_cancellations.add(order.ticket)
             result = broker.cancel_pending_order(order.ticket)
             if not result.ok:
                 print(f"[REPLACE] opposite-direction cancel failed: {result.retcode} {result.comment}")
