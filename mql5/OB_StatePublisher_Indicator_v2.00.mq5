@@ -241,6 +241,9 @@ void OnDeinit(const int reason)
       ObjectDelete(0, BiasLabelName(i));
    for(int i = 0; i < g_vob_slot_count; i++)
       ObjectDelete(0, "OBSP_VOB_" + IntegerToString(i));
+   ObjectDelete(0, "OBSP_BLOCKSTATUS_M1");
+   ObjectDelete(0, "OBSP_BLOCKSTATUS_M3");
+   ObjectDelete(0, "OBSP_BLOCKSTATUS_M5");
    DeleteResetButtons();
    Comment("");
 }
@@ -298,7 +301,9 @@ void ScanAndPublishAll()
    if(ShowVirginObList)
       vob_bottom_y = UpdateVirginObLabels();
 
-   RepositionResetButtons(vob_bottom_y + ResetButtonYGap);
+   int status_y = vob_bottom_y + ResetButtonYGap;
+   UpdateBlockStatusLabels(status_y);
+   RepositionResetButtons(status_y + 16);
 
    if(ShowPanel)
       DrawCombinedPanel(symbol);
@@ -329,6 +334,101 @@ void CreateResetButtons()
    CreateResetButton("OBSP_RESET_M1", "RESET M1", ResetButtonX, BiasLabelYStart);
    CreateResetButton("OBSP_RESET_M3", "RESET M3", ResetButtonX + 87, BiasLabelYStart);
    CreateResetButton("OBSP_RESET_M5", "RESET M5", ResetButtonX + 174, BiasLabelYStart);
+}
+
+//+------------------------------------------------------------------+
+// Reads BLOCK_STATUS.json (published by the Python bot's BlockedZoneStore)
+// for one timeframe key. Hand-parsed against the known compact format
+// (no generic JSON lib available without external includes).
+bool ReadBlockStatus(const string tf, bool &is_blocked, string &reason)
+{
+   is_blocked = false;
+   reason = "";
+
+   string path = FileBridgeFolder + "\\BLOCK_STATUS.json";
+   int handle = FileOpen(path, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(handle == INVALID_HANDLE)
+      return false;
+
+   string content = "";
+   while(!FileIsEnding(handle))
+      content += FileReadString(handle);
+   FileClose(handle);
+
+   int tf_pos = StringFind(content, "\"" + tf + "\":{");
+   if(tf_pos < 0)
+      return false;
+
+   int blocked_key_pos = StringFind(content, "\"blocked\":", tf_pos);
+   if(blocked_key_pos < 0)
+      return false;
+   int blocked_val_pos = blocked_key_pos + StringLen("\"blocked\":");
+   is_blocked = (StringSubstr(content, blocked_val_pos, 4) == "true");
+
+   int reason_key_pos = StringFind(content, "\"reason\":", tf_pos);
+   if(reason_key_pos >= 0)
+   {
+      int reason_val_pos = reason_key_pos + StringLen("\"reason\":");
+      if(StringSubstr(content, reason_val_pos, 1) == "\"")
+      {
+         int end_quote = StringFind(content, "\"", reason_val_pos + 1);
+         if(end_quote > reason_val_pos)
+            reason = StringSubstr(content, reason_val_pos + 1, end_quote - reason_val_pos - 1);
+      }
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+void UpdateBlockStatusLabels(const int y)
+{
+   if(!ShowResetButtons)
+      return;
+
+   string tfs[3]       = {"M1", "M3", "M5"};
+   int    x_offsets[3]  = {0, 87, 174};
+
+   for(int i = 0; i < 3; i++)
+   {
+      bool   is_blocked;
+      string reason;
+      bool   ok = ReadBlockStatus(tfs[i], is_blocked, reason);
+
+      string txt;
+      color  clr;
+      if(!ok)
+      {
+         txt = tfs[i] + ": --";
+         clr = NeutralBiasColor;
+      }
+      else if(is_blocked)
+      {
+         txt = tfs[i] + ": BLOCKED" + (reason != "" ? " (" + reason + ")" : "");
+         clr = clrOrange;
+      }
+      else
+      {
+         txt = tfs[i] + ": CLEAR";
+         clr = clrGray;
+      }
+
+      string name = "OBSP_BLOCKSTATUS_" + tfs[i];
+      if(ObjectFind(0, name) < 0)
+      {
+         ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+         ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+         ObjectSetInteger(0, name, OBJPROP_BACK, false);
+      }
+      ObjectSetInteger(0, name, OBJPROP_CORNER, ResetButtonCorner);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, ResetButtonX + x_offsets[i]);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+      ObjectSetString(0, name, OBJPROP_FONT, BiasLabelFont);
+      ObjectSetString(0, name, OBJPROP_TEXT, txt);
+   }
 }
 
 //+------------------------------------------------------------------+
