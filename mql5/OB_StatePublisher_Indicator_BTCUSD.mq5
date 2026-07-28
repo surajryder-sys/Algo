@@ -22,7 +22,7 @@
 
 input string OB_ObjectKeyword               = "pineBox";
 input string BridgeSymbol                   = "";      // empty = use the attached chart's symbol
-input string TargetTimeframes               = "M30,M15,M5";
+input string TargetTimeframes               = "H4,H2,H1,M30,M15,M5";
 input bool   ShowPanel                      = true;
 input int    ScanEverySeconds               = 1;
 input int    MaxZonesToShow                 = 4;
