@@ -1,33 +1,32 @@
-"""SMC bias state machine: combines M15/M5/M3 order-block direction into a
-Strong/Medium/ShortTerm call, per the rules given for the XAUUSD EA.
+"""SMC bias state machine: combines M15/M5 order-block direction into a
+Bullish/Bearish call, per the simplified rules for the XAUUSD EA. M3 does
+not vote on bias at all -- it only ever checks its own OB against whichever
+direction wins here.
 
-Core rule: whichever of M15/M5/M3 has the most recently formed OB (by origin
-time, not detection time) is the "trigger" for the current direction call.
-The other two timeframes either confirm or disagree with the trigger's
-direction, and that agreement count sets the state:
+Core rule:
+  M15 and M5's latest OBs agree            -> full Bullish/Bearish
+  they disagree                            -> whichever OB is more recent
+                                               wins the direction, labeled
+                                               ShortTerm
 
-  both agree            -> STRONG
-  one agrees, one doesn't -> MEDIUM
-  neither agrees (trigger is the lone signal) -> SHORTTERM, sourced from
-      whichever single timeframe (M3 or M5) is the trigger
-
-ShortTerm can coexist with an opposite-direction position; Strong blocks/
-closes the opposite direction entirely. Medium allows the agreeing
-timeframes (plus M1) to trade; the disagreeing timeframe does not.
+Both Bullish and Bullish ShortTerm allow the same entries (M1/M3/M5) in the
+bullish direction -- ShortTerm is a weaker confirmation, not a smaller set of
+allowed sources. The only place the full/ShortTerm distinction matters is
+nowhere anymore: a flip to the opposite direction (full or ShortTerm) always
+forces the existing opposite-direction position closed, otherwise a stale
+position could block the bot from ever entering the new direction until its
+own SL/manual close.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 
 class BiasState(Enum):
     NONE = "NONE"
-    BULLISH_STRONG = "BULLISH_STRONG"
-    BEARISH_STRONG = "BEARISH_STRONG"
-    BULLISH_MEDIUM = "BULLISH_MEDIUM"
-    BEARISH_MEDIUM = "BEARISH_MEDIUM"
+    BULLISH = "BULLISH"
+    BEARISH = "BEARISH"
     BULLISH_SHORTTERM = "BULLISH_SHORTTERM"
     BEARISH_SHORTTERM = "BEARISH_SHORTTERM"
 
@@ -41,57 +40,31 @@ class TFBias:
 @dataclass(frozen=True)
 class BiasResult:
     state: BiasState
-    direction: int              # 1, -1, or 0
-    trigger_tf: str              # "M15" / "M5" / "M3" / "" if NONE
-    agreeing_tfs: tuple          # the other timeframe(s) that agree with trigger
-    disagreeing_tfs: tuple       # the other timeframe(s) that don't
-    shortterm_source_tf: Optional[str] = None  # set only for SHORTTERM states
+    direction: int    # 1, -1, or 0
 
 
-def compute_bias(m15: TFBias, m5: TFBias, m3: TFBias) -> BiasResult:
-    tfs = {"M15": m15, "M5": m5, "M3": m3}
-    origins = {tf: b.origin_time for tf, b in tfs.items()}
+def compute_bias(m15: TFBias, m5: TFBias) -> BiasResult:
+    if m15.direction == 0 and m5.direction == 0:
+        return BiasResult(BiasState.NONE, 0)
 
-    trigger_tf = max(origins, key=lambda tf: origins[tf])
-    if origins[trigger_tf] == 0:
-        return BiasResult(BiasState.NONE, 0, "", (), ())
+    if m15.direction == m5.direction:
+        state = BiasState.BULLISH if m15.direction == 1 else BiasState.BEARISH
+        return BiasResult(state, m15.direction)
 
-    trigger_dir = tfs[trigger_tf].direction
-    if trigger_dir == 0:
-        return BiasResult(BiasState.NONE, 0, trigger_tf, (), ())
+    # Disagreement (including one side having no OB yet): recency wins.
+    winner_dir = m15.direction if m15.origin_time >= m5.origin_time else m5.direction
+    if winner_dir == 0:
+        winner_dir = m15.direction or m5.direction
 
-    others = [tf for tf in tfs if tf != trigger_tf]
-    agreeing = tuple(tf for tf in others if tfs[tf].direction == trigger_dir)
-    disagreeing = tuple(tf for tf in others if tfs[tf].direction != trigger_dir)
-
-    if len(agreeing) == 2:
-        state = BiasState.BULLISH_STRONG if trigger_dir == 1 else BiasState.BEARISH_STRONG
-        return BiasResult(state, trigger_dir, trigger_tf, agreeing, disagreeing)
-
-    if len(agreeing) == 1:
-        state = BiasState.BULLISH_MEDIUM if trigger_dir == 1 else BiasState.BEARISH_MEDIUM
-        return BiasResult(state, trigger_dir, trigger_tf, agreeing, disagreeing)
-
-    # Neither other timeframe agrees: trigger is the lone signal.
-    state = BiasState.BULLISH_SHORTTERM if trigger_dir == 1 else BiasState.BEARISH_SHORTTERM
-    return BiasResult(state, trigger_dir, trigger_tf, agreeing, disagreeing,
-                       shortterm_source_tf=trigger_tf)
+    state = BiasState.BULLISH_SHORTTERM if winner_dir == 1 else BiasState.BEARISH_SHORTTERM
+    return BiasResult(state, winner_dir)
 
 
 def allowed_entry_sources(bias: BiasResult) -> frozenset:
     """Which of {"M1","M3","M5"} may attempt an entry for the current bias
-    direction. M15 never executes trades itself (bias-only)."""
-    if bias.state in (BiasState.BULLISH_STRONG, BiasState.BEARISH_STRONG):
-        return frozenset({"M1", "M3", "M5"})
-
-    if bias.state in (BiasState.BULLISH_MEDIUM, BiasState.BEARISH_MEDIUM):
-        allowed = {"M1"}
-        for tf in ("M3", "M5"):
-            if tf == bias.trigger_tf or tf in bias.agreeing_tfs:
-                allowed.add(tf)
-        return frozenset(allowed)
-
-    if bias.state in (BiasState.BULLISH_SHORTTERM, BiasState.BEARISH_SHORTTERM):
-        return frozenset({"M1", bias.shortterm_source_tf})
-
-    return frozenset()
+    direction. M15 never executes trades itself (bias-only). Full and
+    ShortTerm allow the identical set -- the distinction only matters for
+    the force-close rule in management.py."""
+    if bias.direction == 0:
+        return frozenset()
+    return frozenset({"M1", "M3", "M5"})

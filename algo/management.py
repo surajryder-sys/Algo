@@ -1,19 +1,22 @@
-"""Position management: trailing SL and the Strong-state forced exit rule.
+"""Position management: trailing SL and the bias-flip forced exit rule.
 
 Trailing applies uniformly regardless of which timeframe originated the
 trade (M1, M3, or M5): always follow whichever of M15/M5/M3's current
 same-direction OB edge is closest to the CURRENT price, moving SL only in
 the favorable direction (raise for longs, lower for shorts) -- never loosen.
 
-Strong bias unconditionally blocks/closes the opposite direction, regardless
-of which state (even a ShortTerm-protected coexisting position) opened it.
-Medium/ShortTerm/None never force an exit on their own.
+Only one position is ever meant to be open at a time, matching the current
+bias direction. Any bias direction (full or ShortTerm) unconditionally
+forces the opposite-direction position/pending order closed -- otherwise a
+stale position could sit there blocking new entries in the now-correct
+direction until its own SL or a manual close, which defeats the point of
+having a single live bias.
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from algo.bias import BiasResult, BiasState
+from algo.bias import BiasResult
 from algo.entries import select_sl
 
 
@@ -36,10 +39,11 @@ def compute_trailing_sl(direction: int, current_price: float, current_sl: Option
 
 
 def bias_flip_exit_direction(bias: BiasResult) -> Optional[int]:
-    """Direction (1 or -1) whose open/pending exposure must be closed/blocked
-    right now, or None if nothing is forced. Only STRONG triggers this."""
-    if bias.state == BiasState.BULLISH_STRONG:
+    """Direction (1 or -1) whose open/pending exposure must be closed/
+    cancelled right now, or None if bias has no direction. Any bias
+    direction -- full or ShortTerm -- forces the opposite side out."""
+    if bias.direction == 1:
         return -1
-    if bias.state == BiasState.BEARISH_STRONG:
+    if bias.direction == -1:
         return 1
     return None

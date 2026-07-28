@@ -116,7 +116,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     m3 = read_zone(cfg.symbol, 3)
     m1 = read_zone(cfg.symbol, 1)
 
-    bias = compute_bias(_tf_bias(m15), _tf_bias(m5), _tf_bias(m3))
+    bias = compute_bias(_tf_bias(m15), _tf_bias(m5))
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = (bid + ask) / 2.0
 
@@ -132,16 +132,17 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         sync_manual_intervention(cfg, blocked, runtime)
         release_stale_blocks(blocked, m1, m3, m5)
 
-    # 1. Strong forces the opposite direction closed/blocked, unconditionally --
-    #    even a ShortTerm-protected coexisting position on that side.
+    # 1. Any bias direction (full or ShortTerm) unconditionally forces the
+    #    opposite direction closed/cancelled -- only one position is ever
+    #    meant to be open at a time.
     exit_dir = bias_flip_exit_direction(bias)
     if exit_dir is not None:
         for pos in broker.get_positions_by_direction(cfg.symbol, cfg.magic_number, exit_dir):
-            print(f"[EXIT] closing {'BUY' if exit_dir == 1 else 'SELL'} position #{pos.ticket}: Strong bias flip")
+            print(f"[EXIT] closing {'BUY' if exit_dir == 1 else 'SELL'} position #{pos.ticket}: bias flip")
             if cfg.enable_trading:
                 broker.close_position(cfg.symbol, pos, cfg.deviation_points)
         for order in broker.get_pending_orders_by_direction(cfg.symbol, cfg.magic_number, exit_dir):
-            print(f"[EXIT] cancelling pending #{order.ticket}: Strong bias flip")
+            print(f"[EXIT] cancelling pending #{order.ticket}: bias flip")
             if cfg.enable_trading:
                 runtime.expected_cancellations.add(order.ticket)
                 broker.cancel_pending_order(order.ticket)
@@ -214,18 +215,9 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
             print(f"[REPLACE] cancel failed: {result.retcode} {result.comment}")
             return
 
-    # A stale pending order left over in the OPPOSITE direction (e.g. from
-    # before bias flipped) isn't a committed trade -- only open positions get
-    # the Strong/ShortTerm coexistence protection. Clear it before entering
-    # the new direction so it can't unexpectedly fill later on its own.
-    for order in broker.get_pending_orders_by_direction(cfg.symbol, cfg.magic_number, -bias.direction):
-        print(f"[REPLACE] cancelling stale opposite-direction pending #{order.ticket} for new "
-              f"{winner.source_tf} {'BUY' if winner.direction == 1 else 'SELL'} setup")
-        if cfg.enable_trading:
-            runtime.expected_cancellations.add(order.ticket)
-            result = broker.cancel_pending_order(order.ticket)
-            if not result.ok:
-                print(f"[REPLACE] opposite-direction cancel failed: {result.retcode} {result.comment}")
+    # No separate opposite-direction pending cleanup needed here: step 1
+    # already unconditionally cancels every opposite-direction pending order
+    # and position on every cycle bias has a direction, before this point.
 
     comment = order_comment(winner)
 
