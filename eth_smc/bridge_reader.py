@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 TIMEFRAMES: dict[str, int] = {
-    "M5": 5, "M15": 15, "M30": 30,
+    "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H2": 120, "H4": 240,
 }
 
 BRIDGE_FOLDER_NAME = "OBBridge"
@@ -122,6 +122,6 @@ def read_zone(symbol: str, tf_minutes: int) -> Optional[OBSnapshot]:
 
 
 def read_all(symbol: str) -> dict[str, Optional[OBSnapshot]]:
-    """One snapshot per configured timeframe label (M5/M15/M30); None where
-    the indicator hasn't published for that timeframe yet."""
+    """One snapshot per configured timeframe label (M5/M15/M30/H1/H2/H4);
+    None where the indicator hasn't published for that timeframe yet."""
     return {label: read_zone(symbol, minutes) for label, minutes in TIMEFRAMES.items()}

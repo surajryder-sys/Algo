@@ -24,6 +24,7 @@ import MetaTrader5 as mt5
 
 from btc_smc.bridge_reader import read_zone, OBSnapshot
 from btc_smc import broker
+from btc_smc.alerts import AlertedZoneStore, check_virgin_zone_alerts
 from btc_smc.bias import compute_bias, TFBias, allowed_entry_sources
 from btc_smc.blocking import BlockedZoneStore, check_reset_requests
 from btc_smc.candidates import (
@@ -117,7 +118,8 @@ def release_stale_blocks(blocked: BlockedZoneStore, m5: Optional[OBSnapshot],
             blocked.release_if_stale(source_tf, direction, latest_key)
 
 
-def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, runtime: RuntimeState) -> None:
+def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, runtime: RuntimeState,
+             alerts: AlertedZoneStore) -> None:
     m5 = read_zone(cfg.symbol, 5)
     m15 = read_zone(cfg.symbol, 15)
     m30 = read_zone(cfg.symbol, 30)
@@ -137,6 +139,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         #     has superseded.
         sync_manual_intervention(cfg, blocked, runtime)
         release_stale_blocks(blocked, m5, m15, m30)
+        check_virgin_zone_alerts(cfg, current_price, alerts)
 
     # 1. Strong forces the opposite direction closed/blocked, unconditionally --
     #    even a ShortTerm-protected coexisting position on that side.
@@ -269,12 +272,13 @@ def main() -> None:
     broker.connect(cfg)
     store = TradedZoneStore(cfg.state_file)
     blocked = BlockedZoneStore(cfg.blocked_state_file, cfg.symbol)
+    alerts = AlertedZoneStore(cfg.alert_state_file)
     runtime = RuntimeState()
 
     try:
         while True:
             try:
-                run_once(cfg, store, blocked, runtime)
+                run_once(cfg, store, blocked, runtime, alerts)
             except Exception as exc:
                 print(f"[ERROR] {exc}")
                 # The MT5 IPC channel can get stuck without the process
