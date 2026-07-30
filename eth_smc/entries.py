@@ -89,11 +89,19 @@ def m30_entry(direction: int, ob_edge: float, detected_price: float) -> EntryPla
 def select_sl(direction: int, entry_price: float, candidate_edges: dict) -> Optional[float]:
     """candidate_edges: {"M5": edge_or_None, "M15": edge_or_None, "M30": edge_or_None}
     where each edge is that timeframe's current same-direction OB low (bullish)
-    or OB high (bearish). Picks whichever is closest to entry_price."""
-    available = {tf: edge for tf, edge in candidate_edges.items() if edge is not None}
-    if not available:
+    or OB high (bearish). Picks whichever is closest to entry_price, but only
+    among edges on the geometrically valid side of entry -- below entry for a
+    buy, above entry for a sell. An edge on the wrong side would produce a
+    backwards SL (broker-rejected as invalid stops) and must never be chosen
+    just for being numerically closest."""
+    valid_side = {
+        tf: edge for tf, edge in candidate_edges.items()
+        if edge is not None and ((direction == 1 and edge < entry_price) or
+                                  (direction == -1 and edge > entry_price))
+    }
+    if not valid_side:
         return None
 
-    closest_tf = min(available, key=lambda tf: abs(available[tf] - entry_price))
-    edge = available[closest_tf]
+    closest_tf = min(valid_side, key=lambda tf: abs(valid_side[tf] - entry_price))
+    edge = valid_side[closest_tf]
     return edge - SL_BUFFER if direction == 1 else edge + SL_BUFFER
