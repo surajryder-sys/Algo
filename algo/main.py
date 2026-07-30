@@ -17,6 +17,7 @@ import MetaTrader5 as mt5
 
 from ob_bridge.reader import read_zone, OBSnapshot
 from algo import broker
+from algo.alerts import AlertedZoneStore, check_virgin_zone_alerts
 from algo.bias import compute_bias, TFBias, allowed_entry_sources
 from algo.blocking import BlockedZoneStore, check_reset_requests
 from algo.candidates import (
@@ -110,7 +111,8 @@ def release_stale_blocks(blocked: BlockedZoneStore, m1: Optional[OBSnapshot],
             blocked.release_if_stale(source_tf, direction, latest_key)
 
 
-def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, runtime: RuntimeState) -> None:
+def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, runtime: RuntimeState,
+             alerts: AlertedZoneStore) -> None:
     m15 = read_zone(cfg.symbol, 15)
     m5 = read_zone(cfg.symbol, 5)
     m3 = read_zone(cfg.symbol, 3)
@@ -131,6 +133,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         #     has superseded.
         sync_manual_intervention(cfg, blocked, runtime)
         release_stale_blocks(blocked, m1, m3, m5)
+        check_virgin_zone_alerts(cfg, current_price, alerts)
 
     # 1. Any bias direction (full or ShortTerm) unconditionally forces the
     #    opposite direction closed/cancelled -- only one position is ever
@@ -255,12 +258,13 @@ def main() -> None:
     broker.connect(cfg)
     store = TradedZoneStore(cfg.state_file)
     blocked = BlockedZoneStore(cfg.blocked_state_file)
+    alerts = AlertedZoneStore(cfg.alert_state_file)
     runtime = RuntimeState()
 
     try:
         while True:
             try:
-                run_once(cfg, store, blocked, runtime)
+                run_once(cfg, store, blocked, runtime, alerts)
             except Exception as exc:
                 print(f"[ERROR] {exc}")
                 # The MT5 IPC channel can get stuck without the process

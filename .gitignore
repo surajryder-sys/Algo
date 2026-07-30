@@ -12,6 +12,7 @@ zone_signals_log.txt
 zone_watch_state.json
 smc_bot_state.json
 smc_bot_blocks.json
+smc_bot_alerts.json
 eth_smc_bot_state.json
 eth_smc_bot_blocks.json
 eth_smc_live_run.log

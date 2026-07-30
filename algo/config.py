@@ -31,6 +31,9 @@ class Config:
     enable_trading: bool
     state_file: str
     blocked_state_file: str
+    alert_state_file: str
+    telegram_bot_token: str | None
+    telegram_chat_id: str | None
 
     mt5_terminal_path: str | None
     mt5_login: int | None
@@ -50,6 +53,9 @@ def load_config() -> Config:
         enable_trading=_env_bool("SMC_ENABLE_TRADING", False),
         state_file=os.getenv("SMC_STATE_FILE", "smc_bot_state.json"),
         blocked_state_file=os.getenv("SMC_BLOCKED_STATE_FILE", "smc_bot_blocks.json"),
+        alert_state_file=os.getenv("SMC_ALERT_STATE_FILE", "smc_bot_alerts.json"),
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
+        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID") or None,
         mt5_terminal_path=os.getenv("MT5_TERMINAL_PATH") or None,
         mt5_login=int(login_raw) if login_raw else None,
         mt5_password=os.getenv("MT5_PASSWORD") or None,
