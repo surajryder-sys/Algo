@@ -24,7 +24,7 @@ import MetaTrader5 as mt5
 from eth_smc.bridge_reader import read_zone, OBSnapshot
 from eth_smc import broker
 from eth_smc.alerts import AlertedZoneStore, check_virgin_zone_alerts
-from eth_smc.bias import compute_bias, TFBias, allowed_entry_sources
+from eth_smc.bias import compute_bias, TFBias, allowed_entry_sources, BiasState
 from eth_smc.blocking import BlockedZoneStore, check_reset_requests
 from eth_smc.candidates import (
     build_m5_candidate, build_m15_candidate, build_m30_candidate,
@@ -49,6 +49,11 @@ class RuntimeState:
     # mistaken for a manual one. ORDER_REASON can't be used for this (it
     # reflects who created the order, not who cancelled it).
     expected_cancellations: set = field(default_factory=set)
+    # Last bias state seen, so a transition can be logged (with the trigger
+    # timeframe and every TF's raw direction/origin) instead of the
+    # resulting EXIT/ENTRY actions being the only visible trace of *why*
+    # the bot did something.
+    last_bias_state: Optional[BiasState] = None
 
 
 def _tf_bias(snap: Optional[OBSnapshot]) -> TFBias:
@@ -123,7 +128,18 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     m15 = read_zone(cfg.symbol, 15)
     m30 = read_zone(cfg.symbol, 30)
 
-    bias = compute_bias(_tf_bias(m5), _tf_bias(m15), _tf_bias(m30))
+    m5_bias = _tf_bias(m5)
+    m15_bias = _tf_bias(m15)
+    m30_bias = _tf_bias(m30)
+    bias = compute_bias(m5_bias, m15_bias, m30_bias)
+    if bias.state != runtime.last_bias_state:
+        old = runtime.last_bias_state.value if runtime.last_bias_state else "NONE"
+        print(f"[BIAS] {old} -> {bias.state.value} | trigger={bias.trigger_tf} "
+              f"agree={bias.agreeing_tfs} disagree={bias.disagreeing_tfs} | "
+              f"M5 dir={m5_bias.direction} origin={m5_bias.origin_time} | "
+              f"M15 dir={m15_bias.direction} origin={m15_bias.origin_time} | "
+              f"M30 dir={m30_bias.direction} origin={m30_bias.origin_time}")
+        runtime.last_bias_state = bias.state
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = (bid + ask) / 2.0
 
