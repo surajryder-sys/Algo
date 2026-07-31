@@ -23,3 +23,5 @@ btc_smc_bot_blocks.json
 btc_smc_bot_alerts.json
 btc_smc_live_run.log
 btc_smc_live_run.err.log
+smc_v2_bot_state.json
+smc_v2_bot_blocks.json
