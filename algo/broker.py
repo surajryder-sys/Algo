@@ -138,7 +138,7 @@ def modify_position_sl(symbol: str, ticket: int, new_sl: float, tp: float = 0.0)
     return _result_from(mt5.order_send(request))
 
 
-def close_position(symbol: str, position, deviation: int) -> OrderResult:
+def close_position(symbol: str, position, deviation: int, comment: str = "SMC bias-flip close") -> OrderResult:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = get_tick_price(symbol)
     price = bid if direction == 1 else ask
@@ -153,7 +153,7 @@ def close_position(symbol: str, position, deviation: int) -> OrderResult:
         "price": price,
         "deviation": deviation,
         "magic": position.magic,
-        "comment": "SMC bias-flip close",
+        "comment": comment,
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
