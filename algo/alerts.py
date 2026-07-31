@@ -48,7 +48,9 @@ class AlertedZoneStore:
 
 
 def _event_time(zone: Zone) -> int:
-    return zone.detected_time if zone.detected_time > 0 else zone.start_time
+    """start_time only -- see the identical helper in candidates.py for why
+    detected_time can't be used for zone identity."""
+    return zone.start_time
 
 
 def send_telegram_message(cfg: Config, text: str) -> bool:

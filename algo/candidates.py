@@ -50,7 +50,7 @@ class TradeCandidate:
     mode: EntryMode
     entry_price: Optional[float]   # None for MARKET (fill at send time)
     sl: float
-    event_time: int            # the OB's detection time, or origin time if never live-detected
+    event_time: int            # the OB's origin (start_time) -- see _event_time
     zone_key: str               # compact identity: f"{source_tf}|{direction}|{event_time}"
 
 
@@ -59,7 +59,17 @@ def _direction_key(direction: int) -> str:
 
 
 def _event_time(zone: Zone) -> int:
-    return zone.detected_time if zone.detected_time > 0 else zone.start_time
+    """Always the OB's origin candle time, never detected_time. Confirmed
+    live: detected_time can flip between two ~1-second-apart values on
+    successive polls for the exact same zone (same high/low/start_time) --
+    a bug in the indicator's detection-state bookkeeping. Since zone_key is
+    built from this value, that flip silently created a "new" zone identity
+    every other poll, so a manually-cancelled pending order would reappear
+    immediately under the other identity (untouched by the block store,
+    which only blocked the specific zone_key the user actually cancelled).
+    start_time never changes for a given rectangle, so it's used
+    unconditionally now, for baseline and live-detected zones alike."""
+    return zone.start_time
 
 
 def _zone_key(source_tf: str, direction: int, event_time: int) -> str:
