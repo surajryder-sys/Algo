@@ -18,7 +18,7 @@ import MetaTrader5 as mt5
 from ob_bridge.reader import read_zone, OBSnapshot
 from algo import broker
 from algo.alerts import AlertedZoneStore, check_virgin_zone_alerts
-from algo.bias import compute_bias, TFBias, allowed_entry_sources
+from algo.bias import compute_bias, TFBias, allowed_entry_sources, BiasState
 from algo.blocking import BlockedZoneStore, check_reset_requests
 from algo.candidates import (
     build_m1_candidate, build_m3_candidate, build_m5_candidate,
@@ -43,6 +43,10 @@ class RuntimeState:
     # mistaken for a manual one. ORDER_REASON can't be used for this (it
     # reflects who created the order, not who cancelled it).
     expected_cancellations: set = field(default_factory=set)
+    # Last bias state seen, so a transition can be logged (with the M15/M5
+    # inputs that produced it) instead of the resulting EXIT/ENTRY actions
+    # being the only visible trace of *why* the bot did something.
+    last_bias_state: Optional[BiasState] = None
 
 
 def _tf_bias(snap: Optional[OBSnapshot]) -> TFBias:
@@ -118,7 +122,15 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     m3 = read_zone(cfg.symbol, 3)
     m1 = read_zone(cfg.symbol, 1)
 
-    bias = compute_bias(_tf_bias(m15), _tf_bias(m5))
+    m15_bias = _tf_bias(m15)
+    m5_bias = _tf_bias(m5)
+    bias = compute_bias(m15_bias, m5_bias)
+    if bias.state != runtime.last_bias_state:
+        old = runtime.last_bias_state.value if runtime.last_bias_state else "NONE"
+        print(f"[BIAS] {old} -> {bias.state.value} | "
+              f"M15 dir={m15_bias.direction} origin={m15_bias.origin_time} | "
+              f"M5 dir={m5_bias.direction} origin={m5_bias.origin_time}")
+        runtime.last_bias_state = bias.state
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = (bid + ask) / 2.0
 
