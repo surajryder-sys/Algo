@@ -22,10 +22,20 @@ import msvcrt
 import os
 from pathlib import Path
 
+# Anchored to this module's own directory, NOT the process's working
+# directory. A relative path here would resolve differently depending on
+# where "python -m eth_smc.main" happens to be launched from -- two
+# processes started from different working directories would each create
+# their own lock file in a different location and never conflict, which is
+# exactly how a duplicate slipped through despite this lock being in place
+# (confirmed live on BTCUSD, 2026-08-01 23:35 -- two fills 522ms apart, six
+# minutes after this lock was deployed and the bot restarted).
+_MODULE_DIR = Path(__file__).resolve().parent
+
 
 class SingleInstanceLock:
     def __init__(self, lock_file: str):
-        self._path = Path(lock_file)
+        self._path = _MODULE_DIR / lock_file
         self._handle = None
 
     def acquire(self) -> None:
