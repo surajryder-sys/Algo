@@ -20,11 +20,11 @@ from enum import Enum
 from typing import Optional
 
 SL_BUFFER = 3.0
-PULLBACK_PCT = 0.48
+PULLBACK_PCT = 0.45
 
-M5_MARKET_MAX = 10.0
-M5_PULLBACK_MIN = 10.0
-M5_PULLBACK_MAX = 25.0
+M5_MARKET_MAX = 4.0
+M5_PULLBACK_MIN = 4.0
+M5_PULLBACK_MAX = 20.0
 
 
 class EntryMode(Enum):
