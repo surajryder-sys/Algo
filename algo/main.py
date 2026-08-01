@@ -30,6 +30,7 @@ from algo.entries import EntryMode
 from algo.instance_lock import SingleInstanceLock
 from algo.intervention import check_manual_pending_cancellations, check_manual_position_closes
 from algo.management import compute_trailing_sl, bias_flip_exit_direction
+from algo.order_log import log_order_attempt
 from algo.state_store import TradedZoneStore
 
 
@@ -299,22 +300,38 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     if winner.mode == EntryMode.MARKET:
         print(f"[ENTRY] {winner.source_tf} MARKET {'BUY' if winner.direction == 1 else 'SELL'} sl={winner.sl}")
         if cfg.enable_trading:
+            # Mark traded BEFORE sending, not after checking result.ok.
+            # Confirmed live (2026-08-02, ETHUSD/BTCUSD): a market order
+            # that returned a non-DONE retcode still resulted in a real
+            # fill -- because mark_traded only ran on the "ok" path, the
+            # zone stayed eligible and the next poll placed a genuine
+            # duplicate. A misleading/stale retcode must never cause a
+            # retry. The only cost of marking early on a send that truly
+            # did fail is one missed trade on this zone -- far cheaper
+            # than a duplicate live order.
+            store.mark_traded(winner.zone_key)
             result = broker.send_market_order(cfg.symbol, winner.direction, cfg.lots, winner.sl,
                                               cfg.magic_number, cfg.deviation_points, comment)
+            log_order_attempt("MARKET", winner.zone_key, result, comment)
             if not result.ok:
                 print(f"[ENTRY] market order failed: {result.retcode} {result.comment}")
                 return
-            # A market order fills synchronously (DONE really means filled),
-            # so it's safe to mark the zone traded immediately.
-            store.mark_traded(winner.zone_key)
     else:
         print(f"[ENTRY] {winner.source_tf} PENDING {'BUY' if winner.direction == 1 else 'SELL'} "
               f"@ {winner.entry_price} sl={winner.sl}")
         if cfg.enable_trading:
             result = broker.send_pending_order(cfg.symbol, winner.direction, winner.entry_price, cfg.lots,
                                                winner.sl, cfg.magic_number, cfg.deviation_points, comment)
+            log_order_attempt("PENDING", winner.zone_key, result, comment)
             if not result.ok:
                 print(f"[ENTRY] pending order failed: {result.retcode} {result.comment}")
+                # Same non-DONE-but-actually-happened risk as MARKET, but a
+                # pending order can't be safely pre-marked traded (that
+                # would break the replace-with-a-closer-setup feature) --
+                # re-check the broker's own state before fully giving up.
+                if _zone_has_live_order(cfg, winner.zone_key):
+                    print(f"[ENTRY] retcode said failed but a live pending order exists for "
+                          f"{winner.zone_key} -- not retrying")
                 return
             # Do NOT mark traded here: a pending order can sit unfilled and
             # later get cancelled/replaced by a newer setup without ever
