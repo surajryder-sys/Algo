@@ -96,6 +96,40 @@ def sync_filled_zones(cfg: Config, store: TradedZoneStore) -> None:
             store.mark_traded(zone_key)
 
 
+def reconcile_duplicate_fills(cfg: Config) -> None:
+    """MT5's IPC layer can occasionally submit a single market-order request
+    more than once during a connection hiccup -- confirmed live on algo
+    (XAUUSD): one [ENTRY] print, three separate broker-side fills sharing
+    the exact same comment, ~250ms apart. That's a terminal/transport-level
+    retry, not something a single order_send() call can prevent from the
+    Python side, and it can happen even with the single-instance lock and
+    the _zone_has_live_order guard both intact -- those only stop a second
+    process or a second send, not the terminal replaying one send. Ported
+    here from algo/main.py rather than after another live incident, given
+    btc_smc's own history of duplicate fills tonight (the 2-3 duplicate
+    positions on one zone that first exposed the race). Any group of open
+    positions sharing the exact same comment is definitionally a duplicate
+    fill for one zone, so this collapses each such group back to one
+    position (keeping the earliest, closing the rest) every cycle --
+    self-healing regardless of when the extra fills land relative to the
+    poll that sent the original request."""
+    positions = broker.get_positions(cfg.symbol, cfg.magic_number)
+    by_comment: dict = {}
+    for pos in positions:
+        by_comment.setdefault(pos.comment, []).append(pos)
+
+    for comment, group in by_comment.items():
+        if len(group) <= 1:
+            continue
+        group.sort(key=lambda p: p.time)
+        keep, extras = group[0], group[1:]
+        print(f"[DEDUP] {len(extras)} duplicate fill(s) for {comment!r} -- "
+              f"keeping #{keep.ticket}, closing {[e.ticket for e in extras]}")
+        if cfg.enable_trading:
+            for extra in extras:
+                broker.close_position(cfg.symbol, extra, cfg.deviation_points, comment="BSM dedup close")
+
+
 def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore, runtime: RuntimeState) -> None:
     """Compares this poll's live pending/position tickets against last
     poll's, and blocks the underlying zone for any that disappeared due to
@@ -175,7 +209,11 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     if cfg.enable_trading:
         # 0a. Confirm any pending orders that filled since the last poll.
         sync_filled_zones(cfg, store)
-        # 0b. Detect manual cancels/closes since the last poll and block
+        # 0b. Collapse any duplicate fills (see reconcile_duplicate_fills)
+        #     before sync_manual_intervention takes its ticket snapshot, so
+        #     a dedup-close is never misread as a manual close next poll.
+        reconcile_duplicate_fills(cfg)
+        # 0c. Detect manual cancels/closes since the last poll and block
         #     their zones; auto-release blocks a new same-direction OB
         #     has superseded.
         sync_manual_intervention(cfg, blocked, runtime)
