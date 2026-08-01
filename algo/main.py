@@ -27,6 +27,7 @@ from algo.candidates import (
 )
 from algo.config import Config, load_config
 from algo.entries import EntryMode
+from algo.instance_lock import SingleInstanceLock
 from algo.intervention import check_manual_pending_cancellations, check_manual_position_closes
 from algo.management import compute_trailing_sl, bias_flip_exit_direction
 from algo.state_store import TradedZoneStore
@@ -323,6 +324,20 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
 
 def main() -> None:
     cfg = load_config()
+
+    # Refuse to start a second copy. This is what actually fixes the
+    # duplicate-order incidents (2026-08-01, both eth_smc and btc_smc): the
+    # broker-side guard in run_once() only narrows the race between two
+    # concurrent processes down to an order_send() round-trip -- it can't
+    # eliminate it. This lock makes a second launch attempt fail here,
+    # immediately, instead of racing 35+ minutes later.
+    lock = SingleInstanceLock("smc_instance.lock")
+    try:
+        lock.acquire()
+    except RuntimeError as exc:
+        print(f"[LOCK] {exc}")
+        raise SystemExit(1)
+
     print(f"SMC bot starting | symbol={cfg.symbol} lots={cfg.lots} magic={cfg.magic_number} "
           f"trading={'ENABLED' if cfg.enable_trading else 'DRY RUN'}")
 
@@ -356,6 +371,7 @@ def main() -> None:
         pass
     finally:
         broker.shutdown()
+        lock.release()
 
 
 if __name__ == "__main__":
