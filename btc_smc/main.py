@@ -2,11 +2,14 @@
 
 Run with: python -m btc_smc.main
 
-Fully independent from the XAUUSD bot (algo/main.py) and the ETHUSD bot
-(eth_smc/main.py): separate MT5 terminal connection (see btc_smc/config.py),
-separate state/block files, separate symbol-scoped bridge control files
-(btc_smc/blocking.py) -- safe to run alongside the other two without any of
-them affecting each other.
+Fully independent from the XAUUSD bot (algo/main.py): separate MT5 terminal
+connection (see btc_smc/config.py), separate state/block files, separate
+symbol-scoped bridge control files (btc_smc/blocking.py) -- safe to run
+alongside the XAUUSD bot without either one affecting the other.
+
+Bias comes only from M15/M30 now (see bias.py); M5 is the sole entry
+executor, trading only in the bias direction off its own zones, with SL
+pinned to whichever of M15/M30 set the bias (see candidates.py/entries.py).
 
 Safety: BTC_SMC_ENABLE_TRADING must be explicitly set to true in .env for
 any order to actually be sent/modified/cancelled. Left unset (default
@@ -28,7 +31,7 @@ from btc_smc.alerts import AlertedZoneStore, check_virgin_zone_alerts
 from btc_smc.bias import compute_bias, TFBias, allowed_entry_sources, BiasState
 from btc_smc.blocking import BlockedZoneStore, check_reset_requests
 from btc_smc.candidates import (
-    build_m5_candidate, build_m15_candidate, build_m30_candidate,
+    build_m5_candidate,
     choose_winning_candidate, should_replace_pending, current_zone_key,
     order_comment, parse_order_comment,
 )
@@ -63,8 +66,9 @@ def _tf_bias(snap: Optional[OBSnapshot]) -> TFBias:
     return TFBias(snap.bias, snap.latest_time)
 
 
-def _direction_edges(direction: int, m5: Optional[OBSnapshot], m15: Optional[OBSnapshot],
+def _direction_edges(direction: int, m15: Optional[OBSnapshot],
                      m30: Optional[OBSnapshot]) -> dict:
+    """Trailing only -- M5 is never a SL source (see entries.py)."""
     def edge(snap: Optional[OBSnapshot]):
         if snap is None:
             return None
@@ -73,7 +77,7 @@ def _direction_edges(direction: int, m5: Optional[OBSnapshot], m15: Optional[OBS
             return None
         return history[0].low if direction == 1 else history[0].high
 
-    return {"M5": edge(m5), "M15": edge(m15), "M30": edge(m30)}
+    return {"M15": edge(m15), "M30": edge(m30)}
 
 
 def sync_filled_zones(cfg: Config, store: TradedZoneStore) -> None:
@@ -124,8 +128,8 @@ def _zone_has_live_order(cfg: Config, zone_key: str) -> bool:
     in-memory copy never re-reads what the other has written since. The
     broker's own live state is the one thing every process actually shares,
     so it's the only check that closes this race, however many processes
-    end up running at once (confirmed live: this is exactly how BTCUSD ended
-    up with 2-3 duplicate positions on the same zone on 2026-08-01)."""
+    end up running at once (confirmed live: this is exactly how the BTCUSD
+    bot ended up with 2-3 duplicate positions on the same zone)."""
     for p in broker.get_positions(cfg.symbol, cfg.magic_number):
         parsed = parse_order_comment(p.comment)
         if parsed is not None and parsed[0] == zone_key:
@@ -151,15 +155,12 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     m15 = read_zone(cfg.symbol, 15)
     m30 = read_zone(cfg.symbol, 30)
 
-    m5_bias = _tf_bias(m5)
     m15_bias = _tf_bias(m15)
     m30_bias = _tf_bias(m30)
-    bias = compute_bias(m5_bias, m15_bias, m30_bias)
+    bias = compute_bias(m15_bias, m30_bias)
     if bias.state != runtime.last_bias_state:
         old = runtime.last_bias_state.value if runtime.last_bias_state else "NONE"
-        print(f"[BIAS] {old} -> {bias.state.value} | trigger={bias.trigger_tf} "
-              f"agree={bias.agreeing_tfs} disagree={bias.disagreeing_tfs} | "
-              f"M5 dir={m5_bias.direction} origin={m5_bias.origin_time} | "
+        print(f"[BIAS] {old} -> {bias.state.value} | trigger={bias.trigger_tf} | "
               f"M15 dir={m15_bias.direction} origin={m15_bias.origin_time} | "
               f"M30 dir={m30_bias.direction} origin={m30_bias.origin_time}")
         runtime.last_bias_state = bias.state
@@ -198,7 +199,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     #    source timeframe opened it.
     for pos in broker.get_positions(cfg.symbol, cfg.magic_number):
         direction = 1 if pos.type == mt5.POSITION_TYPE_BUY else -1
-        edges = _direction_edges(direction, m5, m15, m30)
+        edges = _direction_edges(direction, m15, m30)
         new_sl = compute_trailing_sl(direction, current_price, pos.sl or None, edges)
         if new_sl is not None:
             print(f"[TRAIL] #{pos.ticket} {'BUY' if direction == 1 else 'SELL'} SL -> {new_sl}")
@@ -220,17 +221,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         return c is not None and not store.is_traded(c.zone_key) and not blocked.is_blocked(c.source_tf, c.zone_key)
 
     if "M5" in sources:
-        c = build_m5_candidate(bias.direction, m5, m15, m30)
-        if eligible(c):
-            candidates.append(c)
-
-    if "M15" in sources:
-        c = build_m15_candidate(bias.direction, m15, m5, m30)
-        if eligible(c):
-            candidates.append(c)
-
-    if "M30" in sources:
-        c = build_m30_candidate(bias.direction, m30, m5, m15)
+        c = build_m5_candidate(bias, m5, m15, m30)
         if eligible(c):
             candidates.append(c)
 

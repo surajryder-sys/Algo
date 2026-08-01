@@ -1,16 +1,18 @@
 """Position management: trailing SL and the bias-flip forced exit rule.
 
-Trailing applies uniformly regardless of which timeframe originated the
-trade (M5, M15, or M30): always follow whichever of M5/M15/M30's current
-same-direction OB edge is closest to the CURRENT price, moving SL only in
-the favorable direction (raise for longs, lower for shorts) -- never loosen.
+Every position is opened by M5, but trailing only ever follows M15/M30
+(M5 is never a SL source -- see entries.py): each poll, re-evaluate
+whichever of M15/M30's current same-direction OB edge is closest to the
+CURRENT price, moving SL only in the favorable direction (raise for longs,
+lower for shorts) -- never loosen. This can switch which timeframe is
+supplying the SL over time, unlike the fixed trigger used at entry.
 
 Only one position is ever meant to be open at a time, matching the current
-bias direction. Any bias direction (STRONG, MEDIUM, or SHORTTERM)
-unconditionally forces the opposite-direction position/pending order
-closed -- otherwise a stale position could sit there blocking new entries
-in the now-correct direction until its own SL or a manual close, which
-defeats the point of having a single live bias.
+bias direction. Any bias direction (full or ShortTerm) unconditionally
+forces the opposite-direction position/pending order closed -- otherwise a
+stale position could sit there blocking new entries in the now-correct
+direction until its own SL or a manual close, which defeats the point of
+having a single live bias.
 """
 from __future__ import annotations
 
