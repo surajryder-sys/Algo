@@ -115,6 +115,28 @@ def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore, runtime: Ru
     runtime.seen_position_tickets = current_positions
 
 
+def _zone_has_live_order(cfg: Config, zone_key: str) -> bool:
+    """Broker-side duplicate guard: checks live positions and pending orders
+    directly (not the local TradedZoneStore file) for this exact zone_key.
+    Two independently-running processes never see each other's writes to the
+    shared JSON state file -- both can pass the "not yet traded" check in the
+    same poll cycle before either's mark_traded() lands, and each process's
+    in-memory copy never re-reads what the other has written since. The
+    broker's own live state is the one thing every process actually shares,
+    so it's the only check that closes this race, however many processes
+    end up running at once (confirmed live: this is exactly how BTCUSD ended
+    up with 2-3 duplicate positions on the same zone on 2026-08-01)."""
+    for p in broker.get_positions(cfg.symbol, cfg.magic_number):
+        parsed = parse_order_comment(p.comment)
+        if parsed is not None and parsed[0] == zone_key:
+            return True
+    for o in broker.get_pending_orders(cfg.symbol, cfg.magic_number):
+        parsed = parse_order_comment(o.comment)
+        if parsed is not None and parsed[0] == zone_key:
+            return True
+    return False
+
+
 def release_stale_blocks(blocked: BlockedZoneStore, m5: Optional[OBSnapshot],
                          m15: Optional[OBSnapshot], m30: Optional[OBSnapshot]) -> None:
     for source_tf, snap in (("M5", m5), ("M15", m15), ("M30", m30)):
@@ -245,6 +267,11 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     # and position on every cycle bias has a direction, before this point.
 
     comment = order_comment(winner)
+
+    if cfg.enable_trading and _zone_has_live_order(cfg, winner.zone_key):
+        print(f"[SKIP] zone {winner.zone_key} already has a live position/pending order on "
+              f"the broker -- duplicate-process guard")
+        return
 
     if winner.mode == EntryMode.MARKET:
         print(f"[ENTRY] {winner.source_tf} MARKET {'BUY' if winner.direction == 1 else 'SELL'} sl={winner.sl}")
