@@ -1,25 +1,26 @@
-"""Turns bias state + zone data into concrete trade candidates per source
-timeframe (M5/M15/M30), and arbitrates which single candidate should own the
-live pending order slot.
+"""Turns bias + M5 zone data into a trade candidate, and figures out
+whether that candidate should replace a live pending order.
 
 This module is pure logic: no MT5 connection, no live order state beyond
 what's passed in. The live execution loop is responsible for supplying
 current price and the currently-live pending order's identity (if any),
 recovered from its comment via parse_order_comment().
 
-Unlike the XAUUSD bot's algo/candidates.py, there's no M1 zone+buffer entry
-style and no sequential-two-OB validation -- every source timeframe here
-uses the same market-or-pullback entry mechanism (see eth_smc/entries.py).
+Only M5 ever produces a candidate now -- M15 and M30 are bias-only (see
+bias.py). No sequential-OB check, no zone+buffer pending style: market or
+pullback based on how far price ran from the M5 zone at the moment it was
+detected (see eth_smc/entries.py). Stop-loss is NOT a closest-search among
+M5/M15/M30 anymore -- it's pinned to whichever of M15/M30 won the bias
+(bias.trigger_tf), per sl_from_edge().
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
+from eth_smc.bias import BiasResult
 from eth_smc.bridge_reader import OBSnapshot, Zone
-from eth_smc.entries import (
-    EntryMode, EntryPlan, m5_entry, m15_entry, m30_entry, select_sl,
-)
+from eth_smc.entries import EntryMode, EntryPlan, m5_entry, sl_from_edge
 
 COMMENT_PREFIX = "ESM"
 
@@ -32,6 +33,10 @@ COMMENT_PREFIX = "ESM"
 _COMMENT_EPOCH = 1735689600  # 2025-01-01T00:00:00Z
 # Each timeframe's own minute count, expressed as a single base36 digit
 # (15 -> 'F', 30 -> 'U') -- unambiguous and derived directly from the TF.
+# M15/M30 codes are kept here for decode even though only M5 ever gets
+# encoded into a NEW order now -- positions opened before this change (when
+# M15/M30 could still trade) still carry them, and parse_order_comment must
+# keep recognizing those until they close naturally.
 _TF_CODE = {"M5": "5", "M15": "F", "M30": "U"}
 _CODE_TF = {v: k for k, v in _TF_CODE.items()}
 _DIR_CODE = {1: "B", -1: "S"}
@@ -51,7 +56,7 @@ def _to_base36(n: int) -> str:
 
 @dataclass(frozen=True)
 class TradeCandidate:
-    source_tf: str            # "M5", "M15", "M30"
+    source_tf: str            # always "M5" now
     direction: int             # 1 bullish, -1 bearish
     mode: EntryMode
     entry_price: Optional[float]   # None for MARKET (fill at send time)
@@ -114,35 +119,20 @@ def current_zone_key(source_tf: str, snap: Optional[OBSnapshot], direction: int)
     return _zone_key(source_tf, direction, _event_time(history[0]))
 
 
-def _edges(direction: int, m5: Optional[OBSnapshot], m15: Optional[OBSnapshot],
-          m30: Optional[OBSnapshot]) -> dict:
-    """Current same-direction OB edge (low for bullish SL, high for bearish SL)
-    per timeframe, for SL selection. Uses each timeframe's single latest zone
-    in that direction (not the history list) -- SL follows the *current*
-    structure, not an older one."""
-    def edge(snap: Optional[OBSnapshot]) -> Optional[float]:
-        if snap is None:
-            return None
-        history = snap.bull if direction == 1 else snap.bear
-        if not history:
-            return None
-        return history[0].low if direction == 1 else history[0].high
-
-    return {"M5": edge(m5), "M15": edge(m15), "M30": edge(m30)}
-
-
-def _build_candidate(source_tf: str, entry_fn, direction: int,
-                     snap: Optional[OBSnapshot], m5: Optional[OBSnapshot],
-                     m15: Optional[OBSnapshot], m30: Optional[OBSnapshot]) -> Optional[TradeCandidate]:
-    if snap is None:
+def build_m5_candidate(bias: BiasResult, m5: Optional[OBSnapshot], m15: Optional[OBSnapshot],
+                       m30: Optional[OBSnapshot]) -> Optional[TradeCandidate]:
+    """M5 trades only in the bias direction, off its own latest same-
+    direction zone (never falls back to an older one -- a stale zone's
+    distance/detection-price math has nothing to do with why price is
+    where it currently is now). SL comes from whichever of M15/M30 won the
+    bias (bias.trigger_tf), not a closest-search -- that trigger's own OB
+    is guaranteed to exist in this direction, since it's what set the
+    direction in the first place."""
+    if bias.direction == 0 or m5 is None:
         return None
+    direction = bias.direction
 
-    # Never falls back to an older zone in history: if the single most recent
-    # OB isn't virgin (or isn't live-detected yet), there is no candidate this
-    # cycle -- jumping to an older zone would mean trading a setup whose
-    # distance/detection-price math has nothing to do with why price is where
-    # it currently is.
-    history = snap.bull if direction == 1 else snap.bear
+    history = m5.bull if direction == 1 else m5.bear
     if not history:
         return None
 
@@ -151,33 +141,22 @@ def _build_candidate(source_tf: str, entry_fn, direction: int,
         return None
 
     ob_edge = zone.high if direction == 1 else zone.low
-    plan: EntryPlan = entry_fn(direction, ob_edge, zone.detected_price)
+    plan: EntryPlan = m5_entry(direction, ob_edge, zone.detected_price)
     if plan.mode == EntryMode.NONE:
         return None
 
-    reference_price = plan.entry_price if plan.entry_price is not None else zone.detected_price
-    sl = select_sl(direction, reference_price, _edges(direction, m5, m15, m30))
-    if sl is None:
+    trigger_snap = m15 if bias.trigger_tf == "M15" else m30
+    if trigger_snap is None:
         return None
+    trigger_history = trigger_snap.bull if direction == 1 else trigger_snap.bear
+    if not trigger_history:
+        return None
+    trigger_edge = trigger_history[0].low if direction == 1 else trigger_history[0].high
+    sl = sl_from_edge(direction, trigger_edge)
 
     event_time = _event_time(zone)
-    return TradeCandidate(source_tf, direction, plan.mode, plan.entry_price, sl,
-                          event_time, _zone_key(source_tf, direction, event_time))
-
-
-def build_m5_candidate(direction: int, m5: Optional[OBSnapshot], m15: Optional[OBSnapshot],
-                       m30: Optional[OBSnapshot]) -> Optional[TradeCandidate]:
-    return _build_candidate("M5", m5_entry, direction, m5, m5, m15, m30)
-
-
-def build_m15_candidate(direction: int, m15: Optional[OBSnapshot], m5: Optional[OBSnapshot],
-                        m30: Optional[OBSnapshot]) -> Optional[TradeCandidate]:
-    return _build_candidate("M15", m15_entry, direction, m15, m5, m15, m30)
-
-
-def build_m30_candidate(direction: int, m30: Optional[OBSnapshot], m5: Optional[OBSnapshot],
-                        m15: Optional[OBSnapshot]) -> Optional[TradeCandidate]:
-    return _build_candidate("M30", m30_entry, direction, m30, m5, m15, m30)
+    return TradeCandidate("M5", direction, plan.mode, plan.entry_price, sl,
+                          event_time, _zone_key("M5", direction, event_time))
 
 
 def _distance_to_price(candidate: TradeCandidate, current_price: float) -> float:
@@ -190,10 +169,9 @@ def _distance_to_price(candidate: TradeCandidate, current_price: float) -> float
 
 
 def choose_winning_candidate(candidates: list, current_price: float) -> Optional[TradeCandidate]:
-    """Among currently-valid candidates (already filtered to allowed sources
-    and to un-traded zones by the caller), whichever entry price sits
-    closest to the current price wins -- not whichever is newest. Newest
-    event_time only breaks an exact distance tie."""
+    """Only ever 0 or 1 candidate now (M5 is the sole source), but keeps the
+    same shape as before: whichever entry price sits closest to the current
+    price wins. Newest event_time only breaks an exact distance tie."""
     valid = [c for c in candidates if c is not None]
     if not valid:
         return None

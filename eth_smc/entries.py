@@ -1,14 +1,17 @@
 """Entry price / SL calculation for the ETHUSD SMC bot.
 
-Only one entry mechanism, applied uniformly to all three source timeframes
-(M5/M15/M30 -- no M1, no zone+buffer pending style): market order if price
-is close enough to the zone, otherwise a 48% pullback entry, otherwise no
-trade. Each timeframe has its own market-distance and pullback-range
-cutoffs, tuned for ETHUSD's price scale (unlike XAUUSD's algo/entries.py,
-these are plain USD distances, not scaled off a ratio).
+Only M5 ever executes an entry now (see bias.py -- M15/M30 are bias-only).
+Market order if price is close enough to the M5 zone at the moment it was
+detected, otherwise a 48% pullback entry, otherwise no trade.
 
-SL is always OB-structure-based: whichever of M5/M15/M30's current same-
-direction OB edge is closest to the entry price, minus/plus a fixed buffer.
+Stop-loss has two distinct paths, deliberately not the same function:
+  - On entry: fixed to whichever of M15/M30 WON the bias (bias.trigger_tf)
+    -- see sl_from_edge(). Deterministic, not a "closest" search; the
+    trigger IS the SL source.
+  - While trailing an open position: re-evaluated every poll as whichever
+    of M15/M30's CURRENT same-direction edge is closest to current price
+    (select_sl()) -- this can switch from one to the other as price moves,
+    unlike the fixed trigger used at entry.
 """
 from __future__ import annotations
 
@@ -23,14 +26,6 @@ M5_MARKET_MAX = 10.0
 M5_PULLBACK_MIN = 10.0
 M5_PULLBACK_MAX = 25.0
 
-M15_MARKET_MAX = 10.0
-M15_PULLBACK_MIN = 10.0
-M15_PULLBACK_MAX = 30.0
-
-M30_MARKET_MAX = 10.0
-M30_PULLBACK_MIN = 10.0
-M30_PULLBACK_MAX = 30.0
-
 
 class EntryMode(Enum):
     NONE = "NONE"
@@ -44,9 +39,7 @@ class EntryPlan:
     entry_price: Optional[float]  # None when mode is MARKET (fill at send time) or NONE
 
 
-def market_or_pullback_entry(direction: int, ob_edge: float, detected_price: float,
-                             market_max: float, pullback_min: float, pullback_max: float,
-                             pullback_pct: float = PULLBACK_PCT) -> EntryPlan:
+def m5_entry(direction: int, ob_edge: float, detected_price: float) -> EntryPlan:
     """direction: 1 bullish (ob_edge = ob.high), -1 bearish (ob_edge = ob.low).
     distance is always measured as how far price ran away from the zone edge."""
     if direction == 1:
@@ -57,11 +50,11 @@ def market_or_pullback_entry(direction: int, ob_edge: float, detected_price: flo
     if distance < 0:
         return EntryPlan(EntryMode.NONE, None)
 
-    if distance <= market_max:
+    if distance <= M5_MARKET_MAX:
         return EntryPlan(EntryMode.MARKET, None)
 
-    if pullback_min < distance < pullback_max:
-        pullback_amount = distance * pullback_pct
+    if M5_PULLBACK_MIN < distance < M5_PULLBACK_MAX:
+        pullback_amount = distance * PULLBACK_PCT
         if direction == 1:
             entry = detected_price - pullback_amount   # == ob_edge + distance*(1-pct)
         else:
@@ -71,37 +64,28 @@ def market_or_pullback_entry(direction: int, ob_edge: float, detected_price: flo
     return EntryPlan(EntryMode.NONE, None)
 
 
-def m5_entry(direction: int, ob_edge: float, detected_price: float) -> EntryPlan:
-    return market_or_pullback_entry(direction, ob_edge, detected_price,
-                                    M5_MARKET_MAX, M5_PULLBACK_MIN, M5_PULLBACK_MAX)
+def sl_from_edge(direction: int, edge: float) -> float:
+    """Fixed SL for a brand-new entry: the trigger timeframe's own current
+    same-direction OB edge, deterministic -- not a search among candidates."""
+    return edge - SL_BUFFER if direction == 1 else edge + SL_BUFFER
 
 
-def m15_entry(direction: int, ob_edge: float, detected_price: float) -> EntryPlan:
-    return market_or_pullback_entry(direction, ob_edge, detected_price,
-                                    M15_MARKET_MAX, M15_PULLBACK_MIN, M15_PULLBACK_MAX)
-
-
-def m30_entry(direction: int, ob_edge: float, detected_price: float) -> EntryPlan:
-    return market_or_pullback_entry(direction, ob_edge, detected_price,
-                                    M30_MARKET_MAX, M30_PULLBACK_MIN, M30_PULLBACK_MAX)
-
-
-def select_sl(direction: int, entry_price: float, candidate_edges: dict) -> Optional[float]:
-    """candidate_edges: {"M5": edge_or_None, "M15": edge_or_None, "M30": edge_or_None}
+def select_sl(direction: int, current_price: float, candidate_edges: dict) -> Optional[float]:
+    """Trailing only. candidate_edges: {"M15": edge_or_None, "M30": edge_or_None}
     where each edge is that timeframe's current same-direction OB low (bullish)
-    or OB high (bearish). Picks whichever is closest to entry_price, but only
-    among edges on the geometrically valid side of entry -- below entry for a
-    buy, above entry for a sell. An edge on the wrong side would produce a
+    or OB high (bearish). Picks whichever is closest to current_price, but only
+    among edges on the geometrically valid side of price -- below price for a
+    long, above for a short. An edge on the wrong side would produce a
     backwards SL (broker-rejected as invalid stops) and must never be chosen
     just for being numerically closest."""
     valid_side = {
         tf: edge for tf, edge in candidate_edges.items()
-        if edge is not None and ((direction == 1 and edge < entry_price) or
-                                  (direction == -1 and edge > entry_price))
+        if edge is not None and ((direction == 1 and edge < current_price) or
+                                  (direction == -1 and edge > current_price))
     }
     if not valid_side:
         return None
 
-    closest_tf = min(valid_side, key=lambda tf: abs(valid_side[tf] - entry_price))
+    closest_tf = min(valid_side, key=lambda tf: abs(valid_side[tf] - current_price))
     edge = valid_side[closest_tf]
     return edge - SL_BUFFER if direction == 1 else edge + SL_BUFFER
