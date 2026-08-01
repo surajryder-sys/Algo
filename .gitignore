@@ -28,3 +28,4 @@ smc_v2_bot_blocks.json
 smc_instance.lock
 eth_smc_instance.lock
 btc_smc_instance.lock
+order_attempts.log
