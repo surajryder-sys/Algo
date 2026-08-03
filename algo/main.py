@@ -20,6 +20,7 @@ from algo import broker
 from algo.alerts import AlertedZoneStore, check_virgin_zone_alerts
 from algo.bias import compute_bias, TFBias, allowed_entry_sources, BiasState
 from algo.bias_trace import log_bias_poll
+from algo.error_trace import log_error_event
 from algo.blocking import BlockedZoneStore, check_reset_requests
 from algo.candidates import (
     build_m1_candidate, build_m3_candidate, build_m5_candidate,
@@ -527,6 +528,7 @@ def main() -> None:
                 run_once(cfg, store, blocked, runtime, alerts)
             except Exception as exc:
                 print(f"[ERROR] {exc}")
+                log_error_event("ERROR", str(exc))
                 # The MT5 IPC channel can get stuck without the process
                 # crashing (seen live: a fresh connection works fine while
                 # this process's own channel keeps failing every poll).
@@ -538,8 +540,10 @@ def main() -> None:
                 try:
                     broker.connect(cfg)
                     print("[RECOVERY] reconnected to MT5")
+                    log_error_event("RECOVERY_OK", "reconnected to MT5")
                 except Exception as reconnect_exc:
                     print(f"[RECOVERY] reconnect failed: {reconnect_exc}")
+                    log_error_event("RECOVERY_FAILED", str(reconnect_exc))
             time.sleep(cfg.poll_seconds)
     except KeyboardInterrupt:
         pass

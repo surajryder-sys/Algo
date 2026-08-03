@@ -30,3 +30,4 @@ eth_smc_instance.lock
 btc_smc_instance.lock
 order_attempts.log
 bias_trace.log
+error_trace.log
