@@ -57,12 +57,61 @@ class RuntimeState:
     # covers both MARKET fill-visibility lag and PENDING cancel-then-
     # instant-re-place thrashing. See management.entry_recently_sent().
     recent_entry: dict = field(default_factory=dict)
+    # "M15"/"M5" -> last CONFIRMED (trusted) TFBias, so a one-poll
+    # regression can't immediately override it. See debounce_tf_bias().
+    confirmed_tf_bias: dict = field(default_factory=dict)
+    # "M15"/"M5" -> ((direction, origin_time), consecutive_poll_count) for
+    # a regression candidate currently being evaluated.
+    pending_regression: dict = field(default_factory=dict)
 
 
 def _tf_bias(snap: Optional[OBSnapshot]) -> TFBias:
     if snap is None:
         return TFBias(0, 0)
     return TFBias(snap.bias, snap.latest_time)
+
+
+REGRESSION_CONFIRM_POLLS = 2
+
+
+def debounce_tf_bias(label: str, raw: TFBias, runtime: RuntimeState,
+                     confirm_polls: int = REGRESSION_CONFIRM_POLLS) -> TFBias:
+    """A timeframe's reported "latest" OB origin should only ever move
+    forward -- a newer zone can appear, but a real one never legitimately
+    goes backward except on genuine deletion/invalidation. Confirmed live:
+    the indicator does a full destructive rescan of chart objects on every
+    tick (ArrayResize(zones, 0) then re-enumerate), and if that scan
+    catches the source OB indicator mid-redraw (deleting and recreating
+    its own rectangles as new price data reshapes a pattern), a still-
+    valid zone can vanish from a single scan and reappear on the very next
+    one -- reported here as a one-poll "latest" regression that never
+    actually happened. A genuine deletion/invalidation, by contrast,
+    persists across many consecutive polls.
+
+    Any FORWARD move is trusted immediately -- a genuinely newer zone
+    existing is never ambiguous. A regression is only trusted once the
+    exact same regressed (direction, origin_time) repeats for
+    `confirm_polls` consecutive polls, filtering out the one-tick redraw
+    race while still reacting within ~confirm_polls seconds to a real,
+    sustained change."""
+    confirmed = runtime.confirmed_tf_bias.get(label)
+
+    if confirmed is None or raw.origin_time >= confirmed.origin_time:
+        runtime.confirmed_tf_bias[label] = raw
+        runtime.pending_regression.pop(label, None)
+        return raw
+
+    candidate = (raw.direction, raw.origin_time)
+    pending = runtime.pending_regression.get(label)
+    count = pending[1] + 1 if pending is not None and pending[0] == candidate else 1
+    runtime.pending_regression[label] = (candidate, count)
+
+    if count >= confirm_polls:
+        runtime.confirmed_tf_bias[label] = raw
+        runtime.pending_regression.pop(label, None)
+        return raw
+
+    return confirmed
 
 
 def resolve_snapshot(fresh: Optional[OBSnapshot], cached: Optional[OBSnapshot]) -> Optional[OBSnapshot]:
@@ -247,8 +296,8 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     runtime.last_snapshot["M3"] = m3
     runtime.last_snapshot["M1"] = m1
 
-    m15_bias = _tf_bias(m15)
-    m5_bias = _tf_bias(m5)
+    m15_bias = debounce_tf_bias("M15", _tf_bias(m15), runtime)
+    m5_bias = debounce_tf_bias("M5", _tf_bias(m5), runtime)
     bias = compute_bias(m15_bias, m5_bias)
     if bias.state != runtime.last_bias_state:
         old = runtime.last_bias_state.value if runtime.last_bias_state else "NONE"
