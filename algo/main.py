@@ -29,7 +29,7 @@ from algo.config import Config, load_config
 from algo.entries import EntryMode
 from algo.instance_lock import SingleInstanceLock
 from algo.intervention import check_manual_pending_cancellations, check_manual_position_closes
-from algo.management import compute_trailing_sl, bias_flip_exit_direction
+from algo.management import compute_trailing_sl, bias_flip_exit_direction, entry_recently_sent
 from algo.order_log import log_order_attempt
 from algo.state_store import TradedZoneStore
 
@@ -53,6 +53,10 @@ class RuntimeState:
     # poll's failed bridge read can fall back to it instead of being misread
     # as "this timeframe's OB just disappeared" -- see resolve_snapshot().
     last_snapshot: dict = field(default_factory=dict)
+    # direction -> time.time() an entry was last sent in that direction --
+    # covers both MARKET fill-visibility lag and PENDING cancel-then-
+    # instant-re-place thrashing. See management.entry_recently_sent().
+    recent_entry: dict = field(default_factory=dict)
 
 
 def _tf_bias(snap: Optional[OBSnapshot]) -> TFBias:
@@ -267,6 +271,15 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     if broker.get_positions_by_direction(cfg.symbol, cfg.magic_number, bias.direction):
         return
 
+    # An entry in this direction was sent moments ago. For MARKET, the
+    # broker's own position list can lag a real fill by more than one poll
+    # cycle, so the check above alone isn't enough. For PENDING, a
+    # cancelled-without-filling order leaves its zone still eligible, so
+    # without this guard a bias flip-flopping quickly re-places the exact
+    # same zone every time it flips back. See management.entry_recently_sent().
+    if entry_recently_sent(bias.direction, runtime.recent_entry, time.time()):
+        return
+
     sources = allowed_entry_sources(bias)
     candidates = []
 
@@ -340,6 +353,10 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
             # did fail is one missed trade on this zone -- far cheaper
             # than a duplicate live order.
             store.mark_traded(winner.zone_key)
+            # Same "before send" reasoning as mark_traded above -- this
+            # guard exists precisely because the broker's own position list
+            # can't be trusted to reflect this fill immediately.
+            runtime.recent_entry[winner.direction] = time.time()
             result = broker.send_market_order(cfg.symbol, winner.direction, cfg.lots, winner.sl,
                                               cfg.magic_number, cfg.deviation_points, comment)
             log_order_attempt("MARKET", winner.zone_key, result, comment)
@@ -350,6 +367,12 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         print(f"[ENTRY] {winner.source_tf} PENDING {'BUY' if winner.direction == 1 else 'SELL'} "
               f"@ {winner.entry_price} sl={winner.sl}")
         if cfg.enable_trading:
+            # A cancelled-without-filling pending order never gets
+            # mark_traded (see should_replace_pending) -- this guard is
+            # what actually stops the same zone from being re-placed the
+            # instant bias flips back, which is what caused a live
+            # place/cancel/replace loop of hundreds of orders in a minute.
+            runtime.recent_entry[winner.direction] = time.time()
             result = broker.send_pending_order(cfg.symbol, winner.direction, winner.entry_price, cfg.lots,
                                                winner.sl, cfg.magic_number, cfg.deviation_points, comment)
             log_order_attempt("PENDING", winner.zone_key, result, comment)

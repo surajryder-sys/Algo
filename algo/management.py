@@ -47,3 +47,41 @@ def bias_flip_exit_direction(bias: BiasResult) -> Optional[int]:
     if bias.direction == -1:
         return 1
     return None
+
+
+ENTRY_GUARD_SECONDS = 5.0
+
+
+def entry_recently_sent(direction: int, recent_entry: dict, now: float,
+                        guard_seconds: float = ENTRY_GUARD_SECONDS) -> bool:
+    """True if EITHER a MARKET or PENDING entry was sent in this direction
+    recently enough that re-attempting now risks thrashing. Covers two
+    distinct confirmed-live failure modes (on eth_smc/btc_smc) with one
+    guard:
+
+    1. MARKET: the broker's own position list can lag a real fill by more
+       than one poll cycle at poll_seconds=1, letting the very next poll's
+       "already holding a position" check see nothing live yet and fire a
+       second entry for what's economically the same trade -- sometimes
+       under a genuinely different zone_key too (if the source OB's
+       detected_time drifted between polls), so comment-based duplicate-
+       fill cleanup can't catch it either.
+
+    2. PENDING: a pending order is deliberately never marked "traded" until
+       it actually fills (so a genuinely unfilled order can be replaced by
+       a better setup later -- see should_replace_pending). But that means
+       a pending order that gets CANCELLED without filling (e.g. a bias
+       flip closes it) leaves its zone still fully eligible -- if bias
+       flips back moments later, the exact same still-virgin zone gets
+       re-placed immediately. Confirmed live: with bias oscillating, this
+       produced a place/cancel/replace loop of hundreds of orders in under
+       a minute, all for the identical zone.
+
+    This is a short local guard against both windows -- tracked in the
+    bot's own memory, not queried from the broker, so it can't be fooled by
+    the same lag/oscillation it's guarding against. For MARKET, the broker-
+    side "already holding a position" check remains the long-term source of
+    truth and takes over well before this guard would ever block a
+    legitimate new entry that comes after a real close."""
+    sent_at = recent_entry.get(direction)
+    return sent_at is not None and (now - sent_at) < guard_seconds
