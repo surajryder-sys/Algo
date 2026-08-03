@@ -19,6 +19,7 @@ from ob_bridge.reader import read_zone, OBSnapshot
 from algo import broker
 from algo.alerts import AlertedZoneStore, check_virgin_zone_alerts
 from algo.bias import compute_bias, TFBias, allowed_entry_sources, BiasState
+from algo.bias_trace import log_bias_poll
 from algo.blocking import BlockedZoneStore, check_reset_requests
 from algo.candidates import (
     build_m1_candidate, build_m3_candidate, build_m5_candidate,
@@ -306,9 +307,12 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     runtime.last_snapshot["M3"] = m3
     runtime.last_snapshot["M1"] = m1
 
-    m15_bias = debounce_tf_bias("M15", _tf_bias(m15), runtime)
-    m5_bias = debounce_tf_bias("M5", _tf_bias(m5), runtime)
+    m15_raw = _tf_bias(m15)
+    m5_raw = _tf_bias(m5)
+    m15_bias = debounce_tf_bias("M15", m15_raw, runtime)
+    m5_bias = debounce_tf_bias("M5", m5_raw, runtime)
     bias = compute_bias(m15_bias, m5_bias)
+    log_bias_poll(m15_raw, m5_raw, m15_bias, m5_bias, bias)
     if bias.state != runtime.last_bias_state:
         old = runtime.last_bias_state.value if runtime.last_bias_state else "NONE"
         print(f"[BIAS] {old} -> {bias.state.value} | "
