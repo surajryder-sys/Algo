@@ -49,12 +49,35 @@ class RuntimeState:
     # inputs that produced it) instead of the resulting EXIT/ENTRY actions
     # being the only visible trace of *why* the bot did something.
     last_bias_state: Optional[BiasState] = None
+    # "M1"/"M3"/"M5"/"M15" -> last successfully-read OBSnapshot, so a single
+    # poll's failed bridge read can fall back to it instead of being misread
+    # as "this timeframe's OB just disappeared" -- see resolve_snapshot().
+    last_snapshot: dict = field(default_factory=dict)
 
 
 def _tf_bias(snap: Optional[OBSnapshot]) -> TFBias:
     if snap is None:
         return TFBias(0, 0)
     return TFBias(snap.bias, snap.latest_time)
+
+
+def resolve_snapshot(fresh: Optional[OBSnapshot], cached: Optional[OBSnapshot]) -> Optional[OBSnapshot]:
+    """Falls back to the last known-good snapshot when this poll's read
+    failed (see read_zone()'s docstring -- a missing/mid-write/briefly-
+    locked file is expected and transient). A failed read must never be
+    treated as "this timeframe's OB just disappeared": confirmed live on
+    eth_smc/btc_smc, that exact misreading collapsed a real M15 direction to
+    TFBias(0, 0) for a single poll, flipped compute_bias()'s output, and
+    force-closed a position mere seconds after it was opened -- repeatedly,
+    on a market that hadn't actually changed. Only falls back if the cached
+    snapshot isn't ALSO stale (the bridge could genuinely be down, not just
+    one poll's bad luck), in which case None correctly propagates as
+    "unknown"."""
+    if fresh is not None:
+        return fresh
+    if cached is not None and not cached.is_stale():
+        return cached
+    return None
 
 
 def _direction_edges(direction: int, m15: Optional[OBSnapshot], m5: Optional[OBSnapshot],
@@ -109,7 +132,10 @@ def reconcile_duplicate_fills(cfg: Config) -> None:
               f"keeping #{keep.ticket}, closing {[e.ticket for e in extras]}")
         if cfg.enable_trading:
             for extra in extras:
-                broker.close_position(cfg.symbol, extra, cfg.deviation_points, comment="SMC dedup close")
+                result = broker.close_position(cfg.symbol, extra, cfg.deviation_points, comment="SMC dedup close")
+                log_order_attempt("DEDUP_CLOSE", comment, result, "SMC dedup close")
+                if not result.ok:
+                    print(f"[DEDUP] close failed for #{extra.ticket}: {result.retcode} {result.comment}")
 
 
 def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore, runtime: RuntimeState) -> None:
@@ -169,10 +195,14 @@ def release_stale_blocks(blocked: BlockedZoneStore, m1: Optional[OBSnapshot],
 
 def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, runtime: RuntimeState,
              alerts: AlertedZoneStore) -> None:
-    m15 = read_zone(cfg.symbol, 15)
-    m5 = read_zone(cfg.symbol, 5)
-    m3 = read_zone(cfg.symbol, 3)
-    m1 = read_zone(cfg.symbol, 1)
+    m15 = resolve_snapshot(read_zone(cfg.symbol, 15), runtime.last_snapshot.get("M15"))
+    m5 = resolve_snapshot(read_zone(cfg.symbol, 5), runtime.last_snapshot.get("M5"))
+    m3 = resolve_snapshot(read_zone(cfg.symbol, 3), runtime.last_snapshot.get("M3"))
+    m1 = resolve_snapshot(read_zone(cfg.symbol, 1), runtime.last_snapshot.get("M1"))
+    runtime.last_snapshot["M15"] = m15
+    runtime.last_snapshot["M5"] = m5
+    runtime.last_snapshot["M3"] = m3
+    runtime.last_snapshot["M1"] = m1
 
     m15_bias = _tf_bias(m15)
     m5_bias = _tf_bias(m5)

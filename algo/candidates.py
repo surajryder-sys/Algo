@@ -22,9 +22,9 @@ COMMENT_PREFIX = "SMC"
 # MT5 silently truncates order/deal comments to 16 characters on at least one
 # broker we tested against (confirmed empirically: a 27-char comment survived
 # order_send but came back truncated to exactly 16 chars on the live order).
-# "SMC|" + 1 tf code + 1 direction code + 6 base36 time digits = 12 chars,
-# safely under that limit with margin. Base36 seconds since a 2025 epoch
-# covers roughly 69 years before overflowing 6 digits.
+# "SMC|" + 1 tf code + 1 direction code + 6 base36 time digits + 1 checksum
+# digit = 13 chars, safely under that limit with margin. Base36 seconds
+# since a 2025 epoch covers roughly 69 years before overflowing 6 digits.
 _COMMENT_EPOCH = 1735689600  # 2025-01-01T00:00:00Z
 _TF_CODE = {"M1": "1", "M3": "3", "M5": "5"}
 _CODE_TF = {v: k for k, v in _TF_CODE.items()}
@@ -43,6 +43,18 @@ def _to_base36(n: int) -> str:
     return "".join(reversed(out))
 
 
+def _checksum(payload: str) -> str:
+    """Single base36 digit over tf_code+dir_code+time_code. Lets
+    parse_order_comment detect a corrupted comment and reject it outright
+    instead of silently decoding it as a different, still-plausible-looking
+    zone -- confirmed live (2026-08-02, eth_smc/btc_smc) that a single
+    character in a comment can get corrupted in transit between our
+    order_send() call and what the broker actually records, and since every
+    tf-code was already a recognized value, the corrupted comment decoded as
+    a real-looking (wrong) zone instead of getting rejected as garbage."""
+    return _BASE36_DIGITS[sum(ord(c) for c in payload) % 36]
+
+
 @dataclass(frozen=True)
 class TradeCandidate:
     source_tf: str            # "M1", "M3", "M5"
@@ -52,10 +64,6 @@ class TradeCandidate:
     sl: float
     event_time: int            # the OB's origin (start_time) -- see _event_time
     zone_key: str               # compact identity: f"{source_tf}|{direction}|{event_time}"
-
-
-def _direction_key(direction: int) -> str:
-    return "bull" if direction == 1 else "bear"
 
 
 def _event_time(zone: Zone) -> int:
@@ -83,22 +91,29 @@ def order_comment(candidate: TradeCandidate) -> str:
     tf_code = _TF_CODE[candidate.source_tf]
     dir_code = _DIR_CODE[candidate.direction]
     time_code = _to_base36(candidate.event_time - _COMMENT_EPOCH)
-    return f"{COMMENT_PREFIX}|{tf_code}{dir_code}{time_code}"
+    checksum = _checksum(tf_code + dir_code + time_code)
+    return f"{COMMENT_PREFIX}|{tf_code}{dir_code}{time_code}{checksum}"
 
 
 def parse_order_comment(comment: str) -> Optional[tuple]:
-    """Returns (zone_key, event_time) or None if this isn't our comment format.
-    zone_key is reconstructed in the same format _zone_key() produces, so it
-    compares equal to one built fresh from live zone data."""
+    """Returns (zone_key, event_time) or None if this isn't our comment format
+    OR if it's ours but got corrupted in transit (checksum mismatch) -- a
+    corrupted comment must never be decoded as if it were a real, different
+    zone; treating it as "not ours" is the safe failure mode. zone_key is
+    reconstructed in the same format _zone_key() produces, so it compares
+    equal to one built fresh from live zone data."""
     if not comment or not comment.startswith(COMMENT_PREFIX + "|"):
         return None
     rest = comment[len(COMMENT_PREFIX) + 1:]
-    if len(rest) < 3:
+    if len(rest) < 4:  # tf(1) + dir(1) + time(>=1) + checksum(1)
         return None
 
-    source_tf = _CODE_TF.get(rest[0])
-    direction = _CODE_DIR.get(rest[1])
-    time_code = rest[2:]
+    tf_char, dir_char, time_code, checksum_char = rest[0], rest[1], rest[2:-1], rest[-1]
+    if _checksum(tf_char + dir_char + time_code) != checksum_char:
+        return None
+
+    source_tf = _CODE_TF.get(tf_char)
+    direction = _CODE_DIR.get(dir_char)
     if source_tf is None or direction is None or not time_code:
         return None
 
