@@ -303,7 +303,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         if parsed is not None:
             pending_zone_key, _pending_event_time = parsed
 
-    if not should_replace_pending(winner, pending_zone_key, pending_entry_price, current_price):
+    if not should_replace_pending(winner, pending_ticket, pending_zone_key, pending_entry_price, current_price):
         return
 
     if pending_ticket is not None:

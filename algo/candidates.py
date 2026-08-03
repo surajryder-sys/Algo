@@ -271,16 +271,28 @@ def choose_winning_candidate(candidates: list, current_price: float) -> Optional
 
 
 def should_replace_pending(winning: Optional[TradeCandidate],
+                           pending_ticket: Optional[int],
                            pending_zone_key: Optional[str],
                            pending_entry_price: Optional[float],
                            current_price: float) -> bool:
     """True only if the winning candidate should cancel-and-replace the live
     pending order -- i.e. its entry price is genuinely closer to the current
     price than the pending order's. The caller must compute `winning` BEFORE
-    cancelling anything, and only actually cancel once this returns True."""
+    cancelling anything, and only actually cancel once this returns True.
+
+    pending_ticket -- not pending_zone_key -- is what decides "nothing
+    pending yet". Confirmed live: an order's comment can come back
+    corrupted from the broker on an otherwise-unremarkable poll (a
+    dropped trailing checksum character), which makes parse_order_comment
+    correctly reject it and pending_zone_key come out None even though a
+    real, live, unchanged pending order still exists. Treating that the
+    same as "no pending order" caused a pointless cancel-and-resend of
+    the identical setup, repeatedly, on every poll the comment happened
+    to come back corrupted. A genuinely absent pending order has no
+    ticket at all -- that's the only safe signal for "just place it"."""
     if winning is None:
         return False
-    if pending_zone_key is None:
+    if pending_ticket is None:
         return True  # nothing pending yet -- just place it
     if winning.zone_key == pending_zone_key:
         return False  # same setup already owns the pending order
