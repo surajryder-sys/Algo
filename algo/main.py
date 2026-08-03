@@ -162,31 +162,41 @@ def sync_filled_zones(cfg: Config, store: TradedZoneStore) -> None:
 
 def reconcile_duplicate_fills(cfg: Config) -> None:
     """MT5's IPC layer can occasionally submit a single market-order request
-    more than once during a connection hiccup -- confirmed live: one
-    [ENTRY] print, three separate broker-side fills sharing the exact same
-    comment, ~250ms apart. That's a terminal/transport-level retry, not
-    something a single order_send() call can prevent from the Python side.
-    Any group of open positions sharing the exact same comment is
-    definitionally a duplicate fill for one zone, so this collapses each
-    such group back to one position (keeping the earliest, closing the
-    rest) every cycle -- self-healing regardless of when the extra fills
-    land relative to the poll that sent the original request."""
-    positions = broker.get_positions(cfg.symbol, cfg.magic_number)
-    by_comment: dict = {}
-    for pos in positions:
-        by_comment.setdefault(pos.comment, []).append(pos)
+    more than once during a connection hiccup -- confirmed live twice now:
+    one send_market_order() call (one log_order_attempt entry), two
+    broker-side fills, 16 seconds apart the second time. That's a
+    terminal/transport-level retry, not something a single order_send()
+    call can prevent from the Python side.
 
-    for comment, group in by_comment.items():
+    Grouping by comment (the original approach) has a confirmed blind
+    spot: one of the two fills' comments came back truncated by one
+    character (the same corruption reconcile_duplicate_pending already
+    works around), so the two positions had different comment strings and
+    were never recognized as duplicates. Direction + SL is what's actually
+    identical across retries of the same logical send instead -- and
+    since the "already holding a position in this direction" check
+    upstream means two INTENTIONAL positions can never be open in the same
+    direction simultaneously, any two that ARE both open right now sharing
+    direction + SL are definitionally a duplicate fill, not a coincidence.
+    Keeps the earliest, closes the rest, every cycle."""
+    positions = broker.get_positions(cfg.symbol, cfg.magic_number)
+    by_setup: dict = {}
+    for pos in positions:
+        direction = 1 if pos.type == mt5.POSITION_TYPE_BUY else -1
+        key = (direction, pos.sl)
+        by_setup.setdefault(key, []).append(pos)
+
+    for key, group in by_setup.items():
         if len(group) <= 1:
             continue
         group.sort(key=lambda p: p.time)
         keep, extras = group[0], group[1:]
-        print(f"[DEDUP] {len(extras)} duplicate fill(s) for {comment!r} -- "
+        print(f"[DEDUP] {len(extras)} duplicate fill(s) for direction={key[0]} sl={key[1]} -- "
               f"keeping #{keep.ticket}, closing {[e.ticket for e in extras]}")
         if cfg.enable_trading:
             for extra in extras:
                 result = broker.close_position(cfg.symbol, extra, cfg.deviation_points, comment="SMC dedup close")
-                log_order_attempt("DEDUP_CLOSE", comment, result, "SMC dedup close")
+                log_order_attempt("DEDUP_CLOSE", extra.comment, result, "SMC dedup close")
                 if not result.ok:
                     print(f"[DEDUP] close failed for #{extra.ticket}: {result.retcode} {result.comment}")
 
