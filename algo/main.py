@@ -65,6 +65,10 @@ class RuntimeState:
     # "M15"/"M5" -> ((direction, origin_time), consecutive_poll_count) for
     # a regression candidate currently being evaluated.
     pending_regression: dict = field(default_factory=dict)
+    # ticket -> [setup, zone_key, remaining_grace_polls] for a disappeared
+    # pending order still awaiting confirmation of a genuine manual cancel.
+    # See intervention.check_manual_pending_cancellations().
+    pending_cancel_confirm: dict = field(default_factory=dict)
 
 
 def _tf_bias(snap: Optional[OBSnapshot]) -> TFBias:
@@ -247,14 +251,21 @@ def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore, runtime: Ru
     poll's, and blocks the underlying zone for any that disappeared due to
     a manual (client/mobile/web) cancel or close -- never for a fill, a
     bot-initiated action, or an SL/TP/stop-out."""
-    current_pending = {o.ticket for o in broker.get_pending_orders(cfg.symbol, cfg.magic_number)}
+    live_pending = broker.get_pending_orders(cfg.symbol, cfg.magic_number)
+    current_pending = {o.ticket for o in live_pending}
+    current_pending_setups = {
+        (1 if o.type in (mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP) else -1, o.price_open, o.sl)
+        for o in live_pending
+    }
     current_positions = {p.ticket for p in broker.get_positions(cfg.symbol, cfg.magic_number)}
 
     disappeared_pending = runtime.seen_pending_tickets - current_pending
     disappeared_positions = runtime.seen_position_tickets - current_positions
 
-    if disappeared_pending:
-        for source_tf, zone_key in check_manual_pending_cancellations(disappeared_pending, runtime.expected_cancellations):
+    if disappeared_pending or runtime.pending_cancel_confirm:
+        for source_tf, zone_key in check_manual_pending_cancellations(
+                disappeared_pending, runtime.expected_cancellations,
+                current_pending_setups, runtime.pending_cancel_confirm):
             print(f"[BLOCK] manual pending cancellation -> blocking {source_tf} zone {zone_key}")
             blocked.block(source_tf, zone_key, reason="manual_cancel")
 
