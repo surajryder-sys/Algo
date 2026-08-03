@@ -142,6 +142,45 @@ def reconcile_duplicate_fills(cfg: Config) -> None:
                     print(f"[DEDUP] close failed for #{extra.ticket}: {result.retcode} {result.comment}")
 
 
+def reconcile_duplicate_pending(cfg: Config, runtime: RuntimeState) -> None:
+    """The same MT5 IPC retry behavior as reconcile_duplicate_fills, but for
+    orders that haven't filled yet: confirmed live, one send_pending_order()
+    call produced four broker-side order events in six seconds, same
+    direction/price/SL every time. Comment can't be used as the grouping
+    key here the way reconcile_duplicate_fills uses it for positions:
+    one of the retries came back missing its trailing checksum character,
+    and that doesn't just fail to parse -- dropping the last character
+    shifts which digit the checksum formula sees, so it can coincidentally
+    re-validate as a completely different, bogus-but-well-formed zone
+    identity instead of being rejected as garbage. Direction + entry price
+    + SL is what's actually identical across retries of the same logical
+    send, so that's the grouping key instead. Keeps the earliest order in
+    each group, cancels the rest -- registering each cancellation as
+    expected so sync_manual_intervention never mistakes it for a manual
+    one."""
+    orders = broker.get_pending_orders(cfg.symbol, cfg.magic_number)
+    by_setup: dict = {}
+    for o in orders:
+        direction = 1 if o.type in (mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP) else -1
+        key = (direction, o.price_open, o.sl)
+        by_setup.setdefault(key, []).append(o)
+
+    for key, group in by_setup.items():
+        if len(group) <= 1:
+            continue
+        group.sort(key=lambda o: o.time_setup)
+        keep, extras = group[0], group[1:]
+        print(f"[DEDUP] {len(extras)} duplicate pending order(s) for direction={key[0]} "
+              f"price={key[1]} sl={key[2]} -- keeping #{keep.ticket}, cancelling {[e.ticket for e in extras]}")
+        if cfg.enable_trading:
+            for extra in extras:
+                runtime.expected_cancellations.add(extra.ticket)
+                result = broker.cancel_pending_order(extra.ticket)
+                log_order_attempt("DEDUP_CANCEL", f"dir={key[0]} price={key[1]}", result, "")
+                if not result.ok:
+                    print(f"[DEDUP] cancel failed for #{extra.ticket}: {result.retcode} {result.comment}")
+
+
 def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore, runtime: RuntimeState) -> None:
     """Compares this poll's live pending/position tickets against last
     poll's, and blocks the underlying zone for any that disappeared due to
@@ -226,10 +265,12 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     if cfg.enable_trading:
         # 0a. Confirm any pending orders that filled since the last poll.
         sync_filled_zones(cfg, store)
-        # 0b. Collapse any duplicate fills (see reconcile_duplicate_fills)
+        # 0b. Collapse any duplicate fills/pending orders (see
+        #     reconcile_duplicate_fills / reconcile_duplicate_pending)
         #     before sync_manual_intervention takes its ticket snapshot, so
-        #     a dedup-close is never misread as a manual close next poll.
+        #     a dedup cancel/close is never misread as a manual one next poll.
         reconcile_duplicate_fills(cfg)
+        reconcile_duplicate_pending(cfg, runtime)
         # 0c. Detect manual cancels/closes since the last poll and block
         #     their zones; auto-release blocks a new same-direction OB
         #     has superseded.
