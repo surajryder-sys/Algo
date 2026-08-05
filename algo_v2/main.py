@@ -116,6 +116,27 @@ def release_stale_blocks(blocked: BlockedZoneStore, m1: Optional[OBSnapshot],
             blocked.release_if_stale(source_tf, direction, latest_key)
 
 
+def cancel_zone_ineligible_pending(cfg: Config, zone, runtime: RuntimeState) -> None:
+    """Cancels a resting pending order the instant the zone's own character
+    flips against it -- even with no opposite-direction OB yet and no bias
+    flip. Deliberately pending-orders only: a FILLED position still only
+    closes on a bias flip or an opposing OB (per the original spec -- "that
+    event doesn't impact the running trade unless the opposite side ob
+    occurs"), so this never touches broker.get_positions()."""
+    for order in broker.get_pending_orders(cfg.symbol, cfg.magic_number):
+        parsed = parse_order_comment(order.comment)
+        if parsed is None:
+            continue
+        zone_key, event_time = parsed
+        direction = int(zone_key.split("|")[1])
+        if is_eligible(zone, direction, event_time):
+            continue
+        print(f"[EXIT] cancelling pending #{order.ticket}: zone turned against {zone_key}")
+        if cfg.enable_trading:
+            runtime.expected_cancellations.add(order.ticket)
+            broker.cancel_pending_order(order.ticket)
+
+
 def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, runtime: RuntimeState) -> None:
     m15 = read_zone(cfg.symbol, 15)
     m5 = read_zone(cfg.symbol, 5)
@@ -156,6 +177,12 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
             if cfg.enable_trading:
                 runtime.expected_cancellations.add(order.ticket)
                 broker.cancel_pending_order(order.ticket)
+
+    # 1b. Independent of bias: a resting pending order whose OB the zone has
+    #     turned against (Strong<->Weak flip, no opposing OB needed) gets
+    #     cancelled too. Positions are untouched here -- see the function's
+    #     docstring for why.
+    cancel_zone_ineligible_pending(cfg, zone, runtime)
 
     # 2. Trail every open position in its own direction, regardless of which
     #    source timeframe opened it. Still considers M15's OB edge (SL
