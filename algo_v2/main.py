@@ -144,9 +144,17 @@ def release_stale_blocks(blocked: BlockedZoneStore, runtime: RuntimeState,
         direction = int(blocked_key.split("|")[1])
         latest_key = current_zone_key(source_tf, snap, direction)
 
-        if latest_key is None or latest_key == blocked_key:
-            # Back to normal (or no data this poll) -- any confirmation
-            # in progress no longer applies.
+        # Confirmed live: current_zone_key can transiently regress to an
+        # OLDER zone (not just a one-poll blip -- it's been seen holding
+        # steady for the full confirmation window too), which used to pass
+        # the "different + stable" check below and wrongly release a block.
+        # A zone can't un-happen, so only a genuinely NEWER event_time is
+        # ever valid grounds for release -- anything else (older, or no
+        # data this poll) is treated the same as "back to normal."
+        is_newer = (latest_key is not None
+                    and int(latest_key.split("|")[2]) > int(blocked_key.split("|")[2]))
+
+        if not is_newer:
             runtime.pending_block_release.pop(source_tf, None)
             continue
 
