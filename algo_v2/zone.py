@@ -1,20 +1,36 @@
 """Order Block + ATR Trail zone rules (V2).
 
-Reads the M5 ATR Trail bridge snapshot and classifies the market as one of:
-  STRONG -- last M5 candle closed above the ATR Trail line
-  WEAK   -- last M5 candle closed below the ATR Trail line
-along with the `event_time` of the most recent Strong<->Weak flip (the ATR
-indicator's own trend-buffer flip time, read straight from the bridge).
+The current "effective direction" and its event_time boundary aren't just
+the ATR Trail's Strong/Weak label -- they're the most recent of THREE
+competing signals, all M5-based:
+  1. M5 forming its own fresh bullish OB (origin candle time)
+  2. M5 forming its own fresh bearish OB (origin candle time)
+  3. the ATR Trail's last Strong<->Weak flip
+
+Whichever of those three timestamps is the most recent wins: its direction
+becomes the effective direction (STRONG=bullish-favored, WEAK=bearish-
+favored), and its timestamp becomes the event_time boundary every OB
+candidate gets checked against. This means a fresh M5 OB can override a
+stale zone label immediately -- e.g. M5 forms a new bearish OB while the
+zone still technically reads Strong; that OB, being the newest of the
+three, makes bearish the effective direction for new LTF entries right
+away, even though the ATR line itself hasn't flipped yet.
 
 Eligibility rule (applies to every OB candidate -- M5, M3, and M1 alike):
-  STRONG zone -- bullish OBs are always eligible (old or new).
-                 Bearish OBs are eligible only if detected at/after the
-                 event_time (a fresh bearish OB post-event is allowed to
-                 trade even though the zone still reads Strong).
-  WEAK zone   -- mirror image: bearish OBs always eligible, bullish OBs
-                 only if detected at/after the event_time.
-  NONE (no ATR snapshot yet) -- nothing is eligible; fail closed rather
-                 than silently ignoring the safeguard.
+  Direction matching the effective direction -- always eligible, old or
+  new (M1 still needs its own 2-OB same-direction sequence to have a
+  candidate at all; that requirement is unrelated to this and unaffected
+  by it -- once M1 has a valid sequence in the effective direction, it
+  trades it regardless of age).
+  Direction opposite the effective direction -- eligible only if that
+  specific OB's own event time is at/after the event_time boundary.
+  No effective direction yet (no data at all) -- nothing eligible; fail
+  closed rather than silently ignoring the safeguard.
+
+Deliberately independent of algo_v2.bias, which still governs when an
+ALREADY-OPEN position force-closes -- confirmed that only a fresh M5 OB
+in the opposite direction (or the position's own SL) closes a running
+trade; the zone's label changing alone never does. See main.py.
 """
 from __future__ import annotations
 
@@ -23,6 +39,7 @@ from enum import Enum
 from typing import Optional
 
 from atr_bridge.reader import ATRSnapshot
+from ob_bridge.reader import OBSnapshot
 
 
 class ZoneState(Enum):
@@ -33,15 +50,48 @@ class ZoneState(Enum):
 
 @dataclass(frozen=True)
 class ZoneResult:
-    state: ZoneState
-    event_time: int
+    state: ZoneState     # STRONG = effective direction bullish, WEAK = bearish, NONE = no data yet
+    event_time: int      # the winning (most recent) of the three source timestamps
 
 
-def compute_zone(atr: Optional[ATRSnapshot]) -> ZoneResult:
-    if atr is None:
+def _m5_ob_time(m5: Optional[OBSnapshot], direction: int) -> int:
+    """M5's own latest OB origin time in this direction, 0 if none. Uses
+    start_time (the OB's origin candle), not detected_time -- confirmed
+    live that detected_time can jitter by a second or two for the same
+    zone, which would make this event_time unstable; start_time never
+    changes for a given rectangle (same fix already applied in
+    candidates.py's _event_time)."""
+    if m5 is None:
+        return 0
+    history = m5.bull if direction == 1 else m5.bear
+    if not history:
+        return 0
+    return history[0].start_time
+
+
+def compute_zone(atr: Optional[ATRSnapshot], m5: Optional[OBSnapshot]) -> ZoneResult:
+    """Combines the ATR Trail flip with M5's own latest bullish/bearish OB
+    times -- whichever of the three is most recent sets the effective
+    direction and event_time boundary."""
+    candidates = []  # (event_time, direction)
+
+    if atr is not None:
+        candidates.append((atr.event_time, 1 if atr.trend > 0 else -1))
+
+    bull_time = _m5_ob_time(m5, 1)
+    if bull_time > 0:
+        candidates.append((bull_time, 1))
+
+    bear_time = _m5_ob_time(m5, -1)
+    if bear_time > 0:
+        candidates.append((bear_time, -1))
+
+    if not candidates:
         return ZoneResult(ZoneState.NONE, 0)
-    state = ZoneState.STRONG if atr.trend > 0 else ZoneState.WEAK
-    return ZoneResult(state, atr.event_time)
+
+    event_time, direction = max(candidates, key=lambda c: c[0])
+    state = ZoneState.STRONG if direction == 1 else ZoneState.WEAK
+    return ZoneResult(state, event_time)
 
 
 def is_eligible(zone: ZoneResult, direction: int, ob_event_time: int) -> bool:
@@ -54,6 +104,6 @@ def is_eligible(zone: ZoneResult, direction: int, ob_event_time: int) -> bool:
     if direction == favored:
         return True
 
-    # Opposite-of-favored direction: only eligible if it formed at/after the
-    # zone's last character-flip event -- older ones stay blocked.
+    # Opposite-of-effective-direction: only eligible if it formed at/after
+    # the current event_time boundary -- older ones stay blocked.
     return ob_event_time >= zone.event_time

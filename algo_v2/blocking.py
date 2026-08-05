@@ -6,7 +6,11 @@ old EA's per-timeframe block latch.
 
 Released two ways:
   - automatically, once a NEW OB forms in the same direction on that same
-    timeframe (the blocked zone is no longer current, so the block is moot)
+    timeframe and stays the confirmed latest for a few seconds (the blocked
+    zone is no longer current, so the block is moot) -- see
+    release_stale_blocks() / BLOCK_RELEASE_CONFIRM_SECONDS in main.py; the
+    time-based confirmation lives there, not in this store, since it's a
+    single-poll-flicker guard rather than block bookkeeping
   - manually, via `python -m algo_v2.reset_block <M1|M3|M5|all>`
 
 V1 (algo/) and this bot run on the same symbol/terminal simultaneously, so
@@ -74,22 +78,6 @@ class BlockedZoneStore:
         if removed is not None:
             self._save()
         return removed
-
-    def release_if_stale(self, source_tf: str, direction: int,
-                         current_latest_zone_key: Optional[str]) -> None:
-        """Auto-release only if the block belongs to the same direction and
-        a genuinely different zone is now the latest for that direction."""
-        blocked = self._blocked.get(source_tf)
-        if blocked is None:
-            return
-
-        blocked_direction = int(blocked.split("|")[1])
-        if blocked_direction != direction:
-            return
-
-        if current_latest_zone_key is not None and current_latest_zone_key != blocked:
-            print(f"[BLOCK] auto-released {source_tf} block ({blocked}): new same-direction zone superseded it")
-            self.release(source_tf)
 
     def publish_status_file(self) -> None:
         """Writes a small status file -- separate from V1's -- for a future

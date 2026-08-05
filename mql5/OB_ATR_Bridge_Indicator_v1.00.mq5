@@ -165,11 +165,14 @@ void DisplayTrailValue(double value, int trend)
 
 //+------------------------------------------------------------------+
 //| Bar time of the most recent trend character flip (Strong<->Weak) |
+//| reference_idx is the bar to treat as "current" -- pass the last  |
+//| CLOSED bar's index here, not rates_total-1 (the forming bar), so |
+//| this never reacts to a flip that hasn't actually confirmed yet.  |
 //+------------------------------------------------------------------+
-datetime FindEventTime(const int rates_total, const datetime &time[])
+datetime FindEventTime(const int reference_idx, const datetime &time[])
 {
-   int current_trend = (int)TrendBuffer[rates_total - 1];
-   for(int i = rates_total - 2; i >= 0; i--)
+   int current_trend = (int)TrendBuffer[reference_idx];
+   for(int i = reference_idx - 1; i >= 0; i--)
    {
       if((int)TrendBuffer[i] != current_trend)
          return time[i + 1];
@@ -183,17 +186,32 @@ datetime FindEventTime(const int rates_total, const datetime &time[])
 //| Publish trail/trend/event-time to the JSON bridge, write-then-   |
 //| rename so an external reader (e.g. Python) never observes a      |
 //| half-written file mid-scan -- same pattern as the OB bridge.     |
+//|                                                                    |
+//| Deliberately publishes the LAST CLOSED bar (rates_total-2), not  |
+//| the currently-forming one (rates_total-1) -- confirmed live that |
+//| publishing the live bar let trend/event_time wobble tick-to-tick |
+//| as price oscillated right at the trail line mid-candle, which    |
+//| the Python bot then had to debounce against. A closed bar's      |
+//| close[] never changes once it closes, so this is now genuinely   |
+//| stable -- it updates once per bar close, matching "previous      |
+//| candle close" from the original spec, not once per tick. The     |
+//| on-chart label (DisplayTrailValue) still shows the LIVE value,   |
+//| unchanged -- only what's published to the bridge changed.        |
 //+------------------------------------------------------------------+
 void PublishATRBridgeFile(const int rates_total, const datetime &time[])
 {
+   if(rates_total < 2)
+      return;  // need at least one fully closed bar to publish anything
+   int closed_idx = rates_total - 2;
+
    string symbol = EffectiveSymbol();
    int tf_minutes = (int)(PeriodSeconds(_Period) / 60);
    if(tf_minutes <= 0)
       tf_minutes = (int)_Period;
 
-   double trail = TrailStop[rates_total - 1];
-   int trend = (int)TrendBuffer[rates_total - 1];
-   datetime event_time = FindEventTime(rates_total, time);
+   double trail = TrailStop[closed_idx];
+   int trend = (int)TrendBuffer[closed_idx];
+   datetime event_time = FindEventTime(closed_idx, time);
 
    string j = "{";
    j += "\"symbol\":\"" + symbol + "\",";
