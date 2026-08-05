@@ -279,10 +279,16 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
                 broker.modify_position_sl(cfg.symbol, pos.ticket, new_sl, pos.tp)
 
     # 3. New entries -- both directions are tried every cycle. Direction-
-    #    gating happens per-candidate, below, via is_eligible(): a
-    #    candidate matching the zone's current effective direction is
+    #    gating happens per-candidate, below, via is_eligible(): for M3/M5,
+    #    a candidate matching the zone's current effective direction is
     #    always eligible (old or new OB); one against it is only eligible
-    #    if that specific OB postdates the event_time boundary. No global
+    #    if that specific OB postdates the event_time boundary. M1 uses the
+    #    same check with strict=True instead -- its own 2-OB sequence is
+    #    one confirmation, but it only trades when that direction ALSO
+    #    matches the effective direction right now; no "postdates the
+    #    boundary" exception for M1 (see zone.py's is_eligible docstring --
+    #    confirmed live a stale-vs-zone M1 sequence traded under the old
+    #    lenient check, which strict=True exists to block). No global
     #    direction gate here at all -- step 1 above handles closing an
     #    already-open position independently (fresh_opposite_ob_exists).
     if zone.state == ZoneState.NONE:
@@ -296,15 +302,15 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
 
     candidates = []
 
-    def eligible(c) -> bool:
+    def eligible(c, strict: bool = False) -> bool:
         return (c is not None
                 and not store.is_traded(c.zone_key)
                 and not blocked.is_blocked(c.source_tf, c.zone_key)
-                and is_eligible(zone, c.direction, c.event_time))
+                and is_eligible(zone, c.direction, c.event_time, strict=strict))
 
     for direction in (1, -1):
         c = build_m1_candidate(direction, m1, m15, m5, m3)
-        if eligible(c):
+        if eligible(c, strict=True):
             candidates.append(c)
 
         c = build_m3_candidate(direction, m3, m15, m5, current_price)

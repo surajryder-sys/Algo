@@ -16,16 +16,26 @@ zone still technically reads Strong; that OB, being the newest of the
 three, makes bearish the effective direction for new LTF entries right
 away, even though the ATR line itself hasn't flipped yet.
 
-Eligibility rule (applies to every OB candidate -- M5, M3, and M1 alike):
+Eligibility rule for M3 and M5:
   Direction matching the effective direction -- always eligible, old or
-  new (M1 still needs its own 2-OB same-direction sequence to have a
-  candidate at all; that requirement is unrelated to this and unaffected
-  by it -- once M1 has a valid sequence in the effective direction, it
-  trades it regardless of age).
+  new.
   Direction opposite the effective direction -- eligible only if that
   specific OB's own event time is at/after the event_time boundary.
   No effective direction yet (no data at all) -- nothing eligible; fail
   closed rather than silently ignoring the safeguard.
+
+M1 uses the same function with strict=True: it drops the "opposite but
+newer" exception entirely -- M1's own 2-OB same-direction sequence is
+one confirmation, but it only ever trades when that direction ALSO
+matches the effective direction right now. A same-direction-but-stale
+M5 OB or ATR flip does not save it, and neither does an M1 sequence
+that merely postdates event_time while still disagreeing with it --
+M1 is the fastest/noisiest timeframe, so it does not get the same
+"fresh enough to override" leeway M3/M5 get. Confirmed live: a
+same-direction M1 sequence formed while the zone was still on the
+other side (M1 bearish sequence while M5/ATR remained bullish-favored)
+and traded anyway under the old lenient check -- that specific case is
+exactly what strict=True on M1 exists to block.
 
 Deliberately independent of algo_v2.bias, which still governs when an
 ALREADY-OPEN position force-closes -- confirmed that only a fresh M5 OB
@@ -94,15 +104,21 @@ def compute_zone(atr: Optional[ATRSnapshot], m5: Optional[OBSnapshot]) -> ZoneRe
     return ZoneResult(state, event_time)
 
 
-def is_eligible(zone: ZoneResult, direction: int, ob_event_time: int) -> bool:
+def is_eligible(zone: ZoneResult, direction: int, ob_event_time: int, strict: bool = False) -> bool:
     """direction: 1 bullish, -1 bearish. ob_event_time: the candidate OB's
-    own detected/origin time (matches candidates.py's _event_time)."""
+    own detected/origin time (matches candidates.py's _event_time).
+    strict: M1 only -- drops the "opposite but newer" exception below;
+    the candidate's direction must equal the effective direction, full
+    stop. M3/M5 always call this with strict=False (the default)."""
     if zone.state == ZoneState.NONE:
         return False
 
     favored = 1 if zone.state == ZoneState.STRONG else -1
     if direction == favored:
         return True
+
+    if strict:
+        return False
 
     # Opposite-of-effective-direction: only eligible if it formed at/after
     # the current event_time boundary -- older ones stay blocked.
