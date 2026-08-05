@@ -71,7 +71,7 @@ input color  NeutralBiasColor               = clrSilver;
 input bool   ShowVirginObList               = false;  // untested-only OB list per timeframe -- off by default (decluttered)
 input int    VirginObListYGap               = 10;
 
-input bool   ShowResetButtons               = true;   // RESET M1/M3/M5 buttons -> write a flag file the Python bot polls
+input bool   ShowResetButtons               = true;   // RESET M1/M3/M5 buttons -> write flag files algo_v2 polls
 input int    ResetButtonCorner              = 0;      // 0=left top, 1=right top, 2=left bottom, 3=right bottom -- matches BiasLabelCorner by default so they sit in the same column
 input int    ResetButtonX                   = 480;    // matches BiasLabelX by default
 input int    ResetButtonYGap                = 15;     // gap below the virgin-OB list's current bottom row
@@ -365,7 +365,7 @@ int OnInit()
    if(PublishToFile)
       FolderCreate(FileBridgeFolder, FILE_COMMON);
 
-   CreateResetButtons();
+   CreateV2ResetButtons();
 
    if(ScanEverySeconds > 0)
       EventSetTimer(ScanEverySeconds);
@@ -383,10 +383,10 @@ void OnDeinit(const int reason)
       ObjectDelete(0, BiasLabelName(i));
    for(int i = 0; i < g_vob_slot_count; i++)
       ObjectDelete(0, "OBSP_VOB_" + IntegerToString(i));
-   ObjectDelete(0, "OBSP_BLOCKSTATUS_M1");
-   ObjectDelete(0, "OBSP_BLOCKSTATUS_M3");
-   ObjectDelete(0, "OBSP_BLOCKSTATUS_M5");
-   DeleteResetButtons();
+   ObjectDelete(0, "OBSP_BLOCKSTATUS_V2_M1");
+   ObjectDelete(0, "OBSP_BLOCKSTATUS_V2_M3");
+   ObjectDelete(0, "OBSP_BLOCKSTATUS_V2_M5");
+   DeleteV2ResetButtons();
    Comment("");
 }
 
@@ -397,13 +397,13 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       return;
 
    string tf = "";
-   if(sparam == "OBSP_RESET_M1")      tf = "M1";
-   else if(sparam == "OBSP_RESET_M3") tf = "M3";
-   else if(sparam == "OBSP_RESET_M5") tf = "M5";
+   if(sparam == "OBSP_RESET_V2_M1")      tf = "M1";
+   else if(sparam == "OBSP_RESET_V2_M3") tf = "M3";
+   else if(sparam == "OBSP_RESET_V2_M5") tf = "M5";
    else return;
 
    ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
-   WriteResetRequest(tf);
+   WriteV2ResetRequest(tf);
    ChartRedraw();
 }
 
@@ -483,12 +483,23 @@ void ScanAndPublishAll()
    if(ShowVirginObList)
       vob_bottom_y = UpdateVirginObLabels();
 
+   // Status labels stack vertically (one row per timeframe) since the text
+   // ("M1: BLOCKED (manual_cancel)") is too wide for a side-by-side layout
+   // without overlapping -- confirmed live that fixed-width side-by-side
+   // spacing (sized for V1's shorter "M1: BLOCKED" text) visibly collided.
    int status_y = vob_bottom_y + ResetButtonYGap;
-   UpdateBlockStatusLabels(status_y);
-   RepositionResetButtons(status_y + 16);
+   UpdateV2BlockStatusLabels(status_y);
+   RepositionV2ResetButtons(status_y + 3 * BiasLabelRowHeight);
 
    if(ShowPanel)
       DrawCombinedPanel(symbol);
+
+   // ObjectSetString/ObjectSetInteger above update the label objects'
+   // properties immediately, but MT5 doesn't repaint the chart just
+   // because a property changed -- confirmed live that a cancelled
+   // order's BLOCKED status sat updated-but-invisible until something
+   // else (a manual click) forced a redraw. Force it here instead.
+   ChartRedraw();
 }
 
 //+------------------------------------------------------------------+
@@ -507,27 +518,32 @@ void CreateResetButton(const string name, const string text, const int x, const 
 }
 
 //+------------------------------------------------------------------+
-void CreateResetButtons()
+// Reset buttons/status for the algo_v2 bot -- object names, flag files,
+// and status JSON all namespaced "_V2" purely because that's what
+// algo_v2/blocking.py already reads/writes; there's only one bot wired up
+// to the chart now, so the naming is just an implementation detail, not a
+// V1-vs-V2 distinction on screen.
+//+------------------------------------------------------------------+
+void CreateV2ResetButtons()
 {
    if(!ShowResetButtons)
       return;
-   // Placed at a default Y here; RepositionResetButtons() moves them under
-   // the virgin-OB list every poll, once that list's height is known.
-   CreateResetButton("OBSP_RESET_M1", "RESET M1", ResetButtonX, BiasLabelYStart);
-   CreateResetButton("OBSP_RESET_M3", "RESET M3", ResetButtonX + 87, BiasLabelYStart);
-   CreateResetButton("OBSP_RESET_M5", "RESET M5", ResetButtonX + 174, BiasLabelYStart);
+   // Placed at a default Y here; RepositionV2ResetButtons() moves them
+   // every poll, once the status labels' height above them is known.
+   CreateResetButton("OBSP_RESET_V2_M1", "RESET M1", ResetButtonX, BiasLabelYStart);
+   CreateResetButton("OBSP_RESET_V2_M3", "RESET M3", ResetButtonX + 87, BiasLabelYStart);
+   CreateResetButton("OBSP_RESET_V2_M5", "RESET M5", ResetButtonX + 174, BiasLabelYStart);
 }
 
 //+------------------------------------------------------------------+
-// Reads BLOCK_STATUS.json (published by the Python bot's BlockedZoneStore)
-// for one timeframe key. Hand-parsed against the known compact format
-// (no generic JSON lib available without external includes).
-bool ReadBlockStatus(const string tf, bool &is_blocked, string &reason)
+// Reads BLOCK_STATUS_V2.json (published by algo_v2's BlockedZoneStore) --
+// same compact format and hand-parser as ReadBlockStatus, different file.
+bool ReadV2BlockStatus(const string tf, bool &is_blocked, string &reason)
 {
    is_blocked = false;
    reason = "";
 
-   string path = FileBridgeFolder + "\\BLOCK_STATUS.json";
+   string path = FileBridgeFolder + "\\BLOCK_STATUS_V2.json";
    int handle = FileOpen(path, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
    if(handle == INVALID_HANDLE)
       return false;
@@ -563,19 +579,18 @@ bool ReadBlockStatus(const string tf, bool &is_blocked, string &reason)
 }
 
 //+------------------------------------------------------------------+
-void UpdateBlockStatusLabels(const int y)
+void UpdateV2BlockStatusLabels(const int y)
 {
    if(!ShowResetButtons)
       return;
 
-   string tfs[3]       = {"M1", "M3", "M5"};
-   int    x_offsets[3]  = {0, 87, 174};
+   string tfs[3] = {"M1", "M3", "M5"};
 
    for(int i = 0; i < 3; i++)
    {
       bool   is_blocked;
       string reason;
-      bool   ok = ReadBlockStatus(tfs[i], is_blocked, reason);
+      bool   ok = ReadV2BlockStatus(tfs[i], is_blocked, reason);
 
       string txt;
       color  clr;
@@ -595,7 +610,7 @@ void UpdateBlockStatusLabels(const int y)
          clr = clrGray;
       }
 
-      string name = "OBSP_BLOCKSTATUS_" + tfs[i];
+      string name = "OBSP_BLOCKSTATUS_V2_" + tfs[i];
       if(ObjectFind(0, name) < 0)
       {
          ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
@@ -603,9 +618,12 @@ void UpdateBlockStatusLabels(const int y)
          ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
          ObjectSetInteger(0, name, OBJPROP_BACK, false);
       }
+      // One row per timeframe (not side-by-side) -- "M1: BLOCKED
+      // (manual_cancel)" is too wide to fit three across without
+      // overlapping at any reasonable column spacing.
       ObjectSetInteger(0, name, OBJPROP_CORNER, ResetButtonCorner);
-      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, ResetButtonX + x_offsets[i]);
-      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, ResetButtonX);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y + i * BiasLabelRowHeight);
       ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
       ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
       ObjectSetString(0, name, OBJPROP_FONT, BiasLabelFont);
@@ -614,40 +632,37 @@ void UpdateBlockStatusLabels(const int y)
 }
 
 //+------------------------------------------------------------------+
-void RepositionResetButtons(const int y)
+void RepositionV2ResetButtons(const int y)
 {
    if(!ShowResetButtons)
       return;
-   ObjectSetInteger(0, "OBSP_RESET_M1", OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, "OBSP_RESET_M3", OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, "OBSP_RESET_M5", OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, "OBSP_RESET_V2_M1", OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, "OBSP_RESET_V2_M3", OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, "OBSP_RESET_V2_M5", OBJPROP_YDISTANCE, y);
 }
 
 //+------------------------------------------------------------------+
-void DeleteResetButtons()
+void DeleteV2ResetButtons()
 {
-   ObjectDelete(0, "OBSP_RESET_M1");
-   ObjectDelete(0, "OBSP_RESET_M3");
-   ObjectDelete(0, "OBSP_RESET_M5");
+   ObjectDelete(0, "OBSP_RESET_V2_M1");
+   ObjectDelete(0, "OBSP_RESET_V2_M3");
+   ObjectDelete(0, "OBSP_RESET_V2_M5");
 }
 
 //+------------------------------------------------------------------+
-void WriteResetRequest(const string tf)
+void WriteV2ResetRequest(const string tf)
 {
-   // The block state this releases lives in the Python bot's own store, not
-   // here -- this just drops a flag file for it to pick up on its next poll
-   // and delete, same direction as the JSON bridge but reversed.
    FolderCreate(FileBridgeFolder, FILE_COMMON);
-   string name = FileBridgeFolder + "\\RESET_" + tf + ".flag";
+   string name = FileBridgeFolder + "\\RESET_V2_" + tf + ".flag";
    int handle = FileOpen(name, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
    if(handle == INVALID_HANDLE)
    {
-      Print("Reset request write failed: ", name, " | error=", GetLastError());
+      Print("V2 reset request write failed: ", name, " | error=", GetLastError());
       return;
    }
    FileWriteString(handle, IntegerToString((long)TimeCurrent()));
    FileClose(handle);
-   Print("Reset requested for ", tf, " -- flag written: ", name);
+   Print("V2 reset requested for ", tf, " -- flag written: ", name);
 }
 
 //+------------------------------------------------------------------+

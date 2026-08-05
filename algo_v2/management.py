@@ -1,23 +1,30 @@
-"""Position management: trailing SL and the bias-flip forced exit rule.
+"""Position management: trailing SL and the fresh-opposite-OB forced exit
+rule.
 
 Trailing applies uniformly regardless of which timeframe originated the
 trade (M1, M3, or M5): always follow whichever of M15/M5/M3's current
 same-direction OB edge is closest to the CURRENT price, moving SL only in
 the favorable direction (raise for longs, lower for shorts) -- never loosen.
-M15 OB reading still feeds this (SL structure), even though V2's bias
-direction itself no longer counts M15's vote -- see algo_v2/bias.py.
 
-Only one position is ever meant to be open at a time, matching the current
-bias direction. Any bias direction unconditionally forces the opposite-
-direction position/pending order closed -- otherwise a stale position could
-sit there blocking new entries in the now-correct direction until its own
-SL or a manual close, which defeats the point of having a single live bias.
+Only one position is ever meant to be open at a time. It force-closes the
+instant M5 forms a fresh OPPOSITE-direction OB -- "fresh" meaning its
+origin candle postdates the ATR zone's own last Strong<->Weak flip
+(atr.event_time). Confirmed live and by spec: holding a position through a
+zone flip alone is fine (e.g. SELL open, zone flips Weak->Strong -- keep
+holding); only a genuinely fresh opposite M5 OB that forms AFTER that flip
+should force it closed, or the position's own SL. An M5 OB that predates
+the flip is stale and must NOT trigger a close, even if it's M5's own
+most-recent-by-raw-comparison OB in that direction -- that comparison
+alone was the bug (see git history): M5 can go a long time without a new
+OB on one side, leaving a stale old one that's technically "the latest"
+but has nothing to do with what's happened since.
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from algo_v2.bias import BiasResult
+from atr_bridge.reader import ATRSnapshot
+from ob_bridge.reader import OBSnapshot
 from algo_v2.entries import select_sl
 
 
@@ -39,11 +46,19 @@ def compute_trailing_sl(direction: int, current_price: float, current_sl: Option
     return None
 
 
-def bias_flip_exit_direction(bias: BiasResult) -> Optional[int]:
-    """Direction (1 or -1) whose open/pending exposure must be closed/
-    cancelled right now, or None if bias has no direction."""
-    if bias.direction == 1:
-        return -1
-    if bias.direction == -1:
-        return 1
-    return None
+def fresh_opposite_ob_exists(m5: Optional[OBSnapshot], atr: Optional[ATRSnapshot],
+                             position_direction: int) -> bool:
+    """True if M5 has formed an OB opposite to position_direction whose
+    origin candle (start_time) postdates the ATR zone's own last flip
+    (atr.event_time) -- the sole trigger for force-closing an open
+    position. position_direction: 1 for an open BUY, -1 for an open SELL
+    (checks the opposite side)."""
+    if m5 is None or atr is None:
+        return False
+
+    opposite = -position_direction
+    history = m5.bull if opposite == 1 else m5.bear
+    if not history:
+        return False
+
+    return history[0].start_time > atr.event_time

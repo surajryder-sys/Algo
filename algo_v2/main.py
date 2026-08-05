@@ -9,12 +9,16 @@ V2 differences from V1 (algo/main.py):
     and is_eligible() decides per-candidate whether each one is tradeable
     (see zone.py's docstring for the full rule). M15 is still read purely
     for SL-edge selection, same as before.
-  - algo_v2.bias (M5's own OB direction) is now used for exactly one
-    thing: force-closing an ALREADY-OPEN position the moment M5 forms a
-    fresh opposite-direction OB. It plays no role in choosing new entries
-    -- confirmed that the zone's label changing alone should never close
-    a running position, only a fresh opposite M5 OB (or the position's
-    own SL) does that.
+  - An ALREADY-OPEN position force-closes the moment M5 forms a fresh
+    opposite-direction OB -- "fresh" meaning it postdates the ATR zone's
+    own last flip (see management.fresh_opposite_ob_exists). Confirmed
+    live and by spec that the zone's label changing alone should never
+    close a running position, and that comparing M5's own bull-vs-bear OB
+    times in isolation (the original approach) was wrong: M5 can go a
+    long time without a fresh OB on one side, leaving a stale old one
+    that's technically "the latest" but predates the zone's own most
+    recent flip and has nothing to do with anything that's happened
+    since -- it must not trigger a close.
   - Separate magic number, state files, and order-comment prefix so this
     can run alongside the V1 bot on the same terminal/account without
     colliding. Virgin-zone Telegram alerts are intentionally NOT wired in
@@ -35,17 +39,16 @@ import MetaTrader5 as mt5
 from atr_bridge.reader import read_atr
 from ob_bridge.reader import read_zone, OBSnapshot
 from algo_v2 import broker
-from algo_v2.bias import compute_bias
 from algo_v2.blocking import BlockedZoneStore, check_reset_requests
 from algo_v2.candidates import (
     build_m1_candidate, build_m3_candidate, build_m5_candidate,
-    choose_winning_candidate, should_replace_pending, current_zone_key,
+    choose_winning_candidate, should_replace_pending,
     order_comment, parse_order_comment,
 )
 from algo_v2.config import Config, load_config
 from algo_v2.entries import EntryMode
 from algo_v2.intervention import check_manual_pending_cancellations, check_manual_position_closes
-from algo_v2.management import compute_trailing_sl, bias_flip_exit_direction
+from algo_v2.management import compute_trailing_sl, fresh_opposite_ob_exists
 from algo_v2.state_store import TradedZoneStore
 from algo_v2.zone import ZoneState, compute_zone, is_eligible
 
@@ -118,17 +121,29 @@ def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore, runtime: Ru
     runtime.seen_position_tickets = current_positions
 
 
-# The OB bridge's per-direction "latest zone" pointer (current_zone_key,
-# used only here) can still transiently point at the wrong (older) zone
-# for exactly one poll before self-correcting -- confirmed live: the
-# candidate-building path (_overall_latest_and_previous, mixing bull+bear)
-# stayed rock solid across the same window this flickered in, so it's
-# specifically this single-direction history[0] lookup that's still
-# occasionally unreliable, independent of the detected_time/start_time fix
-# and the bias.py/ATR-bridge fixes elsewhere. Requiring the "new" zone to
-# hold for this many real seconds before actually releasing a block stops
-# that one-poll blip from silently undoing a manual cancellation.
+# Comparing "is the current latest zone different from the blocked one"
+# turned out unreliable -- confirmed live that current_zone_key (a
+# single-direction history[0] lookup) and the candidate-building path
+# (_overall_latest_and_previous, mixing bull+bear) can transiently
+# disagree on which zone is "latest" when reading the same OB bridge
+# data, because the underlying zone list itself isn't perfectly stable
+# scan to scan. Comparing against the block's own wall-clock creation
+# time instead only needs one fact to hold -- some OB (either direction)
+# with a start_time after the block exists -- true regardless of which
+# specific zone the bridge's ordering currently favors. Still requires
+# that fact to hold for this many real seconds before acting on it, as a
+# last line of defense against a single-poll misread.
 BLOCK_RELEASE_CONFIRM_SECONDS = 5.0
+
+
+def _newest_ob_start_time(snap: Optional[OBSnapshot]) -> Optional[int]:
+    """Most recent start_time across BOTH directions in this snapshot's
+    history (not just history[0] of one direction) -- per the rule "a
+    new OB, bullish or bearish, resets the block"."""
+    if snap is None:
+        return None
+    times = [z.start_time for z in snap.bull] + [z.start_time for z in snap.bear]
+    return max(times) if times else None
 
 
 def release_stale_blocks(blocked: BlockedZoneStore, runtime: RuntimeState,
@@ -141,35 +156,26 @@ def release_stale_blocks(blocked: BlockedZoneStore, runtime: RuntimeState,
             runtime.pending_block_release.pop(source_tf, None)
             continue
 
-        direction = int(blocked_key.split("|")[1])
-        latest_key = current_zone_key(source_tf, snap, direction)
+        block_time = blocked.blocked_since(source_tf)
+        newest = _newest_ob_start_time(snap)
+        has_new_ob = (block_time is not None and newest is not None and newest > block_time)
 
-        # Confirmed live: current_zone_key can transiently regress to an
-        # OLDER zone (not just a one-poll blip -- it's been seen holding
-        # steady for the full confirmation window too), which used to pass
-        # the "different + stable" check below and wrongly release a block.
-        # A zone can't un-happen, so only a genuinely NEWER event_time is
-        # ever valid grounds for release -- anything else (older, or no
-        # data this poll) is treated the same as "back to normal."
-        is_newer = (latest_key is not None
-                    and int(latest_key.split("|")[2]) > int(blocked_key.split("|")[2]))
-
-        if not is_newer:
+        if not has_new_ob:
             runtime.pending_block_release.pop(source_tf, None)
             continue
 
         pending = runtime.pending_block_release.get(source_tf)
-        if pending is None or pending[0] != latest_key:
-            # First sighting of this specific candidate as latest -- start
-            # (or restart, if it's a different candidate than before) the
+        if pending is None or pending[0] != newest:
+            # First sighting of this specific post-block OB -- start (or
+            # restart, if an even newer one has since appeared) the
             # confirmation clock rather than releasing immediately.
-            runtime.pending_block_release[source_tf] = (latest_key, now)
+            runtime.pending_block_release[source_tf] = (newest, now)
             continue
 
         _, first_seen = pending
         if now - first_seen >= BLOCK_RELEASE_CONFIRM_SECONDS:
             print(f"[BLOCK] auto-released {source_tf} block ({blocked_key}): "
-                  f"{latest_key} confirmed latest for {BLOCK_RELEASE_CONFIRM_SECONDS:.0f}s")
+                  f"new OB detected after block (confirmed {BLOCK_RELEASE_CONFIRM_SECONDS:.0f}s)")
             blocked.release(source_tf)
             runtime.pending_block_release.pop(source_tf, None)
 
@@ -220,7 +226,6 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     m1 = read_zone(cfg.symbol, 1)
     atr = read_atr(cfg.symbol, cfg.atr_timeframe_minutes)
 
-    bias = compute_bias(m5)
     zone = compute_zone(atr, m5)
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = (bid + ask) / 2.0
@@ -237,24 +242,23 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         sync_manual_intervention(cfg, blocked, runtime)
         release_stale_blocks(blocked, runtime, m1, m3, m5)
 
-    # 1. Any bias direction unconditionally forces the opposite direction
-    #    closed/cancelled -- only one position is ever meant to be open at
-    #    a time. Since bias is M5's own OB direction (computed directly
-    #    from the stable bull[0]/bear[0] start_time fields, not the
-    #    bridge's own unreliable m5.bias -- see bias.py), a fresh opposite
-    #    OB on M5 flips this automatically -- the same mechanism that
-    #    satisfies the "opposite OB squares off the running trade" rule.
-    exit_dir = bias_flip_exit_direction(bias)
-    if exit_dir is not None:
-        for pos in broker.get_positions_by_direction(cfg.symbol, cfg.magic_number, exit_dir):
-            print(f"[EXIT] closing {'BUY' if exit_dir == 1 else 'SELL'} position #{pos.ticket}: bias flip")
+    # 1. Close any open position the instant M5 forms a fresh OPPOSITE-
+    #    direction OB -- "fresh" meaning its origin candle postdates the
+    #    ATR zone's own last Strong<->Weak flip (atr.event_time). Holding
+    #    a position through a zone flip alone is fine; only a genuinely
+    #    fresh opposite M5 OB (formed after that flip), or the position's
+    #    own SL, closes it -- see management.fresh_opposite_ob_exists for
+    #    why comparing M5's own bull-vs-bear OB times in isolation (the
+    #    original approach) was wrong. Pending orders are NOT touched
+    #    here -- cancel_zone_ineligible_pending (step 1b) already handles
+    #    those correctly via the proper zone-eligibility rule.
+    for pos in broker.get_positions(cfg.symbol, cfg.magic_number):
+        direction = 1 if pos.type == mt5.POSITION_TYPE_BUY else -1
+        if fresh_opposite_ob_exists(m5, atr, direction):
+            print(f"[EXIT] closing {'BUY' if direction == 1 else 'SELL'} position #{pos.ticket}: "
+                  f"fresh opposite M5 OB after zone event")
             if cfg.enable_trading:
                 broker.close_position(cfg.symbol, pos, cfg.deviation_points)
-        for order in broker.get_pending_orders_by_direction(cfg.symbol, cfg.magic_number, exit_dir):
-            print(f"[EXIT] cancelling pending #{order.ticket}: bias flip")
-            if cfg.enable_trading:
-                runtime.expected_cancellations.add(order.ticket)
-                broker.cancel_pending_order(order.ticket)
 
     # 1b. Independent of bias: a resting pending order whose OB the zone has
     #     turned against (Strong<->Weak flip, no opposing OB needed) gets
@@ -274,14 +278,13 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
             if cfg.enable_trading:
                 broker.modify_position_sl(cfg.symbol, pos.ticket, new_sl, pos.tp)
 
-    # 3. New entries -- both directions are tried every cycle now, not just
-    #    one fixed bias.direction. Direction-gating happens per-candidate,
-    #    below, via is_eligible(): a candidate matching the zone's current
-    #    effective direction is always eligible (old or new OB); one
-    #    against it is only eligible if that specific OB postdates the
-    #    event_time boundary. bias.direction (M5's own OB) no longer gates
-    #    entries at all -- it's still used above, in step 1, purely to
-    #    force-close an already-open position.
+    # 3. New entries -- both directions are tried every cycle. Direction-
+    #    gating happens per-candidate, below, via is_eligible(): a
+    #    candidate matching the zone's current effective direction is
+    #    always eligible (old or new OB); one against it is only eligible
+    #    if that specific OB postdates the event_time boundary. No global
+    #    direction gate here at all -- step 1 above handles closing an
+    #    already-open position independently (fresh_opposite_ob_exists).
     if zone.state == ZoneState.NONE:
         return  # no zone data yet -- fail closed, no entries either direction
 
