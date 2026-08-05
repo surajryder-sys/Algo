@@ -279,18 +279,19 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
                 broker.modify_position_sl(cfg.symbol, pos.ticket, new_sl, pos.tp)
 
     # 3. New entries -- both directions are tried every cycle. Direction-
-    #    gating happens per-candidate, below, via is_eligible(): for M3/M5,
-    #    a candidate matching the zone's current effective direction is
-    #    always eligible (old or new OB); one against it is only eligible
-    #    if that specific OB postdates the event_time boundary. M1 uses the
-    #    same check with strict=True instead -- its own 2-OB sequence is
-    #    one confirmation, but it only trades when that direction ALSO
-    #    matches the effective direction right now; no "postdates the
-    #    boundary" exception for M1 (see zone.py's is_eligible docstring --
-    #    confirmed live a stale-vs-zone M1 sequence traded under the old
-    #    lenient check, which strict=True exists to block). No global
-    #    direction gate here at all -- step 1 above handles closing an
-    #    already-open position independently (fresh_opposite_ob_exists).
+    #    gating happens per-candidate, below, via is_eligible(): M1 and M3
+    #    both use strict=True -- each has its own confirmation (M1's 2-OB
+    #    sequence, M3's own latest OB), but neither trades unless that
+    #    direction ALSO matches M5/the ATR zone's effective direction right
+    #    now; no "postdates the boundary" exception for either (see zone.py's
+    #    is_eligible docstring -- confirmed live a stale-vs-zone M1 sequence
+    #    traded under the old lenient check, which strict=True exists to
+    #    block; M3 was on the same lenient check and gets the same fix per
+    #    explicit spec: M3 must agree with M5). M5 keeps the lenient
+    #    default -- it's one of the zone's own inputs, so the exception is
+    #    effectively inert for it anyway. No global direction gate here at
+    #    all -- step 1 above handles closing an already-open position
+    #    independently (fresh_opposite_ob_exists).
     if zone.state == ZoneState.NONE:
         return  # no zone data yet -- fail closed, no entries either direction
 
@@ -314,7 +315,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
             candidates.append(c)
 
         c = build_m3_candidate(direction, m3, m15, m5, current_price)
-        if eligible(c):
+        if eligible(c, strict=True):
             candidates.append(c)
 
         c = build_m5_candidate(direction, m5, m15, m3, current_price)
