@@ -4,9 +4,19 @@ Three distinct entry mechanisms, per timeframe:
 
 M1  - straight pending order directly on the zone edge, with a small buffer
       added to the entry price itself (never market, never a pullback).
-M3  - market order if close enough to the zone, otherwise a 48% pullback
+M3  - market order if close enough to the zone, otherwise a 45% pullback
       entry, otherwise no trade (never zone+buffer).
 M5  - same shape as M3, different market-distance cutoff.
+
+Pullback entry is measured as a % giveback of however far price already ran
+from the OB edge, floored so it never demands an unreasonably small giveback
+just because that run was short: the entry's offset from the OB edge itself
+never sits closer than PULLBACK_MIN_EDGE_OFFSET, even when pullback_pct's
+raw offset (distance * (1 - pullback_pct)) would put it closer. Below that
+floor's crossover distance, entries collapse toward a flat, shallow
+giveback instead of scaling down with distance -- confirmed by design: a
+short run from the edge shouldn't need almost as deep a retracement (in %
+terms) as a long one just to fill.
 
 SL is always OB-structure-based: whichever of M15/M5/M3's current same-
 direction OB edge is closest to the entry price, minus/plus a fixed buffer.
@@ -21,7 +31,9 @@ from typing import Optional
 
 SL_BUFFER = 0.5
 M1_ENTRY_BUFFER = 0.25
-PULLBACK_PCT = 0.48
+PULLBACK_PCT = 0.45
+PULLBACK_MIN_EDGE_OFFSET = 4.0  # entry never sits closer than this to the OB
+                                # edge itself -- see module docstring
 
 M3_MARKET_MAX = 3.0
 M3_PULLBACK_MIN = 4.0
@@ -61,11 +73,18 @@ def m3_or_m5_entry(direction: int, ob_edge: float, detected_price: float,
         return EntryPlan(EntryMode.MARKET, None)
 
     if pullback_min < distance < pullback_max:
-        pullback_amount = distance * pullback_pct
+        # Offset from the OB edge shrinks naturally as distance shrinks
+        # (raw offset = distance * (1 - pullback_pct)); floored at
+        # PULLBACK_MIN_EDGE_OFFSET so short-distance setups don't end up
+        # demanding an almost-full giveback just to reach an entry that's
+        # already only a couple points off the edge. Always < distance
+        # itself here (distance > pullback_min == the floor value), so
+        # entry never crosses past detected_price.
+        offset_from_edge = max(distance * (1 - pullback_pct), PULLBACK_MIN_EDGE_OFFSET)
         if direction == 1:
-            entry = detected_price - pullback_amount   # == ob_edge + distance*(1-pct)
+            entry = ob_edge + offset_from_edge
         else:
-            entry = detected_price + pullback_amount
+            entry = ob_edge - offset_from_edge
         return EntryPlan(EntryMode.PENDING, entry)
 
     return EntryPlan(EntryMode.NONE, None)
