@@ -31,3 +31,4 @@ btc_smc_instance.lock
 order_attempts.log
 bias_trace.log
 error_trace.log
+fx_bot_state.json
