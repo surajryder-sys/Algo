@@ -35,24 +35,31 @@ class EntryPlan:
     sl: float
 
 
+def sl_for_zone(direction: int, zone: Zone) -> float:
+    """The zone's OTHER boundary (zone.low bullish / zone.high bearish) plus
+    a 0.02%-of-that-price buffer, pushed further from price than the raw OB
+    edge -- see module docstring. Shared by both entry (pullback_entry) and
+    trailing (management.compute_trailing_sl), which recomputes this against
+    whatever the *current* latest same-direction zone is as it updates."""
+    if direction == 1:
+        return zone.low - zone.low * SL_BUFFER_PCT
+    return zone.high + zone.high * SL_BUFFER_PCT
+
+
 def pullback_entry(direction: int, zone: Zone) -> Optional[EntryPlan]:
     """direction: 1 bullish, -1 bearish.
 
     ob_edge is the zone boundary price ran away from (zone.high for a
     bullish OB, zone.low for a bearish one) -- entry gives back 40% of that
     run, floored at ob_edge itself (never crosses past the edge into the
-    zone's far side). SL is the zone's OTHER boundary (zone.low bullish /
-    zone.high bearish) plus a 0.02%-of-that-price buffer, pushed further
-    from entry -- see module docstring.
+    zone's far side). SL is sl_for_zone() of this same zone.
     """
     if direction == 1:
         ob_edge = zone.high
         distance = zone.detected_price - ob_edge
-        sl = zone.low - zone.low * SL_BUFFER_PCT
     else:
         ob_edge = zone.low
         distance = ob_edge - zone.detected_price
-        sl = zone.high + zone.high * SL_BUFFER_PCT
 
     if distance < 0:
         return None  # detection price hasn't actually run away from the edge yet
@@ -60,4 +67,4 @@ def pullback_entry(direction: int, zone: Zone) -> Optional[EntryPlan]:
     offset_from_edge = distance * (1 - PULLBACK_PCT)
     entry = ob_edge + offset_from_edge if direction == 1 else ob_edge - offset_from_edge
 
-    return EntryPlan(entry_price=entry, sl=sl)
+    return EntryPlan(entry_price=entry, sl=sl_for_zone(direction, zone))

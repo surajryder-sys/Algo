@@ -95,3 +95,36 @@ def send_pending_order(symbol: str, direction: int, entry: float, lots: float, s
 def cancel_pending_order(ticket: int) -> OrderResult:
     request = {"action": mt5.TRADE_ACTION_REMOVE, "order": ticket}
     return _result_from(mt5.order_send(request))
+
+
+def modify_position_sl(symbol: str, ticket: int, new_sl: float, tp: float = 0.0) -> OrderResult:
+    request = {
+        "action": mt5.TRADE_ACTION_SLTP,
+        "symbol": symbol,
+        "position": ticket,
+        "sl": new_sl,
+        "tp": tp,
+    }
+    return _result_from(mt5.order_send(request))
+
+
+def close_position(symbol: str, position, deviation: int) -> OrderResult:
+    direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+    bid, ask = get_tick_price(symbol)
+    price = bid if direction == 1 else ask
+    close_type = mt5.ORDER_TYPE_SELL if direction == 1 else mt5.ORDER_TYPE_BUY
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": position.volume,
+        "type": close_type,
+        "position": position.ticket,
+        "price": price,
+        "deviation": deviation,
+        "magic": position.magic,
+        "comment": "FX bias-flip close",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    return _result_from(mt5.order_send(request))

@@ -1,8 +1,7 @@
 """Main loop for the FX cross-pairs bot: H1 order-block pullback entries
-only, across every symbol in cfg.symbols. No market entries, no trailing SL,
-no exit-on-opposite-OB -- pure "place a pullback pending order per virgin H1
-zone, SL at the zone's own opposite edge" (see entries.py's docstring for why
-that's enough scope for now).
+across every symbol in cfg.symbols, plus per-position trailing SL and a
+bias/opposite-OB exit once filled (see management.py). No market entries --
+every entry is a pending order.
 
 Run with: python -m algo_v2_fx.main
 
@@ -15,10 +14,13 @@ from __future__ import annotations
 import time
 from typing import Optional
 
+import MetaTrader5 as mt5
+
 from ob_bridge.reader import read_zone, Zone
 from algo_v2_fx import broker
 from algo_v2_fx.config import Config, load_config
 from algo_v2_fx.entries import pullback_entry
+from algo_v2_fx.management import compute_trailing_sl, fresh_opposite_ob_exists
 from algo_v2_fx.state_store import TradedZoneStore
 
 _BASE36_DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -84,6 +86,37 @@ def sync_filled_zones(cfg: Config, symbol: str, store: TradedZoneStore) -> None:
             store.mark_traded(zone_key)
 
 
+def manage_open_positions(cfg: Config, symbol: str, h1) -> None:
+    """Bias/opposite-OB exit first, then trailing SL for whatever's still
+    open after that -- same order algo_v2/main.py uses (close on a fresh
+    opposite OB takes priority over trailing a position that's about to be
+    closed anyway). See management.py for both."""
+    positions = broker.get_positions(symbol, cfg.magic_number)
+    if not positions:
+        return
+
+    bid, ask = broker.get_tick_price(symbol)
+    current_price = (bid + ask) / 2.0
+
+    for pos in positions:
+        direction = 1 if pos.type == mt5.POSITION_TYPE_BUY else -1
+
+        if fresh_opposite_ob_exists(h1, direction, int(pos.time)):
+            print(f"[EXIT] {symbol} closing #{pos.ticket} "
+                  f"{'BUY' if direction == 1 else 'SELL'}: fresh opposite H1 OB since entry")
+            if cfg.enable_trading:
+                broker.close_position(symbol, pos, cfg.deviation_points)
+            continue  # closed (or would close in dry-run) -- skip trailing it
+
+        history = h1.bull if direction == 1 else h1.bear
+        zone = history[0] if history else None
+        new_sl = compute_trailing_sl(direction, current_price, pos.sl or None, zone)
+        if new_sl is not None:
+            print(f"[TRAIL] {symbol} #{pos.ticket} SL -> {new_sl}")
+            if cfg.enable_trading:
+                broker.modify_position_sl(symbol, pos.ticket, new_sl, pos.tp)
+
+
 def run_symbol(cfg: Config, symbol: str, store: TradedZoneStore) -> None:
     h1 = read_zone(symbol, 60)
     if h1 is None or h1.is_stale():
@@ -92,8 +125,12 @@ def run_symbol(cfg: Config, symbol: str, store: TradedZoneStore) -> None:
     if cfg.enable_trading:
         sync_filled_zones(cfg, symbol, store)
 
-    # One trade at a time per symbol -- an open position or a resting
-    # pending order both block a new entry, regardless of direction.
+    manage_open_positions(cfg, symbol, h1)
+
+    # One trade at a time per symbol -- an open position (still open after
+    # manage_open_positions above -- a bias-exit close this same poll frees
+    # it up again next poll, not this one) or a resting pending order both
+    # block a new entry, regardless of direction.
     if broker.get_positions(symbol, cfg.magic_number):
         return
     if broker.get_pending_orders(symbol, cfg.magic_number):
