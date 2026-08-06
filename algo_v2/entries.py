@@ -6,7 +6,9 @@ M1  - straight pending order directly on the zone edge, with a small buffer
       added to the entry price itself (never market, never a pullback).
 M3  - market order if close enough to the zone, otherwise a 45% pullback
       entry, otherwise no trade (never zone+buffer).
-M5  - same shape as M3, different market-distance cutoff.
+M5  - same shape as M3; market/pullback thresholds currently match M3
+      exactly (both market_max=4.0, pullback_min=4.0, pullback_max=12.0),
+      kept as separate constants since they're free to diverge again later.
 
 Pullback entry is measured as a % giveback of however far price already ran
 from the OB edge, floored so it never demands an unreasonably small giveback
@@ -35,7 +37,7 @@ PULLBACK_PCT = 0.45
 PULLBACK_MIN_EDGE_OFFSET = 4.0  # entry never sits closer than this to the OB
                                 # edge itself -- see module docstring
 
-M3_MARKET_MAX = 3.0
+M3_MARKET_MAX = 4.0  # matches M3_PULLBACK_MIN now -- no more 3.0-4.0 dead zone
 M3_PULLBACK_MIN = 4.0
 M3_PULLBACK_MAX = 12.0
 
