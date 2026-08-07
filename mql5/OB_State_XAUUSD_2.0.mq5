@@ -512,7 +512,12 @@ int OnInit()
    IndicatorSetString(INDICATOR_SHORTNAME, "OB State XAUUSD 2.0");
 
    ParseTargets();
-   CreateATRHandles(EffectiveSymbol());
+   // _Symbol (this chart's real instrument, e.g. "GOLD.i#" on a broker whose
+   // naming differs from BridgeSymbol) -- not EffectiveSymbol(), which is
+   // only ever a publish-time label and may not resolve to a real symbol
+   // iATR() can create a handle for. See ProcessTimeframe for the same
+   // real-vs-publish split applied to chart lookups and price queries.
+   CreateATRHandles(_Symbol);
 
    if(PublishToFile)
       FolderCreate(FileBridgeFolder, FILE_COMMON);
@@ -628,7 +633,23 @@ int OnCalculate(const int rates_total,
 //+------------------------------------------------------------------+
 void ScanAndPublishAll()
 {
-   const string symbol = EffectiveSymbol();
+   // Two different things share the name "symbol" elsewhere in this file and
+   // must NOT be collapsed into one: chart_symbol is this terminal's real
+   // instrument name (_Symbol -- e.g. "GOLD.i#" on a broker whose naming
+   // differs from XAUUSD), used for every chart lookup and live price/history
+   // query (FindChartForSymbolPeriod, SymbolInfoDouble, iClose/iHigh/iLow,
+   // iATR...) -- none of those resolve against a label that isn't a real
+   // symbol on this terminal. publish_symbol is EffectiveSymbol() (the
+   // BridgeSymbol override, e.g. "XAUUSD"), used ONLY when naming/labeling
+   // the bridge output files, so algo_v2 keeps finding OBSTATE_XAUUSD_*.json
+   // regardless of what this broker actually calls the instrument. Confirmed
+   // live: collapsing these into one value broke OB publishing entirely on a
+   // broker whose native symbol differs from BridgeSymbol -- every chart
+   // lookup silently failed and ProcessTimeframe returned before ever
+   // publishing, while ATR publishing (which never needs to *find* a chart,
+   // only label its own already-attached one) kept working, masking it.
+   const string chart_symbol   = _Symbol;
+   const string publish_symbol = EffectiveSymbol();
 
    static bool s_panel_was_shown = false;
 
@@ -647,7 +668,7 @@ void ScanAndPublishAll()
    }
 
    for(int i = 0; i < ArraySize(g_targets); i++)
-      ProcessTimeframe(i, symbol);
+      ProcessTimeframe(i, chart_symbol, publish_symbol);
 
    UpdateBiasLabels();
 
@@ -900,12 +921,12 @@ int UpdateVirginObLabels()
 }
 
 //+------------------------------------------------------------------+
-void ProcessTimeframe(const int idx, const string symbol)
+void ProcessTimeframe(const int idx, const string chart_symbol, const string publish_symbol)
 {
    const ENUM_TIMEFRAMES period  = g_targets[idx].period;
    const int              minutes = g_targets[idx].minutes;
 
-   long chart_id = FindChartForSymbolPeriod(symbol, period);
+   long chart_id = FindChartForSymbolPeriod(chart_symbol, period);
    if(chart_id < 0)
    {
       // Chart not open for this timeframe. Leave the last published state
@@ -915,7 +936,7 @@ void ProcessTimeframe(const int idx, const string symbol)
       {
          OBZone empty_zone;
          OBZone empty_hist[];
-         g_panel_y = RenderTimeframeBlock(idx, symbol, g_panel_y, false,
+         g_panel_y = RenderTimeframeBlock(idx, chart_symbol, g_panel_y, false,
                                           false, empty_zone, false, empty_zone,
                                           empty_hist, empty_hist, false, 0.0, 0);
       }
@@ -923,7 +944,7 @@ void ProcessTimeframe(const int idx, const string symbol)
    }
    g_state[idx].chart_found = true;
 
-   ScanObjectsFor(chart_id, period, symbol, minutes, idx);
+   ScanObjectsFor(chart_id, period, chart_symbol, minutes, idx);
 
    OBZone latest, latest_bull, latest_bear;
    bool has_latest = GetLatestZone("", latest);
@@ -972,17 +993,17 @@ void ProcessTimeframe(const int idx, const string symbol)
    CollectRecentZones("BEARISH", ZoneHistoryDepth, bear_history);
 
    if(PublishGlobalVariables)
-      PublishGVFor(st, symbol, minutes);
+      PublishGVFor(st, publish_symbol, minutes);
 
    if(PublishToFile)
-      PublishFileFor(st, symbol, minutes, bull_history, bear_history);
+      PublishFileFor(st, publish_symbol, minutes, bull_history, bear_history);
 
    if(ShowPanel)
    {
       double atr_value; int atr_trend;
-      bool atr_ok = GetATRTrail(idx, symbol, atr_value, atr_trend);
+      bool atr_ok = GetATRTrail(idx, chart_symbol, atr_value, atr_trend);
 
-      g_panel_y = RenderTimeframeBlock(idx, symbol, g_panel_y, true,
+      g_panel_y = RenderTimeframeBlock(idx, chart_symbol, g_panel_y, true,
                                        has_bull, latest_bull, has_bear, latest_bear,
                                        bull_history, bear_history, atr_ok, atr_value, atr_trend);
    }
