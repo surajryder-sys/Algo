@@ -214,8 +214,19 @@ def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
         print(f"[EXIT] cancelling pending #{order.ticket}: zone turned against {zone_key} "
               f"-> blocking {source_tf} zone {zone_key}")
         if cfg.enable_trading:
+            result = broker.cancel_pending_order(order.ticket)
+            if not result.ok:
+                # Don't mark expected_cancellations or block the zone -- the
+                # order is still resting. Marking it anyway would (a) make a
+                # later genuine manual cancel of this same order get silently
+                # misattributed to the bot (expected_cancellations is keyed
+                # only by ticket, with no success requirement), and (b) block
+                # a zone whose order never actually left. Confirmed live:
+                # this call was failing silently every cycle with no result
+                # check at all, retrying forever with zero visibility.
+                print(f"[EXIT] cancel failed: {result.retcode} {result.comment}")
+                continue
             runtime.expected_cancellations.add(order.ticket)
-            broker.cancel_pending_order(order.ticket)
             blocked.block(source_tf, zone_key, reason="zone_ineligible")
 
 
