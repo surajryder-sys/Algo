@@ -156,9 +156,21 @@ def release_stale_blocks(blocked: BlockedZoneStore, runtime: RuntimeState,
             runtime.pending_block_release.pop(source_tf, None)
             continue
 
-        block_time = blocked.blocked_since(source_tf)
+        # Compare against the blocked zone's OWN start_time (embedded as the
+        # zone_key's own event_time), not wall-clock block_time. OB
+        # start_time is broker bar-time, which is free to carry a persistent
+        # offset from true UTC (e.g. a data-source broker's server clock
+        # running hours ahead/behind) -- confirmed live: comparing it
+        # against Python's wall-clock time.time() made the SAME already-
+        # blocked OB spuriously look "newer than the block" the moment its
+        # offset-inflated timestamp exceeded the (true-UTC) block_time,
+        # auto-releasing the block within one confirmation window even
+        # though nothing had actually changed. Comparing within the same
+        # clock domain (both broker bar-time) sidesteps that entirely,
+        # regardless of which broker/timezone is feeding OB data.
+        blocked_event_time = int(blocked_key.split("|")[2])
         newest = _newest_ob_start_time(snap)
-        has_new_ob = (block_time is not None and newest is not None and newest > block_time)
+        has_new_ob = (newest is not None and newest > blocked_event_time)
 
         if not has_new_ob:
             runtime.pending_block_release.pop(source_tf, None)
