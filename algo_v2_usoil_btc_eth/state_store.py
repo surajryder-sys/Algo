@@ -1,8 +1,8 @@
 """Persists which zone keys have already been traded, so a restart doesn't
 re-trade the same OB. A plain JSON file -- this bot deals with a handful of
-zone keys at a time, not a scale that needs a real database.
-
-Preserved snapshot -- see config.py's docstring.
+zone keys at a time, not a scale that needs a real database. Identical to
+algo_v2/state_store.py; duplicated (not imported) to keep this bot a fully
+independent package.
 """
 from __future__ import annotations
 

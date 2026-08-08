@@ -1,12 +1,12 @@
-"""Order Block + ATR Trail zone rules (standalone USOIL SMC V2 bot).
+"""Order Block + ATR Trail zone rules (V2, merged USOIL+BTCUSD+ETHUSD bot).
 
-Preserved snapshot -- see config.py's docstring.
-
-M15 is the zone anchor (both the ATR Trail and the OB-flip inputs below are
-M15-based) -- NOT M5. This is the opposite of algo_v2 (XAUUSD), where M5 is
-the anchor; the roles are deliberately swapped here per spec. The
-"effective direction" and its event_time boundary are the most recent of
-THREE competing signals, all M15-based:
+Fully symbol-agnostic -- takes whichever symbol's M15/ATR snapshots the
+caller passes in, one call per symbol per poll (see main.py). M15 is the
+zone anchor for every symbol here (both the ATR Trail and the OB-flip
+inputs below are M15-based) -- NOT M5. This is the opposite of algo_v2
+(XAUUSD), where M5 is the anchor; the roles are deliberately swapped here
+per spec. The "effective direction" and its event_time boundary are the
+most recent of THREE competing signals, all M15-based:
   1. M15 forming its own fresh bullish OB (origin candle time)
   2. M15 forming its own fresh bearish OB (origin candle time)
   3. the ATR Trail's last Strong<->Weak flip (also M15-based -- the

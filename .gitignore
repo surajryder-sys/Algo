@@ -27,6 +27,10 @@ smc_v2_bot_state.json
 smc_v2_bot_blocks.json
 smc_v2_usoil_bot_state.json
 smc_v2_usoil_bot_blocks.json
+smc_v2_btcusd_bot_state.json
+smc_v2_btcusd_bot_blocks.json
+smc_v2_ethusd_bot_state.json
+smc_v2_ethusd_bot_blocks.json
 smc_instance.lock
 eth_smc_instance.lock
 btc_smc_instance.lock

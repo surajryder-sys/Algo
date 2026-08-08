@@ -1,12 +1,13 @@
 """Turns zone data into concrete M5/M15 trade candidates, and arbitrates
 which single candidate should own the live pending order slot.
 
-Preserved snapshot -- see config.py's docstring.
-
 This module is pure logic: no MT5 connection, no live order state beyond
 what's passed in. The live execution loop is responsible for supplying
 current price and the currently-live pending order's identity (if any),
-recovered from its comment via parse_order_comment().
+recovered from its comment via parse_order_comment(). Symbol-agnostic --
+every function takes a `symbol` argument (used to look up that symbol's
+EntryConfig in entries.py) and is called once per symbol per poll (see
+main.py).
 
 M5 + M15 for now -- see main.py's docstring for the planned M30 extension.
 """
@@ -16,11 +17,14 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ob_bridge.reader import OBSnapshot, Zone
-from algo_v2_usoil.entries import EntryMode, EntryPlan, m5_entry, m15_entry, select_sl
+from algo_v2_usoil_btc_eth.entries import EntryMode, EntryPlan, tiered_entry, select_sl
 
 # "V2O" keeps this bot's orders visually distinct from algo_v2's
 # "V2"-prefixed (XAUUSD) comments while both may run on the same
-# terminal/account.
+# terminal/account. Shared across all three symbols here -- MT5 already
+# scopes every position/order query by (symbol, magic_number), and each
+# symbol has its own magic number (see config.py), so a shared comment
+# prefix creates no ambiguity.
 COMMENT_PREFIX = "V2O"
 
 # MT5 silently truncates order/deal comments to 16 characters on at least one
@@ -137,7 +141,7 @@ def _tier_edges(direction: int, m5: Optional[OBSnapshot], m15: Optional[OBSnapsh
     return {"M5": edge(m5), "M15": edge(m15)}
 
 
-def _build_candidate(source_tf: str, entry_fn, direction: int, snap: Optional[OBSnapshot],
+def _build_candidate(symbol: str, source_tf: str, direction: int, snap: Optional[OBSnapshot],
                      m5: Optional[OBSnapshot], m15: Optional[OBSnapshot],
                      current_price: float) -> Optional[TradeCandidate]:
     if snap is None:
@@ -157,12 +161,12 @@ def _build_candidate(source_tf: str, entry_fn, direction: int, snap: Optional[OB
         return None
 
     ob_edge = zone.high if direction == 1 else zone.low
-    plan: EntryPlan = entry_fn(direction, ob_edge, zone.detected_price)
+    plan: EntryPlan = tiered_entry(symbol, direction, ob_edge, zone.detected_price)
     if plan.mode == EntryMode.NONE:
         return None
 
     reference_price = plan.entry_price if plan.entry_price is not None else current_price
-    sl = select_sl(direction, reference_price, _tier_edges(direction, m5, m15))
+    sl = select_sl(symbol, direction, reference_price, _tier_edges(direction, m5, m15))
     if sl is None:
         return None
 
@@ -171,14 +175,14 @@ def _build_candidate(source_tf: str, entry_fn, direction: int, snap: Optional[OB
                           event_time, _zone_key(source_tf, direction, event_time))
 
 
-def build_m5_candidate(direction: int, m5: Optional[OBSnapshot], m15: Optional[OBSnapshot],
-                       current_price: float) -> Optional[TradeCandidate]:
-    return _build_candidate("M5", m5_entry, direction, m5, m5, m15, current_price)
+def build_m5_candidate(symbol: str, direction: int, m5: Optional[OBSnapshot],
+                       m15: Optional[OBSnapshot], current_price: float) -> Optional[TradeCandidate]:
+    return _build_candidate(symbol, "M5", direction, m5, m5, m15, current_price)
 
 
-def build_m15_candidate(direction: int, m15: Optional[OBSnapshot], m5: Optional[OBSnapshot],
-                        current_price: float) -> Optional[TradeCandidate]:
-    return _build_candidate("M15", m15_entry, direction, m15, m5, m15, current_price)
+def build_m15_candidate(symbol: str, direction: int, m15: Optional[OBSnapshot],
+                        m5: Optional[OBSnapshot], current_price: float) -> Optional[TradeCandidate]:
+    return _build_candidate(symbol, "M15", direction, m15, m5, m15, current_price)
 
 
 def _distance_to_price(candidate: TradeCandidate, current_price: float) -> float:

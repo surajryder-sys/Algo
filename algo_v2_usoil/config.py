@@ -1,11 +1,20 @@
-"""Configuration for the V2 SMC USOIL bot (Order Block + ATR Trail zone
-rules), loaded from environment variables (.env). Independent copy of
-algo_v2/config.py (the XAUUSD build) -- see algo_v2_usoil/main.py's
-docstring for why this is a separate package rather than a config knob on
-algo_v2. Runs on its OWN MT5 terminal install (a separate terminal64.exe,
-by default the MetaTrader5-3 folder -- same pattern the old eth_smc/
-btc_smc bots used), own login/credentials, own state/block files -- fully
-independent from algo_v2's XAUUSD terminal.
+"""Configuration for the standalone V2 SMC USOIL bot (Order Block + ATR
+Trail zone rules, M15-anchored), loaded from environment variables (.env).
+
+Preserved snapshot: this is the standalone, single-symbol USOIL bot as it
+existed just before being merged into algo_v2_usoil_btc_eth (which now
+runs USOIL alongside BTCUSD/ETHUSD in one shared-connection process). Kept
+here, fully independent and ready to run on its own, in case USOIL ever
+needs to run in isolation again (its own terminal, no BTC/ETH coupling) --
+see algo_v2_usoil_btc_eth/main.py's docstring for why the merge happened
+and what changed structurally. The trading logic itself (M15 zone anchor,
+M5 strict subordinate tier, entry/SL constants, pullback formula) is
+identical between the two; this copy just isn't parameterized by symbol.
+
+Runs on its own MT5 terminal install (by default the MetaTrader5-3
+folder), own login/credentials, own state/block files -- fully independent
+from algo_v2's XAUUSD terminal (and from algo_v2_usoil_btc_eth's, wherever
+that ends up running).
 """
 from __future__ import annotations
 
@@ -58,9 +67,6 @@ def load_config() -> Config:
         # Trail needs to be computed on the same timeframe -- the indicator
         # must be attached to the M15 USOIL chart for this to have real data.
         atr_timeframe_minutes=int(os.getenv("SMC_V2_USOIL_ATR_TIMEFRAME_MINUTES", "15")),
-        # Own dedicated terminal install -- separate from algo_v2's XAUUSD
-        # terminal, so this bot never touches the terminal that's already
-        # running for gold.
         mt5_terminal_path=os.getenv("SMC_V2_USOIL_MT5_TERMINAL_PATH",
                                      r"C:\Program Files\MetaTrader5-3\terminal64.exe") or None,
         mt5_login=int(login_raw) if login_raw else None,

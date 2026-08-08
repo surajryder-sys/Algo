@@ -1,35 +1,27 @@
-"""Entry price / SL calculation for the USOIL SMC V2 bot.
+"""Entry price / SL calculation for the standalone USOIL SMC V2 bot.
 
-Two entry mechanisms now (M5, M15 -- M30 still to come, see main.py's
-docstring), both the same shape:
+Preserved snapshot -- see config.py's docstring. Two entry mechanisms (M5,
+M15 -- M30 still to come), both the same shape: market order if within
+MARKET_MAX of the zone edge, a shallow pullback entry if between
+PULLBACK_MIN and PULLBACK_MAX, otherwise no trade. M15 reuses M5's exact
+numbers.
 
-M5 / M15 - market order if within <tier>_MARKET_MAX of the zone edge, a
-     shallow pullback entry if between <tier>_PULLBACK_MIN and
-     <tier>_PULLBACK_MAX, otherwise no trade.
-
-Pullback entry is measured as a % giveback of however far price already ran
-from the OB edge, floored so it never demands an unreasonably small
+Pullback entry is measured as a % giveback of however far price already
+ran from the OB edge, floored so it never demands an unreasonably small
 giveback just because that run was short: the entry's offset from the OB
 edge itself never sits closer than PULLBACK_MIN_EDGE_OFFSET, even when
 pullback_pct's raw offset (distance * (1 - pullback_pct)) would put it
-closer. Below that floor's crossover distance, entries collapse toward a
-flat, shallow giveback instead of scaling down with distance -- ported
-from the same fix on algo_v2/entries.py (XAUUSD), where the floor is set
-equal to PULLBACK_MIN itself; USOIL's floor follows the same pattern
-(0.600, matching both tiers' own PULLBACK_MIN).
+closer. Ported from the same fix on algo_v2/entries.py (XAUUSD), where the
+floor is set equal to PULLBACK_MIN itself; USOIL's floor follows the same
+pattern (0.600, matching both tiers' own PULLBACK_MIN).
 
 SL is OB-structure-based: whichever of M5/M15's current same-direction OB
 edge is closest to the entry price, minus/plus a fixed buffer -- same
-buffer for every tier (matches algo_v2/entries.py's XAUUSD pattern: "That
-buffer is the same for every timeframe's SL").
+buffer for every tier.
 
-These are absolute USOIL price distances (not points), given by the user
-directly -- deliberately NOT copied from algo_v2/entries.py's XAUUSD
-values, which are tuned for gold's very different price scale (~$2400+
-vs. USOIL's ~$60-80) and would be meaningless here. M15 reuses M5's exact
-numbers for now (the user's choice when adding the tier) -- separate
-constants so either can be retuned independently later without touching
-the other.
+These are absolute USOIL price distances (not points), given directly --
+deliberately NOT copied from algo_v2/entries.py's XAUUSD values, which are
+tuned for gold's very different price scale (~$2400+ vs. USOIL's ~$60-90).
 """
 from __future__ import annotations
 
@@ -110,14 +102,12 @@ def m15_entry(direction: int, ob_edge: float, detected_price: float) -> EntryPla
 
 
 def select_sl(direction: int, entry_price: float, candidate_edges: dict) -> Optional[float]:
-    """candidate_edges: {"M5": edge_or_None, "M15": edge_or_None} -- kept as a
-    dict so a future M30 tier can add another key without changing this
-    function's shape, matching algo_v2/entries.py's select_sl. Picks
+    """candidate_edges: {"M5": edge_or_None, "M15": edge_or_None}. Picks
     whichever edge is closest to entry_price, but only among edges on the
-    geometrically valid side of entry -- below entry for a buy, above entry
-    for a sell. An edge on the wrong side would produce a backwards SL
-    (broker-rejected as invalid stops) and must never be chosen just for
-    being numerically closest."""
+    geometrically valid side of entry -- below entry for a buy, above
+    entry for a sell. An edge on the wrong side would produce a backwards
+    SL (broker-rejected as invalid stops) and must never be chosen just
+    for being numerically closest."""
     valid_side = {
         tf: edge for tf, edge in candidate_edges.items()
         if edge is not None and ((direction == 1 and edge < entry_price) or

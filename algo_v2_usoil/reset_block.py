@@ -1,6 +1,8 @@
 """Manually release a timeframe's manual-intervention block for the USOIL
 V2 bot.
 
+Preserved snapshot -- see config.py's docstring.
+
 Usage:
     python -m algo_v2_usoil.reset_block M5
     python -m algo_v2_usoil.reset_block M15

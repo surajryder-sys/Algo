@@ -1,29 +1,27 @@
 //+------------------------------------------------------------------+
-//|                 OB_State_USOIL_2.0.mq5                           |
+//|                 OB_State_Multi_2.0.mq5                           |
 //| Reads OB rectangles from chart objects, classifies direction,     |
 //| calculates virgin status, and publishes latest OB bias/levels --  |
 //| PLUS the ATR Trailing Stop (Strong/Weak zone character) for the   |
 //| chart this indicator is attached to. One indicator, one chart     |
-//| (attach to the M15 USOIL chart -- M15 is the zone anchor), two    |
-//| JSON bridge outputs: OBSTATE_<symbol>_<minutes>.json per          |
-//| configured OB timeframe, and ATRSTATE_<symbol>_<minutes>.json for |
-//| this chart's own timeframe.                                       |
-//| Dedicated to USOIL (BridgeSymbol default below); consumed by the  |
-//| standalone algo_v2_usoil bot -- preserved here exactly as it was  |
-//| before algo_v2_usoil got merged into algo_v2_usoil_btc_eth, so    |
-//| USOIL can still run fully independently if ever needed again. The |
-//| multi-symbol build (BTCUSD/ETHUSD too, one shared compiled        |
-//| indicator with BridgeSymbol overridden per chart) is a SEPARATE   |
-//| file, OB_State_Multi_2.0.mq5 -- deliberately not this one, so     |
-//| this file's behavior for USOIL never shifts under whatever the    |
-//| multi-symbol build's requirements turn out to need later.         |
+//| PER SYMBOL (attach to that symbol's M15 chart -- M15 is the zone  |
+//| anchor), two JSON bridge outputs: OBSTATE_<symbol>_<minutes>.json |
+//| per configured OB timeframe, and ATRSTATE_<symbol>_<minutes>.json |
+//| for this chart's own timeframe.                                   |
+//| Not dedicated to any one symbol -- the SAME compiled indicator    |
+//| gets attached to USOIL's, BTCUSD's, and ETHUSD's own M5+M15       |
+//| charts, each instance either left on BridgeSymbol="" (uses that   |
+//| chart's own symbol) or overridden explicitly. Every status/reset  |
+//| filename below is computed from EffectiveSymbol() at runtime, not |
+//| hardcoded, so all three instances of this one file never collide  |
+//| with each other despite sharing one MT5 Common Files bridge       |
+//| folder. Consumed by algo_v2_usoil_btc_eth (one merged Python bot, |
+//| all three symbols, one shared MT5 connection).                     |
 //| Forked from OB_State_XAUUSD_2.0.mq5 -- same engine, but the       |
-//| RESET V2 button/status row below covers M5+M15 (algo_v2_usoil is  |
-//| a two-tier bot for now; M30 to follow), and its status/reset      |
-//| filenames are namespaced "_USOIL" so this indicator and the       |
-//| XAUUSD one never stomp on each other's files despite sharing the  |
-//| same MT5 Common Files bridge folder -- see algo_v2_usoil/         |
-//| blocking.py's docstring for why that matters.                     |
+//| RESET V2 button/status row below covers M5+M15 (algo_v2_usoil_    |
+//| btc_eth is a two-tier bot for now; M30 to follow per symbol) --   |
+//| see algo_v2_usoil_btc_eth/blocking.py's docstring for the         |
+//| per-symbol filename scheme this must match exactly.                |
 //|                                                                     |
 //| Single-instance multi-chart OB bridge: attach to ONE chart; it    |
 //| scans every other open chart (same symbol) for each configured    |
@@ -67,7 +65,7 @@ input int    ATRPeriod                      = 2;
 input int    ATRTrailInlineBars             = 300;   // warm-up window for the per-timeframe ATR Trail shown in the panel header (display only -- never published)
 
 input string OB_ObjectKeyword               = "pineBox";
-input string BridgeSymbol                   = "USOIL"; // this build is dedicated to USOIL
+input string BridgeSymbol                   = ""; // blank = use this chart's own symbol (EffectiveSymbol() falls back to _Symbol) -- override only if the chart symbol differs from the bridge symbol you want published
 input string TargetTimeframes               = "M5,M15";  // algo_v2_usoil trades M5+M15 now -- widen to add "M30" here once that tier is added; each listed timeframe needs its own chart with the LuxAlgo OB detector attached
 input string NoTradeZoneTimeframes          = "";  // panel's Reversal Zone column: which timeframes show virgin-zone No Long/No Short entries -- empty until higher timeframes are scanned
 input bool   ShowPanel                      = false;   // rich per-timeframe visual panel -- off by default (decluttered)
@@ -524,7 +522,7 @@ int OnInit()
       return(INIT_FAILED);
    }
 
-   IndicatorSetString(INDICATOR_SHORTNAME, "OB State USOIL 2.0");
+   IndicatorSetString(INDICATOR_SHORTNAME, "OB State " + EffectiveSymbol() + " 2.0");
 
    ParseTargets();
    CreateATRHandles(EffectiveSymbol());
@@ -708,11 +706,13 @@ void CreateResetButton(const string name, const string text, const int x, const 
 }
 
 //+------------------------------------------------------------------+
-// Reset buttons/status for the algo_v2_usoil bot -- object names namespaced
-// "_V2" (on-chart only, no collision risk across charts), but the flag
-// files and status JSON are namespaced "_V2_USOIL" since those live in the
-// shared Common\Files bridge folder alongside algo_v2's (XAUUSD) plain
-// "_V2" ones -- see WriteV2ResetRequest/ReadV2BlockStatus below.
+// Reset buttons/status for the algo_v2_usoil_btc_eth bot -- object names
+// namespaced "_V2" (on-chart only, no collision risk across charts, since
+// each symbol gets its own chart), but the flag files and status JSON are
+// namespaced "_V2_<EffectiveSymbol()>" since those live in the shared
+// Common\Files bridge folder alongside algo_v2's (XAUUSD) plain "_V2" ones
+// and every other symbol's -- see WriteV2ResetRequest/ReadV2BlockStatus
+// below.
 //+------------------------------------------------------------------+
 void CreateV2ResetButtons()
 {
@@ -726,16 +726,20 @@ void CreateV2ResetButtons()
 }
 
 //+------------------------------------------------------------------+
-// Reads BLOCK_STATUS_V2_USOIL.json (published by algo_v2_usoil's
-// BlockedZoneStore) -- same compact format and hand-parser as
-// ReadBlockStatus, different (symbol-namespaced) file so this never reads
-// or races algo_v2's (XAUUSD) BLOCK_STATUS_V2.json.
+// Reads BLOCK_STATUS_V2_<BridgeSymbol>.json (published by
+// algo_v2_usoil_btc_eth's BlockedZoneStore for this chart's symbol) --
+// same compact format and hand-parser as ReadBlockStatus, different
+// (symbol-namespaced) file so this never reads or races algo_v2's
+// (XAUUSD) BLOCK_STATUS_V2.json or another symbol's status file. Dynamic
+// on EffectiveSymbol() -- the SAME compiled indicator gets attached to
+// USOIL/BTCUSD/ETHUSD charts, each with its own BridgeSymbol input, so
+// this can't be a hardcoded literal.
 bool ReadV2BlockStatus(const string tf, bool &is_blocked, string &reason)
 {
    is_blocked = false;
    reason = "";
 
-   string path = FileBridgeFolder + "\\BLOCK_STATUS_V2_USOIL.json";
+   string path = FileBridgeFolder + "\\BLOCK_STATUS_V2_" + EffectiveSymbol() + ".json";
    int handle = FileOpen(path, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
    if(handle == INVALID_HANDLE)
       return false;
@@ -842,23 +846,26 @@ void DeleteV2ResetButtons()
 }
 
 //+------------------------------------------------------------------+
-// Flag filename namespaced "_USOIL" (RESET_V2_USOIL_<tf>.flag) -- must
-// match algo_v2_usoil/blocking.py's RESET_FLAG_PREFIX exactly, and must
-// stay distinct from algo_v2's plain "RESET_V2_<tf>.flag" (XAUUSD), since
-// both indicators write into the same shared Common\Files bridge folder.
+// Flag filename namespaced per-symbol (RESET_V2_<BridgeSymbol>_<tf>.flag)
+// -- must match algo_v2_usoil_btc_eth/blocking.py's reset_flag_prefix
+// exactly (BlockedZoneStore computes it the same way from `symbol`), and
+// must stay distinct from algo_v2's plain "RESET_V2_<tf>.flag" (XAUUSD)
+// and from every other symbol's, since all indicator instances write into
+// the same shared Common\Files bridge folder regardless of which chart or
+// terminal they're attached to.
 void WriteV2ResetRequest(const string tf)
 {
    FolderCreate(FileBridgeFolder, FILE_COMMON);
-   string name = FileBridgeFolder + "\\RESET_V2_USOIL_" + tf + ".flag";
+   string name = FileBridgeFolder + "\\RESET_V2_" + EffectiveSymbol() + "_" + tf + ".flag";
    int handle = FileOpen(name, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
    if(handle == INVALID_HANDLE)
    {
-      Print("V2 USOIL reset request write failed: ", name, " | error=", GetLastError());
+      Print("V2 ", EffectiveSymbol(), " reset request write failed: ", name, " | error=", GetLastError());
       return;
    }
    FileWriteString(handle, IntegerToString((long)TimeCurrent()));
    FileClose(handle);
-   Print("V2 USOIL reset requested for ", tf, " -- flag written: ", name);
+   Print("V2 ", EffectiveSymbol(), " reset requested for ", tf, " -- flag written: ", name);
 }
 
 //+------------------------------------------------------------------+

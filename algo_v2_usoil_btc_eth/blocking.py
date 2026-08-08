@@ -1,9 +1,9 @@
 """Manual-intervention blocking: if the user manually cancels a pending
 order or closes a position (as opposed to the bot doing it, or an SL/TP/
 stop-out exit), the exact OB zone that setup came from gets blocked from
-re-entry -- one blocked zone per source timeframe (M5, M15).
-
-Preserved snapshot -- see config.py's docstring.
+re-entry -- one blocked zone per (symbol, source timeframe) pair. One
+BlockedZoneStore instance per symbol (see main.py), each namespaced to its
+own symbol so USOIL/BTCUSD/ETHUSD never share or race each other's blocks.
 
 Released three ways:
   - automatically, once a NEW OB -- bullish or bearish, either direction --
@@ -11,18 +11,18 @@ Released three ways:
     own creation time (recorded below), confirmed stable for a few seconds
     -- see release_stale_blocks() / BLOCK_RELEASE_CONFIRM_SECONDS in
     main.py.
-  - manually, via `python -m algo_v2_usoil.reset_block <M5|M15|all>`
-  - manually, via the RESET V2 USOIL M5/M15 buttons on the USOIL bridge
-    indicator's chart -- see check_reset_requests() below
+  - manually, via `python -m algo_v2_usoil_btc_eth.reset_block <symbol> <M5|M15|all>`
+  - manually, via the RESET V2 <SYMBOL> M5/M15 buttons on that symbol's
+    bridge indicator chart -- see check_reset_requests() below
 
-IMPORTANT: this bot's status/reset filenames are namespaced "_USOIL",
-distinct from algo_v2's (XAUUSD) "BLOCK_STATUS_V2.json" /
-"RESET_V2_<tf>.flag". Both bots read/write through the same shared MT5
-Common Files bridge folder (see ob_bridge.reader.bridge_root) even when
-running on separate charts/symbols, so sharing algo_v2's filenames here
-would mean this bot's blocks and reset buttons silently stomp on
-(and get stomped on by) the XAUUSD V2 bot's -- confirmed by reading
-algo_v2/blocking.py and the MQL5 indicator before building this copy.
+IMPORTANT: status/reset filenames are namespaced per symbol
+(BLOCK_STATUS_V2_<SYMBOL>.json / RESET_V2_<SYMBOL>_<tf>.flag), distinct
+from algo_v2's (XAUUSD) plain "BLOCK_STATUS_V2.json" / "RESET_V2_<tf>.flag".
+All bots read/write through the same shared MT5 Common Files bridge folder
+(see ob_bridge.reader.bridge_root) even when running on separate
+charts/symbols/terminals, so sharing filenames would mean bots silently
+stomp on each other's blocks and reset buttons -- confirmed by reading
+algo_v2/blocking.py and the MQL5 indicator before building this.
 """
 from __future__ import annotations
 
@@ -34,13 +34,14 @@ from typing import Optional
 from ob_bridge.reader import bridge_root
 
 RESET_FLAG_TIMEFRAMES = ("M5", "M15")
-STATUS_FILE_NAME = "BLOCK_STATUS_V2_USOIL.json"
-RESET_FLAG_PREFIX = "RESET_V2_USOIL_"
 
 
 class BlockedZoneStore:
-    def __init__(self, path: str):
+    def __init__(self, path: str, symbol: str):
         self._path = Path(path)
+        self._symbol = symbol
+        self._status_file_name = f"BLOCK_STATUS_V2_{symbol}.json"
+        self.reset_flag_prefix = f"RESET_V2_{symbol}_"
         self._blocked: dict = {}      # source_tf -> zone_key
         self._reasons: dict = {}      # source_tf -> reason string
         self._block_times: dict = {}  # source_tf -> unix time (time.time()) the block was created
@@ -100,8 +101,7 @@ class BlockedZoneStore:
         return removed
 
     def publish_status_file(self) -> None:
-        """Writes a small status file -- separate from algo_v2's -- for a
-        future chart display, without touching the XAUUSD bot's file."""
+        """Writes a small per-symbol status file for a future chart display."""
         status = {
             tf: {
                 "blocked": tf in self._blocked,
@@ -111,7 +111,7 @@ class BlockedZoneStore:
             for tf in RESET_FLAG_TIMEFRAMES
         }
 
-        final_path = bridge_root() / STATUS_FILE_NAME
+        final_path = bridge_root() / self._status_file_name
         tmp_path = final_path.with_suffix(".json.tmp")
         try:
             final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,10 +122,10 @@ class BlockedZoneStore:
 
 
 def check_reset_requests(blocked: BlockedZoneStore) -> None:
-    """Polls for RESET_V2_USOIL_<tf>.flag files, written by the USOIL
-    bridge indicator's own RESET button."""
+    """Polls for RESET_V2_<SYMBOL>_<tf>.flag files, written by that symbol's
+    bridge indicator chart's own RESET button."""
     for tf in RESET_FLAG_TIMEFRAMES:
-        flag_path = bridge_root() / f"{RESET_FLAG_PREFIX}{tf}.flag"
+        flag_path = bridge_root() / f"{blocked.reset_flag_prefix}{tf}.flag"
         if not flag_path.exists():
             continue
 

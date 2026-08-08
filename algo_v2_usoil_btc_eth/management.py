@@ -1,8 +1,6 @@
 """Position management: trailing SL and the fresh-opposite-OB forced exit
 rule.
 
-Preserved snapshot -- see config.py's docstring.
-
 Trailing follows M15's current same-direction OB edge only -- not M5, even
 if a trade originated on M5 -- moving SL only in the favorable direction
 (raise for longs, lower for shorts) -- never loosen. Deliberately anchor-
@@ -25,7 +23,7 @@ from typing import Optional
 
 from atr_bridge.reader import ATRSnapshot
 from ob_bridge.reader import OBSnapshot
-from algo_v2_usoil.entries import select_sl
+from algo_v2_usoil_btc_eth.entries import select_sl
 
 
 # Floating-point tolerance for the "did the SL actually improve" check below.
@@ -40,12 +38,12 @@ from algo_v2_usoil.entries import select_sl
 _MIN_SL_IMPROVEMENT = 1e-6
 
 
-def compute_trailing_sl(direction: int, current_price: float, current_sl: Optional[float],
+def compute_trailing_sl(symbol: str, direction: int, current_price: float, current_sl: Optional[float],
                         candidate_edges: dict) -> Optional[float]:
     """Returns a new SL only if it moves in the favorable direction by more
     than floating-point noise; None if no update should be made (no closer/
     appropriate OB, or it would loosen)."""
-    proposed = select_sl(direction, current_price, candidate_edges)
+    proposed = select_sl(symbol, direction, current_price, candidate_edges)
     if proposed is None:
         return None
 

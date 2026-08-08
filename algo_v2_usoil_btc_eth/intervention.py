@@ -1,28 +1,14 @@
 """Distinguishes manual (client/mobile/web) order cancellations and position
-closes from bot-initiated or SL/TP/stop-out ones.
-
-Preserved snapshot -- see config.py's docstring.
-
-IMPORTANT: MT5's ORDER_REASON field reflects who/what CREATED an order, not
-who cancelled it -- it never changes after the order is placed. Since every
-order we ever see was created by this bot via the API, ORDER_REASON is
-*always* EXPERT for our orders regardless of who cancels them later, making
-it useless for detecting a manual cancellation (confirmed live: a user's own
-manual cancellations showed up as reason=EXPERT). Pending-order cancellation
-detection therefore tracks "did the bot itself just request this specific
-cancellation" directly instead -- anything that disappears without the bot
-having asked for it is treated as manual.
-
-Position closes don't have this problem: DEAL_REASON is on the closing
-DEAL itself (a fresh event created at that exact moment), not on a
-pre-existing object, so it correctly reflects who triggered that specific
-close.
+closes from bot-initiated or SL/TP/stop-out ones. Identical to
+algo_v2/intervention.py -- see that file's docstring for the full
+reasoning; duplicated here (not imported) to keep this bot a fully
+independent package.
 """
 from __future__ import annotations
 
 import MetaTrader5 as mt5
 
-from algo_v2_usoil.candidates import parse_order_comment
+from algo_v2_usoil_btc_eth.candidates import parse_order_comment
 
 MANUAL_DEAL_REASONS = (mt5.DEAL_REASON_CLIENT, mt5.DEAL_REASON_MOBILE, mt5.DEAL_REASON_WEB)
 

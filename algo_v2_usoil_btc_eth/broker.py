@@ -1,8 +1,11 @@
 """Thin wrapper around the MetaTrader5 Python package: connection, price
 reads, position/pending-order queries, and order placement/modification.
-No strategy logic lives here -- just MT5 plumbing.
-
-Preserved snapshot -- see config.py's docstring.
+No strategy logic lives here -- just MT5 plumbing. Nearly identical to
+algo_v2/broker.py (duplicated, not imported, so this bot stays a fully
+independent package -- see main.py's docstring) except connect() now
+selects every symbol in cfg.symbols, not just one -- this is the ONE
+shared MT5 connection for all three symbols (USOIL/BTCUSD/ETHUSD),
+deliberately not three separate connections.
 """
 from __future__ import annotations
 
@@ -11,7 +14,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from algo_v2_usoil.config import Config
+from algo_v2_usoil_btc_eth.config import Config
 
 
 def connect(cfg: Config) -> None:
@@ -24,8 +27,9 @@ def connect(cfg: Config) -> None:
     if not mt5.initialize(**kwargs):
         raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
 
-    if not mt5.symbol_select(cfg.symbol, True):
-        raise RuntimeError(f"Could not select symbol {cfg.symbol}: {mt5.last_error()}")
+    for sym_cfg in cfg.symbols:
+        if not mt5.symbol_select(sym_cfg.symbol, True):
+            raise RuntimeError(f"Could not select symbol {sym_cfg.symbol}: {mt5.last_error()}")
 
 
 def shutdown() -> None:
