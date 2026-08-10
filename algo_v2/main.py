@@ -46,9 +46,10 @@ from algo_v2.candidates import (
     order_comment, parse_order_comment,
 )
 from algo_v2.config import Config, load_config
-from algo_v2.entries import EntryMode
+from algo_v2.entries import EntryMode, select_sl
 from algo_v2.intervention import check_manual_pending_cancellations, check_manual_position_closes
-from algo_v2.management import compute_trailing_sl, fresh_opposite_ob_exists
+from algo_v2.management import fresh_opposite_ob_exists
+from algo_v2.sl_manager import SLManager
 from algo_v2.state_store import TradedZoneStore
 from algo_v2.zone import ZoneState, compute_zone, is_eligible
 
@@ -242,7 +243,8 @@ def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
             blocked.block(source_tf, zone_key, reason="zone_ineligible")
 
 
-def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, runtime: RuntimeState) -> None:
+def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, runtime: RuntimeState,
+            sl_manager: SLManager) -> None:
     m15 = read_zone(cfg.symbol, 15)
     m5 = read_zone(cfg.symbol, 5)
     m3 = read_zone(cfg.symbol, 3)
@@ -290,16 +292,30 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
     cancel_zone_ineligible_pending(cfg, zone, blocked, runtime)
 
     # 2. Trail every open position in its own direction, regardless of which
-    #    source timeframe opened it. Still considers M15's OB edge (SL
-    #    structure keeps reading M15, only bias direction dropped it).
-    for pos in broker.get_positions(cfg.symbol, cfg.magic_number):
+    #    source timeframe opened it. Two methods combined every cycle --
+    #    OB-edge (M15/M5/M3 structure, same as always) and point-based
+    #    (breakeven at +7, then a running 10pt gap off the best price seen
+    #    since entry) -- whichever proposes the more protective SL wins,
+    #    never loosening either way. A manually-changed SL pauses both
+    #    methods for that position until a genuinely new OB edge or a new
+    #    price extreme appears -- see sl_manager.py for the full mechanics
+    #    and the worked examples this was verified against.
+    open_positions = broker.get_positions(cfg.symbol, cfg.magic_number)
+    for pos in open_positions:
         direction = 1 if pos.type == mt5.POSITION_TYPE_BUY else -1
         edges = _direction_edges(direction, m15, m5, m3)
-        new_sl = compute_trailing_sl(direction, current_price, pos.sl or None, edges)
+        ob_candidate = select_sl(direction, current_price, edges)
+        new_sl = sl_manager.compute(pos.ticket, direction, pos.price_open, current_price,
+                                    pos.sl or None, ob_candidate)
         if new_sl is not None:
             print(f"[TRAIL] #{pos.ticket} {'BUY' if direction == 1 else 'SELL'} SL -> {new_sl}")
             if cfg.enable_trading:
-                broker.modify_position_sl(cfg.symbol, pos.ticket, new_sl, pos.tp)
+                result = broker.modify_position_sl(cfg.symbol, pos.ticket, new_sl, pos.tp)
+                if not result.ok:
+                    print(f"[TRAIL] modify failed: {result.retcode} {result.comment}")
+                else:
+                    sl_manager.confirm_applied(pos.ticket, new_sl)
+    sl_manager.prune({p.ticket for p in open_positions})
 
     # 3. New entries -- both directions are tried every cycle. Direction-
     #    gating happens per-candidate, below, via is_eligible(): M1 and M3
@@ -419,12 +435,13 @@ def main() -> None:
     broker.connect(cfg)
     store = TradedZoneStore(cfg.state_file)
     blocked = BlockedZoneStore(cfg.blocked_state_file)
+    sl_manager = SLManager(cfg.sl_state_file)
     runtime = RuntimeState()
 
     try:
         while True:
             try:
-                run_once(cfg, store, blocked, runtime)
+                run_once(cfg, store, blocked, runtime, sl_manager)
             except Exception as exc:
                 print(f"[ERROR] {exc}")
                 # The MT5 IPC channel can get stuck without the process
