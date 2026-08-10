@@ -151,6 +151,16 @@ struct OBDetectionState
    bool     baseline;
    bool     live_visited;
    datetime live_visit_time;
+
+   // Once a zone is conclusively found tested (by either the historical
+   // bar-walk or a live touch), that never reverts -- virgin only ever
+   // goes one direction. Caching it here means HasZoneBeenRetested's
+   // per-bar walk from the zone's origin candle only ever runs ONCE per
+   // zone for the rest of this indicator's lifetime, instead of being
+   // re-walked from scratch on every ~1s scan forever. See ScanObjectsFor.
+   bool     resolved;
+   datetime resolved_visit_time;
+   datetime resolved_validation_time;
 };
 
 struct TFTarget
@@ -1143,6 +1153,20 @@ void ScanObjectsFor(const long chart_id, const ENUM_TIMEFRAMES period, const str
       if(zones[i].direction != "BULLISH" && zones[i].direction != "BEARISH")
          continue;
 
+      int state_idx = FindDetectionState(zones[i].signature);
+
+      // Already conclusively resolved as tested on a previous scan -- reuse
+      // it instead of re-walking this zone's entire bar history again.
+      // Virgin only ever transitions one way (true -> false), so a
+      // resolved zone can never need to be checked again.
+      if(state_idx >= 0 && detection_states[state_idx].resolved)
+      {
+         zones[i].virgin          = false;
+         zones[i].visit_time      = detection_states[state_idx].resolved_visit_time;
+         zones[i].validation_time = detection_states[state_idx].resolved_validation_time;
+         continue;
+      }
+
       datetime visit_time = 0;
       bool visited = HasZoneBeenRetested(zones[i], visit_time, symbol, period);
 
@@ -1154,6 +1178,13 @@ void ScanObjectsFor(const long chart_id, const ENUM_TIMEFRAMES period, const str
 
       zones[i].virgin = !visited;
       zones[i].visit_time = visit_time;
+
+      if(visited && state_idx >= 0)
+      {
+         detection_states[state_idx].resolved                 = true;
+         detection_states[state_idx].resolved_visit_time      = visit_time;
+         detection_states[state_idx].resolved_validation_time = zones[i].validation_time;
+      }
    }
 
    // Keep baseline mode active until this timeframe has actually shown at
@@ -1199,6 +1230,9 @@ void AssignDetectionState(OBZone &z, const string symbol, const int tf_idx)
       state.detected_price = (state.baseline ? 0.0 : DetectionMarketPrice(symbol));
       state.live_visited   = false;
       state.live_visit_time= 0;
+      state.resolved                 = false;
+      state.resolved_visit_time      = 0;
+      state.resolved_validation_time = 0;
 
       int size = ArraySize(detection_states);
       ArrayResize(detection_states, size + 1);
