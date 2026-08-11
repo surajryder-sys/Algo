@@ -46,9 +46,9 @@ class EntryConfig:
 ENTRY_CONFIGS = {
     "USOIL": EntryConfig(sl_buffer=0.100, market_max=0.600, pullback_min=0.600,
                          pullback_max=0.900, pullback_min_edge_offset=0.600),
-    "BTCUSD": EntryConfig(sl_buffer=100.0, market_max=175.0, pullback_min=175.0,
+    "BTCUSD": EntryConfig(sl_buffer=20.0, market_max=175.0, pullback_min=175.0,
                           pullback_max=800.0, pullback_min_edge_offset=175.0),
-    "ETHUSD": EntryConfig(sl_buffer=3.0, market_max=4.0, pullback_min=4.0,
+    "ETHUSD": EntryConfig(sl_buffer=2.0, market_max=4.0, pullback_min=4.0,
                           pullback_max=20.0, pullback_min_edge_offset=4.0),
 }
 

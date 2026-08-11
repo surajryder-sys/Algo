@@ -85,6 +85,46 @@ class RuntimeState:
     # source_tf -> (candidate_zone_key, first_seen_monotonic_time) for a
     # manual block whose release is being confirmed -- see release_stale_blocks.
     pending_block_release: dict = field(default_factory=dict)
+    # label ("M5"/"M15"/"ATR") -> bool, last-known staleness -- so
+    # _fresh_or_none() only prints on a state CHANGE, not every poll while
+    # something stays stale (confirmed live elsewhere: printing every poll
+    # produces tens of thousands of duplicate lines within minutes).
+    stale_flags: dict = field(default_factory=dict)
+
+
+# No indicator publishes faster than roughly once a second (ScanEverySeconds
+# in the MQL5 indicator); 30s is a generous multiple of that, matching
+# OBSnapshot/ATRSnapshot's own is_stale() default. Data older than this
+# means the indicator isn't actively running anymore (chart closed, MT5
+# disconnected, terminal hiccup). Treated identically to "no data at all"
+# (None) below -- every consumer (compute_zone, candidates.py,
+# management.py) already handles None as "fail closed", so gating at the
+# read point here is the only change needed; nothing downstream has to
+# know staleness exists. Ported from algo_v2_usoil_btc_eth after that bot
+# briefly built real trade candidates off 40-65-hour-old BTCUSD/ETHUSD
+# bridge files with zero warning -- this snapshot didn't have the gap live
+# (USOIL's indicator was always running), but shipping it with a known
+# hole for "future use" made no sense once the fix existed.
+MAX_DATA_AGE_SECONDS = 30.0
+
+
+def _fresh_or_none(label: str, snap, runtime: RuntimeState):
+    """Returns snap unchanged if fresh (or already None), else None --
+    logging only on a fresh<->stale transition, not every poll."""
+    if snap is None:
+        return None
+
+    is_stale = snap.is_stale(MAX_DATA_AGE_SECONDS)
+    was_stale = runtime.stale_flags.get(label, False)
+
+    if is_stale and not was_stale:
+        print(f"[STALE] {label} data is {snap.age_seconds():.0f}s old "
+              f"(> {MAX_DATA_AGE_SECONDS:.0f}s) -- treating as no data until it refreshes")
+    elif was_stale and not is_stale:
+        print(f"[STALE] {label} data is fresh again ({snap.age_seconds():.0f}s old)")
+
+    runtime.stale_flags[label] = is_stale
+    return None if is_stale else snap
 
 
 def _direction_edges(direction: int, m15: Optional[OBSnapshot]) -> dict:
@@ -224,9 +264,9 @@ def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
 
 
 def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, runtime: RuntimeState) -> None:
-    m5 = read_zone(cfg.symbol, 5)
-    m15 = read_zone(cfg.symbol, 15)
-    atr = read_atr(cfg.symbol, cfg.atr_timeframe_minutes)
+    m5 = _fresh_or_none("M5", read_zone(cfg.symbol, 5), runtime)
+    m15 = _fresh_or_none("M15", read_zone(cfg.symbol, 15), runtime)
+    atr = _fresh_or_none("ATR", read_atr(cfg.symbol, cfg.atr_timeframe_minutes), runtime)
 
     zone = compute_zone(atr, m15)
     bid, ask = broker.get_tick_price(cfg.symbol)

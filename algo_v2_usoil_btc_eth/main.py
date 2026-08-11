@@ -32,6 +32,13 @@ this was merged from:
     M5, per symbol.
   - M30 is meant to be added as a further strict tier per symbol later,
     once this two-tier version is validated live across all three.
+  - NEW here (not present in the standalone bot this was merged from, nor
+    in algo_v2): every M5/M15/ATR read is staleness-gated at
+    MAX_DATA_AGE_SECONDS (30s) via _fresh_or_none() before anything else
+    touches it -- treated identically to no data at all. Confirmed live:
+    BTCUSD/ETHUSD bridge files sat around for 40-65 hours with no
+    indicator attached before this existed, and the bot happily built
+    real trade candidates from them with zero warning.
 
 Safety: SMC_V2_MULTI_ENABLE_TRADING must be explicitly set to true in .env
 for any order to actually be sent/modified/cancelled, for ANY symbol.
@@ -74,6 +81,44 @@ class RuntimeState:
     # source_tf -> (candidate_zone_key, first_seen_monotonic_time) for a
     # manual block whose release is being confirmed -- see release_stale_blocks.
     pending_block_release: dict = field(default_factory=dict)
+    # label ("M5"/"M15"/"ATR") -> bool, last-known staleness -- so
+    # _fresh_or_none() only prints on a state CHANGE, not every poll while
+    # something stays stale (confirmed live elsewhere: printing every poll
+    # produces tens of thousands of duplicate lines within minutes).
+    stale_flags: dict = field(default_factory=dict)
+
+
+# No indicator publishes faster than roughly once a second (ScanEverySeconds
+# in the MQL5 indicator); 30s is a generous multiple of that, matching
+# OBSnapshot/ATRSnapshot's own is_stale() default. Data older than this
+# means the indicator isn't actively running anymore (chart closed, MT5
+# disconnected, terminal hiccup) -- confirmed live: BTCUSD/ETHUSD bridge
+# files sat around for 40-65 HOURS with no indicator attached before this
+# guard existed, and the bot happily built real trade candidates from them
+# with no warning. Treated identically to "no data at all" (None) below --
+# every consumer (compute_zone, candidates.py, management.py) already
+# handles None as "fail closed", so gating at the read point here is the
+# only change needed; nothing downstream has to know staleness exists.
+MAX_DATA_AGE_SECONDS = 30.0
+
+
+def _fresh_or_none(symbol: str, label: str, snap, runtime: RuntimeState):
+    """Returns snap unchanged if fresh (or already None), else None --
+    logging only on a fresh<->stale transition, not every poll."""
+    if snap is None:
+        return None
+
+    is_stale = snap.is_stale(MAX_DATA_AGE_SECONDS)
+    was_stale = runtime.stale_flags.get(label, False)
+
+    if is_stale and not was_stale:
+        print(f"[STALE {symbol}] {label} data is {snap.age_seconds():.0f}s old "
+              f"(> {MAX_DATA_AGE_SECONDS:.0f}s) -- treating as no data until it refreshes")
+    elif was_stale and not is_stale:
+        print(f"[STALE {symbol}] {label} data is fresh again ({snap.age_seconds():.0f}s old)")
+
+    runtime.stale_flags[label] = is_stale
+    return None if is_stale else snap
 
 
 @dataclass
@@ -228,9 +273,10 @@ def run_once_for_symbol(cfg: Config, sym_state: SymbolState) -> None:
     sym_cfg = sym_state.cfg
     store, blocked, runtime = sym_state.store, sym_state.blocked, sym_state.runtime
 
-    m5 = read_zone(sym_cfg.symbol, 5)
-    m15 = read_zone(sym_cfg.symbol, 15)
-    atr = read_atr(sym_cfg.symbol, sym_cfg.atr_timeframe_minutes)
+    m5 = _fresh_or_none(sym_cfg.symbol, "M5", read_zone(sym_cfg.symbol, 5), runtime)
+    m15 = _fresh_or_none(sym_cfg.symbol, "M15", read_zone(sym_cfg.symbol, 15), runtime)
+    atr = _fresh_or_none(sym_cfg.symbol, "ATR",
+                         read_atr(sym_cfg.symbol, sym_cfg.atr_timeframe_minutes), runtime)
 
     zone = compute_zone(atr, m15)
     bid, ask = broker.get_tick_price(sym_cfg.symbol)
