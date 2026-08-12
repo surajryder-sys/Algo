@@ -31,3 +31,17 @@ btc_smc_instance.lock
 order_attempts.log
 bias_trace.log
 error_trace.log
+tv_bridge_signals.jsonl
+tradingview_bot_state.json
+tradingview_bot_zones.json
+tradingview_bot_atr.json
+tv_scraper_profile/
+tv_scraper_zones.json
+tv_scraper_atr.json
+tv_scraper_first_seen.json
+tv_scraper_trend.json
+tv_scraper_retest.json
+fx_bot_state.json
+tvx_bot_state.json
+tvx_bot_blocks.json
+tvx_bot_sl_state.json

@@ -1,0 +1,345 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © LuxAlgo
+// Modified to fire full zone-state webhooks via alert() -- see the
+// "Webhook" section near the bottom. Original detection logic is untouched.
+
+//@version=5
+indicator("Order Block Detector [LuxAlgo]"
+  , overlay = true
+  , max_boxes_count = 500
+  , max_labels_count = 500
+  , max_lines_count = 500)
+//------------------------------------------------------------------------------
+//Settings
+//-----------------------------------------------------------------------------{
+length = input.int(5, 'Volume Pivot Length'
+  , minval = 1)
+
+bull_ext_last = input.int(3, 'Bullish OB '
+  , minval = 1
+  , inline = 'bull')
+
+bg_bull_css = input.color(color.new(#169400, 80), ''
+  , inline = 'bull')
+
+bull_css = input.color(#169400, ''
+  , inline = 'bull')
+
+bull_avg_css = input.color(color.new(#9598a1, 37), ''
+  , inline = 'bull')
+
+bear_ext_last = input.int(3, 'Bearish OB'
+  , minval = 1
+  , inline = 'bear')
+
+bg_bear_css = input.color(color.new(#ff1100, 80), ''
+  , inline = 'bear')
+
+bear_css = input.color(#ff1100, ''
+  , inline = 'bear')
+
+bear_avg_css = input.color(color.new(#9598a1, 37), ''
+  , inline = 'bear')
+
+line_style = input.string('⎯⎯⎯', 'Average Line Style'
+  , options = ['⎯⎯⎯', '----', '····'])
+
+line_width = input.int(1, 'Average Line Width'
+  , minval = 1)
+
+mitigation = input.string('Wick', 'Mitigation Methods'
+  , options = ['Wick', 'Close'])
+
+webhook_secret = input.string('', 'Webhook Secret', group = 'Webhook')
+
+//-----------------------------------------------------------------------------}
+//Functions
+//-----------------------------------------------------------------------------{
+//Line Style function
+get_line_style(style) =>
+    out = switch style
+        '⎯⎯⎯'  => line.style_solid
+        '----' => line.style_dashed
+        '····' => line.style_dotted
+
+//Function to get order block coordinates
+get_coordinates(condition, top, btm, ob_val)=>
+    var ob_top  = array.new_float(0)
+    var ob_btm  = array.new_float(0)
+    var ob_avg  = array.new_float(0)
+    var ob_left = array.new_int(0)
+
+    float ob = na
+
+    //Append coordinates to arrays
+    if condition
+        avg = math.avg(top, btm)
+
+        array.unshift(ob_top, top)
+        array.unshift(ob_btm, btm)
+        array.unshift(ob_avg, avg)
+        array.unshift(ob_left, time[length])
+
+        ob := ob_val
+
+    [ob_top, ob_btm, ob_avg, ob_left, ob]
+
+//Function to remove mitigated order blocks from coordinate arrays, firing a
+//webhook per zone (with its identity/prices) right before it's removed --
+//zone identity is its start_time, matching how the MT5 OB bridge identifies
+//zones (see ob_bridge.reader.Zone / the "zone start_time, not detected_time"
+//fix already applied on the MT5 side).
+remove_mitigated(ob_top, ob_btm, ob_left, ob_avg, target, bull, dir_label, bar_time_sec)=>
+    mitigated = false
+    target_array = bull ? ob_btm : ob_top
+
+    for element in target_array
+        idx = array.indexof(target_array, element)
+
+        if (bull ? target < element : target > element)
+            mitigated := true
+
+            zone_start = array.get(ob_left, idx)
+            zone_top   = array.get(ob_top, idx)
+            zone_btm   = array.get(ob_btm, idx)
+
+            mit_payload = '{"secret":"' + webhook_secret +
+              '","type":"ob_zone_mitigated","symbol":"' + syminfo.ticker +
+              '","timeframe":"' + timeframe.period +
+              '","direction":"' + dir_label +
+              '","start_time":' + str.tostring(math.round(zone_start / 1000), '#') +
+              ',"top":' + str.tostring(zone_top) +
+              ',"btm":' + str.tostring(zone_btm) +
+              ',"mitigated_time":' + str.tostring(bar_time_sec, '#') +
+              ',"mitigated_price":' + str.tostring(target) + '}'
+
+            alert(mit_payload, alert.freq_all)
+
+            array.remove(ob_top, idx)
+            array.remove(ob_btm, idx)
+            array.remove(ob_avg, idx)
+            array.remove(ob_left, idx)
+
+    mitigated
+
+//Function to set order blocks
+set_order_blocks(ob_top, ob_btm, ob_left, ob_avg, ext_last, bg_css, border_css, lvl_css)=>
+    var ob_box = array.new_box(0)
+    var ob_lvl = array.new_line(0)
+
+    //Fill arrays with boxes/lines
+    if barstate.isfirst
+        for i = 0 to ext_last-1
+            array.unshift(ob_box, box.new(na,na,na,na
+              , xloc = xloc.bar_time
+              , extend= extend.right
+              , bgcolor = bg_css
+              , border_color = color.new(border_css, 70)))
+
+            array.unshift(ob_lvl, line.new(na,na,na,na
+              , xloc = xloc.bar_time
+              , extend = extend.right
+              , color = lvl_css
+              , style = get_line_style(line_style)
+              , width = line_width))
+
+    //Set order blocks
+    if barstate.islast
+        if array.size(ob_top) > 0
+            for i = 0 to math.min(ext_last-1, array.size(ob_top)-1)
+                get_box = array.get(ob_box, i)
+                get_lvl = array.get(ob_lvl, i)
+
+                box.set_lefttop(get_box, array.get(ob_left, i), array.get(ob_top, i))
+                box.set_rightbottom(get_box, array.get(ob_left, i), array.get(ob_btm, i))
+
+                line.set_xy1(get_lvl, array.get(ob_left, i), array.get(ob_avg, i))
+                line.set_xy2(get_lvl, array.get(ob_left, i)+1, array.get(ob_avg, i))
+
+
+//-----------------------------------------------------------------------------}
+//Global elements
+//-----------------------------------------------------------------------------{
+var os = 0
+var target_bull = 0.
+var target_bear = 0.
+
+n = bar_index
+upper = ta.highest(length)
+lower = ta.lowest(length)
+
+bar_time_sec = math.round(time / 1000)
+
+if mitigation == 'Close'
+    target_bull := ta.lowest(close, length)
+    target_bear := ta.highest(close, length)
+else
+    target_bull := lower
+    target_bear := upper
+
+os := high[length] > upper ? 0 : low[length] < lower ? 1 : os[1]
+
+phv = ta.pivothigh(volume, length, length)
+
+//-----------------------------------------------------------------------------}
+//Get bullish/bearish order blocks coordinates
+//-----------------------------------------------------------------------------{
+[bull_top
+  , bull_btm
+  , bull_avg
+  , bull_left
+  , bull_ob] = get_coordinates(phv and os == 1 and barstate.isconfirmed, hl2[length], low[length], low[length])
+
+//Webhook: bullish OB just formed -- fire the full zone (top/btm/avg/start_time)
+if not na(bull_ob)
+    z_top   = array.get(bull_top, 0)
+    z_btm   = array.get(bull_btm, 0)
+    z_avg   = array.get(bull_avg, 0)
+    z_start = array.get(bull_left, 0)
+    bull_form_payload = '{"secret":"' + webhook_secret +
+      '","type":"ob_zone_formed","symbol":"' + syminfo.ticker +
+      '","timeframe":"' + timeframe.period +
+      '","direction":"bull","start_time":' + str.tostring(math.round(z_start / 1000), '#') +
+      ',"top":' + str.tostring(z_top) +
+      ',"btm":' + str.tostring(z_btm) +
+      ',"avg":' + str.tostring(z_avg) +
+      ',"detected_time":' + str.tostring(bar_time_sec, '#') +
+      // detected_price = live close at confirmation, NOT the zone's own
+      // edge -- algo_v2's M3/M5 entry math (entries.py:m3_or_m5_entry)
+      // reads this as "how far has price already run from ob_edge", which
+      // is only ever true/non-negative if this is a real market price. The
+      // OB detector's pivot confirmation lags `length` bars behind the
+      // zone's own origin candle, so close here already reflects a real
+      // (if small) run away from the zone -- exactly the concept this feeds.
+      ',"detected_price":' + str.tostring(close) + '}'
+    alert(bull_form_payload, alert.freq_all)
+
+[bear_top
+  , bear_btm
+  , bear_avg
+  , bear_left
+  , bear_ob] = get_coordinates(phv and os == 0 and barstate.isconfirmed, high[length], hl2[length], high[length])
+
+//Webhook: bearish OB just formed
+if not na(bear_ob)
+    zb_top   = array.get(bear_top, 0)
+    zb_btm   = array.get(bear_btm, 0)
+    zb_avg   = array.get(bear_avg, 0)
+    zb_start = array.get(bear_left, 0)
+    bear_form_payload = '{"secret":"' + webhook_secret +
+      '","type":"ob_zone_formed","symbol":"' + syminfo.ticker +
+      '","timeframe":"' + timeframe.period +
+      '","direction":"bear","start_time":' + str.tostring(math.round(zb_start / 1000), '#') +
+      ',"top":' + str.tostring(zb_top) +
+      ',"btm":' + str.tostring(zb_btm) +
+      ',"avg":' + str.tostring(zb_avg) +
+      ',"detected_time":' + str.tostring(bar_time_sec, '#') +
+      // See the matching comment in the bullish branch above.
+      ',"detected_price":' + str.tostring(close) + '}'
+    alert(bear_form_payload, alert.freq_all)
+
+//-----------------------------------------------------------------------------}
+//Remove mitigated order blocks (fires ob_zone_mitigated webhooks internally)
+//-- gated on barstate.isconfirmed for the same reason zone creation above
+//is: target_bull/target_bear read close/high/low directly, which keep
+//moving intrabar, so an unconfirmed check can flag (and remove) a zone on a
+//wick that reverses before the bar actually closes.
+//-----------------------------------------------------------------------------{
+mitigated_bull = false
+mitigated_bear = false
+
+if barstate.isconfirmed
+    mitigated_bull := remove_mitigated(bull_top
+      , bull_btm
+      , bull_left
+      , bull_avg
+      , target_bull
+      , true
+      , "bull"
+      , bar_time_sec)
+
+    mitigated_bear := remove_mitigated(bear_top
+      , bear_btm
+      , bear_left
+      , bear_avg
+      , target_bear
+      , false
+      , "bear"
+      , bar_time_sec)
+
+//-----------------------------------------------------------------------------}
+//Display order blocks
+//-----------------------------------------------------------------------------{
+//Set bullish order blocks
+set_order_blocks(bull_top
+  , bull_btm
+  , bull_left
+  , bull_avg
+  , bull_ext_last
+  , bg_bull_css
+  , bull_css
+  , bull_avg_css)
+
+//Set bearish order blocks
+set_order_blocks(bear_top
+  , bear_btm
+  , bear_left
+  , bear_avg
+  , bear_ext_last
+  , bg_bear_css
+  , bear_css
+  , bear_avg_css)
+
+//Show detected order blocks
+plot(bull_ob, 'Bull OB', bull_css, 2, plot.style_linebr
+  , offset = -length
+  , display = display.none)
+
+plot(bear_ob, 'Bear OB', bear_css, 2, plot.style_linebr
+  , offset = -length
+  , display = display.none)
+
+//-----------------------------------------------------------------------------}
+//Zone coordinates exposed via Data Window -- tv_scraper polls these directly
+//(pull) instead of relying on the alert() calls above (push). The 4 most
+//recent zones per direction are exposed, matching this indicator's deployed
+//bull_ext_last/bear_ext_last=4 (confirmed live: only 3 were exposed here
+//while 4 were actually visible on the chart, silently dropping the 4th/
+//oldest-of-the-visible zones from tv_scraper's view entirely).
+//
+//Top/Btm only -- NOT start_time. start_time is a raw unix-ms value (~1.78e12)
+//and plotting it here once visibly broke this chart's price scale (boxes
+//jumped around) despite display.data_window supposedly excluding a plot from
+//the chart entirely. Top/Btm are normal price-magnitude numbers, same order
+//as everything else already plotted, so they're safe. tv_scraper derives a
+//stable per-zone identity from (top, btm) instead of a real timestamp -- see
+//tv_scraper/scraper.py.
+//-----------------------------------------------------------------------------{
+plot(array.size(bull_top) > 0 ? array.get(bull_top, 0) : na, "Bull1 Top", display = display.data_window)
+plot(array.size(bull_top) > 0 ? array.get(bull_btm, 0) : na, "Bull1 Btm", display = display.data_window)
+plot(array.size(bull_top) > 1 ? array.get(bull_top, 1) : na, "Bull2 Top", display = display.data_window)
+plot(array.size(bull_top) > 1 ? array.get(bull_btm, 1) : na, "Bull2 Btm", display = display.data_window)
+plot(array.size(bull_top) > 2 ? array.get(bull_top, 2) : na, "Bull3 Top", display = display.data_window)
+plot(array.size(bull_top) > 2 ? array.get(bull_btm, 2) : na, "Bull3 Btm", display = display.data_window)
+plot(array.size(bear_top) > 0 ? array.get(bear_top, 0) : na, "Bear1 Top", display = display.data_window)
+plot(array.size(bear_top) > 0 ? array.get(bear_btm, 0) : na, "Bear1 Btm", display = display.data_window)
+plot(array.size(bear_top) > 1 ? array.get(bear_top, 1) : na, "Bear2 Top", display = display.data_window)
+plot(array.size(bear_top) > 1 ? array.get(bear_btm, 1) : na, "Bear2 Btm", display = display.data_window)
+plot(array.size(bear_top) > 2 ? array.get(bear_top, 2) : na, "Bear3 Top", display = display.data_window)
+plot(array.size(bear_top) > 2 ? array.get(bear_btm, 2) : na, "Bear3 Btm", display = display.data_window)
+plot(array.size(bull_top) > 3 ? array.get(bull_top, 3) : na, "Bull4 Top", display = display.data_window)
+plot(array.size(bull_top) > 3 ? array.get(bull_btm, 3) : na, "Bull4 Btm", display = display.data_window)
+plot(array.size(bear_top) > 3 ? array.get(bear_top, 3) : na, "Bear4 Top", display = display.data_window)
+plot(array.size(bear_top) > 3 ? array.get(bear_btm, 3) : na, "Bear4 Btm", display = display.data_window)
+//-----------------------------------------------------------------------------}
+//Alerts
+//-----------------------------------------------------------------------------{
+alertcondition(bull_ob, 'Bullish OB Formed', 'Bullish order block detected')
+
+alertcondition(bear_ob, 'Bearish OB Formed', 'bearish order block detected')
+
+alertcondition(mitigated_bull, 'Bullish OB Mitigated', 'Bullish order block mitigated')
+
+alertcondition(mitigated_bear, 'Bearish OB Mitigated', 'bearish order block mitigated')
+
+//-----------------------------------------------------------------------------}
