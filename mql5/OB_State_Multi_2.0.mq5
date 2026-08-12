@@ -184,6 +184,15 @@ struct TFState
 
 OBZone zones[];
 OBDetectionState detection_states[];
+// Set true at every genuine write to detection_states[] (new zone,
+// live-visit confirmed, resolved-cache filled in); SaveDetectionStates()
+// only actually writes the file when this is set, then clears it --
+// avoids a disk write every ~1s scan when nothing has changed, which
+// matters here: confirmed live that this terminal's shared Common\Files
+// folder gets contended enough under load to fail writes outright
+// (error 5004) and flag multiple UNRELATED indicators as "too slow",
+// so every avoidable write counts.
+bool g_detection_states_dirty = false;
 
 //--- ATR Trailing Stop buffers (unchanged math from ATR_Trail.mq5)
 double TrailStop[];
@@ -323,11 +332,19 @@ void PublishATRBridgeFile(const int rates_total, const datetime &time[])
 //| One file per symbol (not per timeframe): signature already        |
 //| encodes the timeframe as its first field (see BuildSignature),    |
 //| so different timeframes' zones can never collide in one file.     |
+//| Only actually writes when g_detection_states_dirty is set (a new  |
+//| zone, a live-visit, or a resolved-cache fill) -- not every scan.  |
+//| Confirmed live: this terminal's shared Common\Files folder gets   |
+//| contended enough under load that writes fail outright (error      |
+//| 5004) and MULTIPLE unrelated indicators (not just this one) get   |
+//| flagged "too slow" by the terminal -- every avoidable write here  |
+//| matters, even though this file alone isn't the root cause of that.|
 //+------------------------------------------------------------------+
 void SaveDetectionStates(const string symbol)
 {
-   if(!PublishToFile)
+   if(!PublishToFile || !g_detection_states_dirty)
       return;
+   g_detection_states_dirty = false;
 
    string body = "";
    for(int i = 0; i < ArraySize(detection_states); i++)
@@ -791,10 +808,10 @@ void ScanAndPublishAll()
    for(int i = 0; i < ArraySize(g_targets); i++)
       ProcessTimeframe(i, symbol);
 
-   // Every scan, not just on change -- matches how OBSTATE/ATRSTATE
-   // already get rewritten every cycle; detection_states[] is small
-   // (tens of zones at most) so this is cheap. See SaveDetectionStates'
-   // docstring for why this exists at all.
+   // No-ops internally unless something actually changed this scan (see
+   // SaveDetectionStates' own guard/docstring) -- deliberately not an
+   // every-cycle write like OBSTATE/ATRSTATE, to avoid adding to this
+   // terminal's confirmed file-write contention under load.
    SaveDetectionStates(symbol);
 
    UpdateBiasLabels();
@@ -1311,6 +1328,7 @@ void ScanObjectsFor(const long chart_id, const ENUM_TIMEFRAMES period, const str
          detection_states[state_idx].resolved                 = true;
          detection_states[state_idx].resolved_visit_time      = visit_time;
          detection_states[state_idx].resolved_validation_time = zones[i].validation_time;
+         g_detection_states_dirty = true;
       }
    }
 
@@ -1365,6 +1383,7 @@ void AssignDetectionState(OBZone &z, const string symbol, const int tf_idx)
       ArrayResize(detection_states, size + 1);
       detection_states[size] = state;
       index = size;
+      g_detection_states_dirty = true;
    }
 
    z.detected_time  = detection_states[index].detected_time;
@@ -1492,6 +1511,7 @@ bool ApplyIndependentLiveTouch(OBZone &z, datetime &visit_time, const string sym
    detection_states[index].live_visited    = true;
    detection_states[index].live_visit_time = TimeCurrent();
    visit_time = detection_states[index].live_visit_time;
+   g_detection_states_dirty = true;
 
    Print("LIVE OB VISIT: ", z.signature,
          " | ", z.direction,
