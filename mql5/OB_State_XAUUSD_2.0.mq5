@@ -171,6 +171,15 @@ struct TFState
 
 OBZone zones[];
 OBDetectionState detection_states[];
+// Set true at every genuine write to detection_states[] (new zone,
+// live-visit confirmed, resolved-cache filled in); SaveDetectionStates()
+// only actually writes the file when this is set, then clears it --
+// avoids a disk write every ~1s scan when nothing has changed. Ported
+// from OB_State_Multi_2.0.mq5 -- see that file's identical mechanism for
+// the full story (confirmed live: this shared Common\Files folder gets
+// contended enough under load to fail writes outright and flag multiple
+// indicators, including this one, as "too slow").
+bool g_detection_states_dirty = false;
 
 //--- ATR Trailing Stop buffers (unchanged math from ATR_Trail.mq5)
 double TrailStop[];
@@ -288,6 +297,126 @@ void PublishATRBridgeFile(const int rates_total, const datetime &time[])
 
    if(!FileMove(tmp_name, FILE_COMMON, final_name, FILE_COMMON | FILE_REWRITE))
       Print("ATR bridge file publish failed to finalize: ", final_name, " | error=", GetLastError());
+}
+
+//+------------------------------------------------------------------+
+//| Persists detection_states[] (per-zone detected_time/detected_    |
+//| price/baseline/live-visited/resolved bookkeeping) across restarts |
+//| -- indicator reattach, chart reload, or terminal restart. Without |
+//| this, that array starts empty every time (see struct             |
+//| OBDetectionState above), and AssignDetectionState() then re-      |
+//| classifies EVERY zone still on the chart as a fresh "baseline"    |
+//| (detected_time=0, permanently untradeable per algo_v2's own       |
+//| eligibility gate) on the very first scan after restart -- even a  |
+//| zone that was legitimately live-detected and still virgin the     |
+//| moment before the restart. Ported from OB_State_Multi_2.0.mq5,    |
+//| where this was confirmed live: a stale terminal needing a restart |
+//| was silently wiping every open setup's detection history.         |
+//|                                                                     |
+//| Deliberately NOT JSON -- this file is purely internal (never read |
+//| by the Python side), so a flat ';'-delimited line-per-zone format |
+//| is more robust to hand-parse in MQL5 than nested JSON objects.    |
+//| One file per symbol (not per timeframe): signature already        |
+//| encodes the timeframe as its first field (see BuildSignature),    |
+//| so different timeframes' zones can never collide in one file.     |
+//| Only actually writes when g_detection_states_dirty is set -- not  |
+//| every scan (see that flag's own comment for why this matters).   |
+//+------------------------------------------------------------------+
+void SaveDetectionStates(const string symbol)
+{
+   if(!PublishToFile || !g_detection_states_dirty)
+      return;
+   g_detection_states_dirty = false;
+
+   string body = "";
+   for(int i = 0; i < ArraySize(detection_states); i++)
+   {
+      OBDetectionState st = detection_states[i];
+      body += st.signature + ";" +
+              IntegerToString((long)st.detected_time) + ";" +
+              DoubleToString(st.detected_price, 8) + ";" +
+              (st.baseline ? "1" : "0") + ";" +
+              (st.live_visited ? "1" : "0") + ";" +
+              IntegerToString((long)st.live_visit_time) + ";" +
+              (st.resolved ? "1" : "0") + ";" +
+              IntegerToString((long)st.resolved_visit_time) + ";" +
+              IntegerToString((long)st.resolved_validation_time) + "\n";
+   }
+
+   FolderCreate(FileBridgeFolder, FILE_COMMON);
+   const string final_name = FileBridgeFolder + "\\OBDETECT_" + symbol + ".dat";
+   const string tmp_name   = final_name + ".tmp";
+
+   int handle = FileOpen(tmp_name, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(handle == INVALID_HANDLE)
+   {
+      Print("Detection-state save failed: ", tmp_name, " | error=", GetLastError());
+      return;
+   }
+   FileWriteString(handle, body);
+   FileClose(handle);
+
+   if(!FileMove(tmp_name, FILE_COMMON, final_name, FILE_COMMON | FILE_REWRITE))
+      Print("Detection-state save failed to finalize: ", final_name, " | error=", GetLastError());
+}
+
+//+------------------------------------------------------------------+
+//| Loads whatever SaveDetectionStates() last wrote, straight into    |
+//| detection_states[] -- must run in OnInit() BEFORE the first       |
+//| ScanAndPublishAll() call, so AssignDetectionState() finds these    |
+//| pre-populated entries (via FindDetectionState matching on          |
+//| signature) instead of treating every currently-on-chart zone as   |
+//| brand new. A zone whose signature ISN'T in this file (genuinely    |
+//| new since the last save, or no file exists yet at all) still      |
+//| falls through to the normal g_first_scan/TreatExistingObjectsAs-  |
+//| Baseline logic exactly as before -- this only short-circuits that |
+//| for zones we've already seen.                                     |
+//+------------------------------------------------------------------+
+void LoadDetectionStates(const string symbol)
+{
+   const string path = FileBridgeFolder + "\\OBDETECT_" + symbol + ".dat";
+   int handle = FileOpen(path, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(handle == INVALID_HANDLE)
+      return;  // nothing persisted yet -- first-ever run, or file was cleared
+
+   string content = "";
+   while(!FileIsEnding(handle))
+      content += FileReadString(handle) + "\n";
+   FileClose(handle);
+
+   string lines[];
+   int line_count = StringSplit(content, '\n', lines);
+   int restored = 0;
+
+   for(int i = 0; i < line_count; i++)
+   {
+      if(StringLen(lines[i]) == 0)
+         continue;
+
+      string parts[];
+      int part_count = StringSplit(lines[i], ';', parts);
+      if(part_count != 9)
+         continue;  // malformed/truncated line -- skip rather than half-restore it
+
+      OBDetectionState st;
+      st.signature                 = parts[0];
+      st.detected_time              = (datetime)StringToInteger(parts[1]);
+      st.detected_price             = StringToDouble(parts[2]);
+      st.baseline                   = (parts[3] == "1");
+      st.live_visited                = (parts[4] == "1");
+      st.live_visit_time             = (datetime)StringToInteger(parts[5]);
+      st.resolved                    = (parts[6] == "1");
+      st.resolved_visit_time         = (datetime)StringToInteger(parts[7]);
+      st.resolved_validation_time    = (datetime)StringToInteger(parts[8]);
+
+      int size = ArraySize(detection_states);
+      ArrayResize(detection_states, size + 1);
+      detection_states[size] = st;
+      restored++;
+   }
+
+   if(restored > 0)
+      Print("Restored ", restored, " OB detection state(s) for ", symbol, " from ", path);
 }
 
 //+------------------------------------------------------------------+
@@ -532,6 +661,10 @@ int OnInit()
    if(PublishToFile)
       FolderCreate(FileBridgeFolder, FILE_COMMON);
 
+   // Must run before the first ScanAndPublishAll() below -- see
+   // LoadDetectionStates' docstring for why the ordering matters.
+   LoadDetectionStates(EffectiveSymbol());
+
    CreateV2ResetButtons();
 
    if(ScanEverySeconds > 0)
@@ -679,6 +812,12 @@ void ScanAndPublishAll()
 
    for(int i = 0; i < ArraySize(g_targets); i++)
       ProcessTimeframe(i, chart_symbol, publish_symbol);
+
+   // No-ops internally unless something actually changed this scan (see
+   // SaveDetectionStates' own guard/docstring). publish_symbol, not
+   // chart_symbol -- must match LoadDetectionStates(EffectiveSymbol())
+   // in OnInit(), and the OBSTATE/ATRSTATE files' own symbol labeling.
+   SaveDetectionStates(publish_symbol);
 
    UpdateBiasLabels();
 
@@ -1182,6 +1321,7 @@ void ScanObjectsFor(const long chart_id, const ENUM_TIMEFRAMES period, const str
          detection_states[state_idx].resolved                 = true;
          detection_states[state_idx].resolved_visit_time      = visit_time;
          detection_states[state_idx].resolved_validation_time = zones[i].validation_time;
+         g_detection_states_dirty = true;
       }
    }
 
@@ -1236,6 +1376,7 @@ void AssignDetectionState(OBZone &z, const string symbol, const int tf_idx)
       ArrayResize(detection_states, size + 1);
       detection_states[size] = state;
       index = size;
+      g_detection_states_dirty = true;
    }
 
    z.detected_time  = detection_states[index].detected_time;
@@ -1363,6 +1504,7 @@ bool ApplyIndependentLiveTouch(OBZone &z, datetime &visit_time, const string sym
    detection_states[index].live_visited    = true;
    detection_states[index].live_visit_time = TimeCurrent();
    visit_time = detection_states[index].live_visit_time;
+   g_detection_states_dirty = true;
 
    Print("LIVE OB VISIT: ", z.signature,
          " | ", z.direction,
