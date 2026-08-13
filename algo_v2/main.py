@@ -295,7 +295,20 @@ def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
         direction = int(zone_key.split("|")[1])
         source_tf = zone_key.split("|")[0]
 
-        zone_ineligible = not is_eligible(zone, direction, event_time)
+        # Strict for M1/M3, matching their own entry rule -- neither can
+        # hold a resting order without M5/the zone's CURRENT agreement,
+        # continuously, not just at the moment it was placed. Confirmed
+        # live: the old lenient check let an M1 SELL built at a moment the
+        # zone briefly favored bearish keep resting after the zone flipped
+        # back to bullish moments later, purely because the order's own
+        # timestamp was newer than the zone's -- the same "fresh enough to
+        # override" exception that strict=True already exists to remove
+        # from entries, just not previously applied to cancellation too.
+        # M5 keeps the lenient default, same reasoning as its entry check:
+        # it's one of the zone's own inputs, so the exception is
+        # effectively inert for it anyway.
+        strict = source_tf in ("M1", "M3")
+        zone_ineligible = not is_eligible(zone, direction, event_time, strict=strict)
         ob_gone = not _ob_still_exists(source_tf, direction, event_time, m1, m3, m5)
         if not zone_ineligible and not ob_gone:
             continue
