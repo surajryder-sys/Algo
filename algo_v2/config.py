@@ -32,6 +32,7 @@ class Config:
     state_file: str
     blocked_state_file: str
     sl_state_file: str
+    direction_block_state_file: str
     atr_timeframe_minutes: int
 
     mt5_terminal_path: str | None
@@ -53,6 +54,8 @@ def load_config() -> Config:
         state_file=os.getenv("SMC_V2_STATE_FILE", "smc_v2_bot_state.json"),
         blocked_state_file=os.getenv("SMC_V2_BLOCKED_STATE_FILE", "smc_v2_bot_blocks.json"),
         sl_state_file=os.getenv("SMC_V2_SL_STATE_FILE", "smc_v2_bot_sl_state.json"),
+        direction_block_state_file=os.getenv("SMC_V2_DIRECTION_BLOCK_STATE_FILE",
+                                             "smc_v2_bot_direction_blocks.json"),
         atr_timeframe_minutes=int(os.getenv("SMC_V2_ATR_TIMEFRAME_MINUTES", "5")),
         mt5_terminal_path=os.getenv("MT5_TERMINAL_PATH") or None,
         mt5_login=int(login_raw) if login_raw else None,

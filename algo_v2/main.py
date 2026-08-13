@@ -45,8 +45,11 @@ from algo_v2.candidates import (
     order_comment, parse_order_comment,
 )
 from algo_v2.config import Config, load_config
+from algo_v2.direction_block import DirectionBlockStore
 from algo_v2.entries import EntryMode, select_sl
-from algo_v2.intervention import check_manual_pending_cancellations, check_manual_position_closes
+from algo_v2.intervention import (
+    check_manual_pending_cancellations, check_manual_position_closes, check_sl_hit_closes,
+)
 from algo_v2.sl_manager import SLManager
 from algo_v2.state_store import TradedZoneStore
 from algo_v2.zone import compute_zone, is_eligible
@@ -95,11 +98,14 @@ def sync_filled_zones(cfg: Config, store: TradedZoneStore) -> None:
             store.mark_traded(zone_key)
 
 
-def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore, runtime: RuntimeState) -> None:
+def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore,
+                             direction_blocks: DirectionBlockStore, runtime: RuntimeState) -> None:
     """Compares this poll's live pending/position tickets against last
     poll's, and blocks the underlying zone for any that disappeared due to
     a manual (client/mobile/web) cancel or close -- never for a fill, a
-    bot-initiated action, or an SL/TP/stop-out."""
+    bot-initiated action, or an SL/TP/stop-out. Separately, a genuine SL
+    hit on a position blocks that entire DIRECTION (all of M1/M3/M5, not
+    just the one zone) -- see direction_block.py."""
     current_pending = {o.ticket for o in broker.get_pending_orders(cfg.symbol, cfg.magic_number)}
     current_positions = {p.ticket for p in broker.get_positions(cfg.symbol, cfg.magic_number)}
 
@@ -115,6 +121,12 @@ def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore, runtime: Ru
         for source_tf, zone_key in check_manual_position_closes(disappeared_positions):
             print(f"[BLOCK] manual position close -> blocking {source_tf} zone {zone_key}")
             blocked.block(source_tf, zone_key, reason="manual_close")
+
+        for direction, block_time in check_sl_hit_closes(disappeared_positions):
+            print(f"[BLOCK] {'BUY' if direction == 1 else 'SELL'} SL hit -> "
+                  f"blocking all {'BUY' if direction == 1 else 'SELL'} entries "
+                  f"until a new {'bullish' if direction == 1 else 'bearish'} OB appears")
+            direction_blocks.block(direction, block_time)
 
     runtime.seen_pending_tickets = current_pending
     runtime.seen_position_tickets = current_positions
@@ -191,6 +203,40 @@ def release_stale_blocks(blocked: BlockedZoneStore, runtime: RuntimeState,
             runtime.pending_block_release.pop(source_tf, None)
 
 
+def _newest_ob_time_in_direction(direction: int, *snaps: Optional[OBSnapshot]) -> Optional[int]:
+    """Newest start_time across all of the given snapshots (M1/M3/M5), in
+    ONE specific direction -- "a bearish OB can appear in any timeframe"
+    per spec, so all three are checked, not just one."""
+    times = []
+    for snap in snaps:
+        if snap is None:
+            continue
+        history = snap.bull if direction == 1 else snap.bear
+        if history:
+            times.append(history[0].start_time)
+    return max(times) if times else None
+
+
+def release_stale_direction_blocks(direction_blocks: DirectionBlockStore,
+                                   m1: Optional[OBSnapshot], m3: Optional[OBSnapshot],
+                                   m5: Optional[OBSnapshot]) -> None:
+    """No confirmation delay here (unlike release_stale_blocks above) --
+    pure broker-time timestamp comparison, per spec. Releases the instant
+    any of M1/M3/M5's own latest OB in the blocked direction is newer
+    than the SL-hit deal's own time that created the block."""
+    for direction in (1, -1):
+        block_time = direction_blocks.blocked_since(direction)
+        if block_time is None:
+            continue
+
+        newest = _newest_ob_time_in_direction(direction, m1, m3, m5)
+        if newest is not None and newest > block_time:
+            print(f"[BLOCK] auto-released {'BUY' if direction == 1 else 'SELL'} direction block "
+                  f"(SL hit at {block_time}): new {'bullish' if direction == 1 else 'bearish'} "
+                  f"OB detected")
+            direction_blocks.release(direction)
+
+
 def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
                                    runtime: RuntimeState) -> None:
     """Cancels a resting pending order the instant the zone's own character
@@ -241,7 +287,8 @@ def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
             blocked.block(source_tf, zone_key, reason="zone_ineligible")
 
 
-def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, runtime: RuntimeState,
+def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore,
+            direction_blocks: DirectionBlockStore, runtime: RuntimeState,
             sl_manager: SLManager) -> None:
     m15 = read_zone(cfg.symbol, 15)
     m5 = read_zone(cfg.symbol, 5)
@@ -262,8 +309,9 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         # 0b. Detect manual cancels/closes since the last poll and block
         #     their zones; auto-release blocks a new same-direction OB
         #     has superseded.
-        sync_manual_intervention(cfg, blocked, runtime)
+        sync_manual_intervention(cfg, blocked, direction_blocks, runtime)
         release_stale_blocks(blocked, runtime, m1, m3, m5)
+        release_stale_direction_blocks(direction_blocks, m1, m3, m5)
 
     # 1. Build both-direction candidates and find the winner up front --
     #    needed both for the square-off check in step 2 and for placing a
@@ -277,6 +325,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         return (c is not None
                 and not store.is_traded(c.zone_key)
                 and not blocked.is_blocked(c.source_tf, c.zone_key)
+                and not direction_blocks.is_blocked(c.direction)
                 and is_eligible(zone, c.direction, c.event_time, strict=strict))
 
     for direction in (1, -1):
@@ -441,13 +490,14 @@ def main() -> None:
     broker.connect(cfg)
     store = TradedZoneStore(cfg.state_file)
     blocked = BlockedZoneStore(cfg.blocked_state_file)
+    direction_blocks = DirectionBlockStore(cfg.direction_block_state_file)
     sl_manager = SLManager(cfg.sl_state_file)
     runtime = RuntimeState()
 
     try:
         while True:
             try:
-                run_once(cfg, store, blocked, runtime, sl_manager)
+                run_once(cfg, store, blocked, direction_blocks, runtime, sl_manager)
             except Exception as exc:
                 print(f"[ERROR] {exc}")
                 # The MT5 IPC channel can get stuck without the process

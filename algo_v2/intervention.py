@@ -61,6 +61,35 @@ def check_manual_pending_cancellations(disappeared_tickets: set, expected_cancel
     return results
 
 
+def check_sl_hit_closes(disappeared_tickets: set) -> list:
+    """disappeared_tickets: position tickets seen last poll but gone now.
+    Returns [(direction, block_time), ...] for the ones a genuine SL hit
+    (DEAL_REASON_SL on the exit deal) closed -- never a manual close or
+    the bot's own square-off close, both of which carry a different
+    reason (CLIENT/MOBILE/WEB, or EXPERT respectively), so there's no
+    overlap with check_manual_position_closes above.
+
+    direction is derived from the entry deal's own type (BUY entry deal
+    -> the position was long, direction 1; SELL entry deal -> -1).
+    block_time is the exit deal's own `time` (broker clock, not
+    Python's) -- see direction_block.py's module docstring for why."""
+    results = []
+    for ticket in disappeared_tickets:
+        deals = mt5.history_deals_get(position=ticket) or ()
+        entry_deals = [d for d in deals if d.entry == mt5.DEAL_ENTRY_IN]
+        exit_deals = [d for d in deals if d.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY)]
+        if not entry_deals or not exit_deals:
+            continue
+
+        if exit_deals[-1].reason != mt5.DEAL_REASON_SL:
+            continue  # manual, bot-initiated, or TP -- not our concern here
+
+        direction = 1 if entry_deals[0].type == mt5.DEAL_TYPE_BUY else -1
+        results.append((direction, exit_deals[-1].time))
+
+    return results
+
+
 def check_manual_position_closes(disappeared_tickets: set) -> list:
     """disappeared_tickets: position tickets seen last poll but gone now.
     Returns [(source_tf, zone_key), ...] for the ones a manual close (not
