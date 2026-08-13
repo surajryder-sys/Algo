@@ -31,10 +31,20 @@ more-recent-event agree in every case that was worked through.
 Manual override: if the broker's actual SL differs from what this
 manager itself last set, that's a manual change. Both trailing methods
 go silent for that position -- neither proposes anything -- until either
-the OB candidate has changed from what it was at the moment of the
-change, or price has made a new extreme beyond what running_extreme was
-then. Whichever fires first clears the override and normal combined
-trailing resumes from there.
+a genuinely NEWER OB has appeared on M15/M5/M3 since the change, or
+price has made a new extreme beyond what running_extreme was then.
+Whichever fires first clears the override and normal combined trailing
+resumes from there.
+
+The "new OB" check compares raw OB TIMESTAMPS (each direction's newest
+start_time across M15/M5/M3, passed in by the caller as newest_ob_time),
+not the derived ob_candidate value (whichever edge is currently closest
+to price). Confirmed live this distinction matters: ob_candidate can
+change just because price drifted closer to a DIFFERENT already-
+existing OB's edge, with no new OB forming at all -- that was silently
+releasing manual overrides on pure price noise, not a genuine new
+event. Timestamps only move forward when an OB with a newer origin
+candle actually appears.
 
 All of this is per-position (keyed by ticket) and persisted to disk so a
 bot restart doesn't lose entry price / running extreme / override state
@@ -69,13 +79,26 @@ def _differs(a: Optional[float], b: Optional[float]) -> bool:
     return abs(a - b) > _MIN_SL_IMPROVEMENT
 
 
+def _is_newer(new_time: Optional[int], old_time: Optional[int]) -> bool:
+    """True if new_time is a genuinely later OB timestamp than old_time --
+    used for the manual-override release check, deliberately NOT the same
+    as _differs above (a merely-different timestamp older than old_time
+    must not release the override, only a strictly newer one counts).
+    Going from no OB at all (None) to having one is also "newer"."""
+    if new_time is None:
+        return False
+    if old_time is None:
+        return True
+    return new_time > old_time
+
+
 @dataclass
 class PositionSLState:
     entry_price: float
     running_extreme: float             # best price since entry: max for BUY, min for SELL
     last_bot_sl: Optional[float]       # what this manager itself last confirmed set on the broker
     override_active: bool = False
-    override_ob_candidate: Optional[float] = None   # OB candidate snapshot at the moment override began
+    override_newest_ob_time: Optional[int] = None   # newest M15/M5/M3 OB start_time snapshot at override start
     override_extreme: Optional[float] = None        # running_extreme snapshot at that moment
 
 
@@ -119,7 +142,8 @@ class SLManager:
         return candidate
 
     def compute(self, ticket: int, direction: int, entry_price: float, current_price: float,
-               current_broker_sl: Optional[float], ob_candidate: Optional[float]) -> Optional[float]:
+               current_broker_sl: Optional[float], ob_candidate: Optional[float],
+               newest_ob_time: Optional[int]) -> Optional[float]:
         """Returns a new SL to apply this cycle, or None if nothing should
         change. Call once per open position, every poll. Does NOT assume
         the caller actually applied the returned value -- call
@@ -153,12 +177,12 @@ class SLManager:
                       f"({state.last_bot_sl} -> {current_broker_sl}) -- "
                       f"pausing auto-trail until a new OB or a new price extreme")
                 state.override_active = True
-                state.override_ob_candidate = ob_candidate
+                state.override_newest_ob_time = newest_ob_time
                 state.override_extreme = state.running_extreme
             state.last_bot_sl = current_broker_sl  # track the human's value, don't fight it
 
         if state.override_active:
-            new_ob_event = _differs(ob_candidate, state.override_ob_candidate)
+            new_ob_event = _is_newer(newest_ob_time, state.override_newest_ob_time)
             new_price_event = (
                 (direction == 1 and state.running_extreme > state.override_extreme) or
                 (direction == -1 and state.running_extreme < state.override_extreme)
@@ -167,7 +191,7 @@ class SLManager:
                 print(f"[TRAIL] #{ticket} {'new OB' if new_ob_event else 'new price extreme'} "
                       f"-- resuming auto-trail")
                 state.override_active = False
-                state.override_ob_candidate = None
+                state.override_newest_ob_time = None
                 state.override_extreme = None
             else:
                 self._save()

@@ -433,8 +433,13 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore,
         direction = 1 if pos.type == mt5.POSITION_TYPE_BUY else -1
         edges = _direction_edges(direction, m15, m5, m3)
         ob_candidate = select_sl(direction, current_price, edges)
+        # Passed separately from ob_candidate: sl_manager needs the RAW OB
+        # timestamp (not the derived closest-edge value) to tell a
+        # genuinely new OB apart from "closest edge" just switching between
+        # M15/M5/M3 as price moves -- see sl_manager.py's module docstring.
+        newest_ob_time = _newest_ob_time_in_direction(direction, m15, m5, m3)
         new_sl = sl_manager.compute(pos.ticket, direction, pos.price_open, current_price,
-                                    pos.sl or None, ob_candidate)
+                                    pos.sl or None, ob_candidate, newest_ob_time)
         if new_sl is not None:
             print(f"[TRAIL] #{pos.ticket} {'BUY' if direction == 1 else 'SELL'} SL -> {new_sl}")
             if cfg.enable_trading:
