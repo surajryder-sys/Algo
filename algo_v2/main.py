@@ -237,14 +237,44 @@ def release_stale_direction_blocks(direction_blocks: DirectionBlockStore,
             direction_blocks.release(direction)
 
 
+def _ob_still_exists(source_tf: str, direction: int, event_time: int,
+                     m1: Optional[OBSnapshot], m3: Optional[OBSnapshot],
+                     m5: Optional[OBSnapshot]) -> bool:
+    """True if a zone with this exact start_time (== event_time, the OB's
+    own origin candle) is still present in source_tf's current direction
+    history. False means the specific OB a resting pending order was built
+    from has been invalidated/removed from the chart entirely -- confirmed
+    live: a LuxAlgo zone can get deleted outright (not just marked tested)
+    once price fully violates it, distinct from is_eligible()'s zone-vs-
+    direction check, which stays True as long as the OVERALL zone still
+    favors that direction, regardless of whether this specific rectangle
+    still exists. M15 is never a source_tf for a candidate, so it's not
+    checked here."""
+    snap = {"M1": m1, "M3": m3, "M5": m5}.get(source_tf)
+    if snap is None:
+        return True  # unknown source_tf or no data yet -- don't cancel on a guess
+    history = snap.bull if direction == 1 else snap.bear
+    return any(z.start_time == event_time for z in history)
+
+
 def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
-                                   runtime: RuntimeState) -> None:
-    """Cancels a resting pending order the instant the zone's own character
-    turns against it -- even with no opposite-direction OB yet and no bias
-    flip. No confirmation delay -- this used to need one while the ATR
-    zone's event_time could wobble tick-to-tick on the currently-forming
-    bar, but the MQL5 indicator now only ever publishes the last CLOSED
-    bar's values, so event_time only changes on a genuine bar close.
+                                   runtime: RuntimeState,
+                                   m1: Optional[OBSnapshot], m3: Optional[OBSnapshot],
+                                   m5: Optional[OBSnapshot]) -> None:
+    """Cancels a resting pending order the instant either:
+      (a) the zone's own character turns against it -- even with no
+          opposite-direction OB yet and no bias flip, or
+      (b) the specific OB it was built from is no longer present at all in
+          source_tf's current history (see _ob_still_exists) -- distinct
+          from (a): the overall zone/direction can still be perfectly
+          favorable while this one particular rectangle has been deleted
+          from the chart, which is invisible to is_eligible() since that
+          only ever compares direction against the CURRENT zone, never
+          checks whether this specific OB still exists.
+    No confirmation delay -- this used to need one while the ATR zone's
+    event_time could wobble tick-to-tick on the currently-forming bar,
+    but the MQL5 indicator now only ever publishes the last CLOSED bar's
+    values, so event_time only changes on a genuine bar close.
 
     The cancelled zone is also BLOCKED (same as a manual cancellation),
     not just cancelled -- so it can't immediately re-enter even if the
@@ -265,10 +295,13 @@ def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
         direction = int(zone_key.split("|")[1])
         source_tf = zone_key.split("|")[0]
 
-        if is_eligible(zone, direction, event_time):
+        zone_ineligible = not is_eligible(zone, direction, event_time)
+        ob_gone = not _ob_still_exists(source_tf, direction, event_time, m1, m3, m5)
+        if not zone_ineligible and not ob_gone:
             continue
 
-        print(f"[EXIT] cancelling pending #{order.ticket}: zone turned against {zone_key} "
+        reason = "zone turned against it" if zone_ineligible else "its origin OB was invalidated"
+        print(f"[EXIT] cancelling pending #{order.ticket}: {reason} ({zone_key}) "
               f"-> blocking {source_tf} zone {zone_key}")
         if cfg.enable_trading:
             result = broker.cancel_pending_order(order.ticket)
@@ -284,7 +317,7 @@ def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
                 print(f"[EXIT] cancel failed: {result.retcode} {result.comment}")
                 continue
             runtime.expected_cancellations.add(order.ticket)
-            blocked.block(source_tf, zone_key, reason="zone_ineligible")
+            blocked.block(source_tf, zone_key, reason="zone_ineligible" if zone_ineligible else "ob_invalidated")
 
 
 def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore,
@@ -371,7 +404,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore,
     #    zone has turned against (Strong<->Weak flip, no opposing OB
     #    needed) gets cancelled too. Positions are untouched here -- see
     #    the function's docstring for why.
-    cancel_zone_ineligible_pending(cfg, zone, blocked, runtime)
+    cancel_zone_ineligible_pending(cfg, zone, blocked, runtime, m1, m3, m5)
 
     # 4. Trail every open position in its own direction, regardless of which
     #    source timeframe opened it. Two methods combined every cycle --
