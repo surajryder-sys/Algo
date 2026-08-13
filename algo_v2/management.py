@@ -28,10 +28,23 @@ from ob_bridge.reader import OBSnapshot
 from algo_v2.entries import select_sl
 
 
+# Floating-point tolerance for the "did the SL actually improve" check below.
+# Confirmed live (on the USOIL V2 bot, which shares this exact function):
+# `edge - SL_BUFFER` doesn't always land on the same float twice -- it can
+# come out ~1e-14 off a broker-reported current_sl of the "same" price. A bare
+# `>` comparison reads that as "still improving" forever, even though the
+# underlying OB edge never moved -- one position logged 27,000+ consecutive
+# identical [TRAIL] prints/broker modify calls this way before the fix. Real
+# tick sizes (0.01 on XAUUSD) are far larger than this epsilon, so any
+# genuine edge move still clears it easily.
+_MIN_SL_IMPROVEMENT = 1e-6
+
+
 def compute_trailing_sl(direction: int, current_price: float, current_sl: Optional[float],
                         candidate_edges: dict) -> Optional[float]:
-    """Returns a new SL only if it moves in the favorable direction; None if
-    no update should be made (no closer/appropriate OB, or it would loosen)."""
+    """Returns a new SL only if it moves in the favorable direction by more
+    than floating-point noise; None if no update should be made (no closer/
+    appropriate OB, or it would loosen)."""
     proposed = select_sl(direction, current_price, candidate_edges)
     if proposed is None:
         return None
@@ -39,20 +52,27 @@ def compute_trailing_sl(direction: int, current_price: float, current_sl: Option
     if current_sl is None:
         return proposed
 
-    if direction == 1 and proposed > current_sl:
+    if direction == 1 and proposed > current_sl + _MIN_SL_IMPROVEMENT:
         return proposed
-    if direction == -1 and proposed < current_sl:
+    if direction == -1 and proposed < current_sl - _MIN_SL_IMPROVEMENT:
         return proposed
     return None
 
 
 def fresh_opposite_ob_exists(m5: Optional[OBSnapshot], atr: Optional[ATRSnapshot],
                              position_direction: int) -> bool:
-    """True if M5 has formed an OB opposite to position_direction whose
+    """NOT CALLED from algo_v2/main.py anymore -- superseded by the
+    square-off-on-winning-opposite-candidate logic there (see its
+    module docstring / step 2 of run_once). Kept here for reference;
+    this only ever looked at a fresh M5 OB in isolation, which let a
+    fully eligible, winning M1/M3 setup sit idle while an existing
+    position rode all the way to its own SL instead of being squared
+    off the moment the opposite trade was actually ready.
+
+    True if M5 has formed an OB opposite to position_direction whose
     origin candle (start_time) postdates the ATR zone's own last flip
-    (atr.event_time) -- the sole trigger for force-closing an open
-    position. position_direction: 1 for an open BUY, -1 for an open SELL
-    (checks the opposite side)."""
+    (atr.event_time). position_direction: 1 for an open BUY, -1 for an
+    open SELL (checks the opposite side)."""
     if m5 is None or atr is None:
         return False
 

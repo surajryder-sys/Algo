@@ -9,16 +9,15 @@ V2 differences from V1 (algo/main.py):
     and is_eligible() decides per-candidate whether each one is tradeable
     (see zone.py's docstring for the full rule). M15 is still read purely
     for SL-edge selection, same as before.
-  - An ALREADY-OPEN position force-closes the moment M5 forms a fresh
-    opposite-direction OB -- "fresh" meaning it postdates the ATR zone's
-    own last flip (see management.fresh_opposite_ob_exists). Confirmed
-    live and by spec that the zone's label changing alone should never
-    close a running position, and that comparing M5's own bull-vs-bear OB
-    times in isolation (the original approach) was wrong: M5 can go a
-    long time without a fresh OB on one side, leaving a stale old one
-    that's technically "the latest" but predates the zone's own most
-    recent flip and has nothing to do with anything that's happened
-    since -- it must not trigger a close.
+  - An ALREADY-OPEN position force-closes ("squares off") the moment an
+    ELIGIBLE opposite-direction candidate actually WINS -- i.e. the same
+    winner-selection used for new entries, on any of M1/M3/M5, not just a
+    fresh OB existing somewhere. Superseded an earlier M5-only version
+    (fresh_opposite_ob_exists, still in management.py but unused here):
+    confirmed live that a fully eligible, winning M3 setup could sit idle
+    while an existing position rode all the way to its own SL instead of
+    being squared off the moment the opposite trade was actually ready.
+    A same-direction winner (or no winner) leaves the position alone.
   - Separate magic number, state files, and order-comment prefix so this
     can run alongside the V1 bot on the same terminal/account without
     colliding. Virgin-zone Telegram alerts are intentionally NOT wired in
@@ -48,10 +47,9 @@ from algo_v2.candidates import (
 from algo_v2.config import Config, load_config
 from algo_v2.entries import EntryMode, select_sl
 from algo_v2.intervention import check_manual_pending_cancellations, check_manual_position_closes
-from algo_v2.management import fresh_opposite_ob_exists
 from algo_v2.sl_manager import SLManager
 from algo_v2.state_store import TradedZoneStore
-from algo_v2.zone import ZoneState, compute_zone, is_eligible
+from algo_v2.zone import compute_zone, is_eligible
 
 
 @dataclass
@@ -267,31 +265,66 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
         sync_manual_intervention(cfg, blocked, runtime)
         release_stale_blocks(blocked, runtime, m1, m3, m5)
 
-    # 1. Close any open position the instant M5 forms a fresh OPPOSITE-
-    #    direction OB -- "fresh" meaning its origin candle postdates the
-    #    ATR zone's own last Strong<->Weak flip (atr.event_time). Holding
-    #    a position through a zone flip alone is fine; only a genuinely
-    #    fresh opposite M5 OB (formed after that flip), or the position's
-    #    own SL, closes it -- see management.fresh_opposite_ob_exists for
-    #    why comparing M5's own bull-vs-bear OB times in isolation (the
-    #    original approach) was wrong. Pending orders are NOT touched
-    #    here -- cancel_zone_ineligible_pending (step 1b) already handles
-    #    those correctly via the proper zone-eligibility rule.
+    # 1. Build both-direction candidates and find the winner up front --
+    #    needed both for the square-off check in step 2 and for placing a
+    #    new entry in step 5 (which reuses this same winner rather than
+    #    rebuilding it). Safe to run even with zone.state == NONE:
+    #    is_eligible() fails closed on every candidate in that case, so
+    #    winner naturally comes out None and step 2/5 both no-op.
+    candidates = []
+
+    def eligible(c, strict: bool = False) -> bool:
+        return (c is not None
+                and not store.is_traded(c.zone_key)
+                and not blocked.is_blocked(c.source_tf, c.zone_key)
+                and is_eligible(zone, c.direction, c.event_time, strict=strict))
+
+    for direction in (1, -1):
+        c = build_m1_candidate(direction, m1, m15, m5, m3)
+        if eligible(c, strict=True):
+            candidates.append(c)
+
+        c = build_m3_candidate(direction, m3, m15, m5, current_price)
+        if eligible(c, strict=True):
+            candidates.append(c)
+
+        c = build_m5_candidate(direction, m5, m15, m3, current_price)
+        if eligible(c):
+            candidates.append(c)
+
+    winner = choose_winning_candidate(candidates, current_price)
+
+    # 2. Square off: close any open position the instant an ELIGIBLE
+    #    opposite-direction candidate currently WINS -- i.e. it's not just
+    #    "some OB exists somewhere", it's the actual best available setup
+    #    right now, on any of M1/M3/M5, already matching the zone's/M5's
+    #    current favored direction (that's what winning via is_eligible
+    #    already requires -- no separate bias check needed here). Replaces
+    #    the old fresh_opposite_ob_exists mechanism, which only ever looked
+    #    at a fresh M5 OB in isolation: confirmed live that let a fully
+    #    eligible, winning M3 setup sit there doing nothing while an
+    #    existing position rode all the way to its own SL instead of being
+    #    squared off the moment the opposite trade was actually ready. A
+    #    same-direction winner (or no winner at all) leaves the position
+    #    alone, same as always -- this never touches pending orders, only
+    #    open positions; cancel_zone_ineligible_pending (step 3) handles
+    #    pending orders via the proper zone-eligibility rule.
     for pos in broker.get_positions(cfg.symbol, cfg.magic_number):
         direction = 1 if pos.type == mt5.POSITION_TYPE_BUY else -1
-        if fresh_opposite_ob_exists(m5, atr, direction):
+        if winner is not None and winner.direction != direction:
             print(f"[EXIT] closing {'BUY' if direction == 1 else 'SELL'} position #{pos.ticket}: "
-                  f"fresh opposite M5 OB after zone event")
+                  f"opposite {winner.source_tf} setup won "
+                  f"({'BUY' if winner.direction == 1 else 'SELL'})")
             if cfg.enable_trading:
                 broker.close_position(cfg.symbol, pos, cfg.deviation_points)
 
-    # 1b. Independent of bias: a resting pending order whose OB the zone has
-    #     turned against (Strong<->Weak flip, no opposing OB needed) gets
-    #     cancelled too. Positions are untouched here -- see the function's
-    #     docstring for why.
+    # 3. Independent of the above: a resting pending order whose OB the
+    #    zone has turned against (Strong<->Weak flip, no opposing OB
+    #    needed) gets cancelled too. Positions are untouched here -- see
+    #    the function's docstring for why.
     cancel_zone_ineligible_pending(cfg, zone, blocked, runtime)
 
-    # 2. Trail every open position in its own direction, regardless of which
+    # 4. Trail every open position in its own direction, regardless of which
     #    source timeframe opened it. Two methods combined every cycle --
     #    OB-edge (M15/M5/M3 structure, same as always) and point-based
     #    (breakeven at +7, then a running 10pt gap off the best price seen
@@ -317,52 +350,25 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore, run
                     sl_manager.confirm_applied(pos.ticket, new_sl)
     sl_manager.prune({p.ticket for p in open_positions})
 
-    # 3. New entries -- both directions are tried every cycle. Direction-
-    #    gating happens per-candidate, below, via is_eligible(): M1 and M3
-    #    both use strict=True -- each has its own confirmation (M1's 2-OB
-    #    sequence, M3's own latest OB), but neither trades unless that
-    #    direction ALSO matches M5/the ATR zone's effective direction right
-    #    now; no "postdates the boundary" exception for either (see zone.py's
-    #    is_eligible docstring -- confirmed live a stale-vs-zone M1 sequence
-    #    traded under the old lenient check, which strict=True exists to
-    #    block; M3 was on the same lenient check and gets the same fix per
-    #    explicit spec: M3 must agree with M5). M5 keeps the lenient
-    #    default -- it's one of the zone's own inputs, so the exception is
-    #    effectively inert for it anyway. No global direction gate here at
-    #    all -- step 1 above handles closing an already-open position
-    #    independently (fresh_opposite_ob_exists).
-    if zone.state == ZoneState.NONE:
-        return  # no zone data yet -- fail closed, no entries either direction
+    # 5. New entries -- reuses the candidates/winner already computed in
+    #    step 1 (direction-gating via is_eligible/strict= is described
+    #    there). If step 2 just squared off an opposite position this same
+    #    cycle, broker.get_positions() below already reflects that (close
+    #    is synchronous, same as a market order fill) -- so a winning
+    #    opposite candidate can open its new trade in the very same cycle
+    #    it closed the old one, not next-cycle. A same-direction winner,
+    #    or no winner, or a still-open position that square-off left alone
+    #    (dry-run mode, or a losing/no-opposite cycle) all just return
+    #    below via the existing "don't stack" check -- no separate
+    #    zone.state == NONE guard needed here either: winner is already
+    #    None in that case (see step 1).
+    if winner is None:
+        return
 
     # Already holding a position -- don't stack another, regardless of
     # direction: a same-direction entry would pyramid, an opposite one
     # would hedge -- both against the "one position at a time" rule.
     if broker.get_positions(cfg.symbol, cfg.magic_number):
-        return
-
-    candidates = []
-
-    def eligible(c, strict: bool = False) -> bool:
-        return (c is not None
-                and not store.is_traded(c.zone_key)
-                and not blocked.is_blocked(c.source_tf, c.zone_key)
-                and is_eligible(zone, c.direction, c.event_time, strict=strict))
-
-    for direction in (1, -1):
-        c = build_m1_candidate(direction, m1, m15, m5, m3)
-        if eligible(c, strict=True):
-            candidates.append(c)
-
-        c = build_m3_candidate(direction, m3, m15, m5, current_price)
-        if eligible(c, strict=True):
-            candidates.append(c)
-
-        c = build_m5_candidate(direction, m5, m15, m3, current_price)
-        if eligible(c):
-            candidates.append(c)
-
-    winner = choose_winning_candidate(candidates, current_price)
-    if winner is None:
         return
 
     # Not direction-filtered: only one pending order is ever meant to rest
