@@ -46,6 +46,7 @@ from algo_v2.candidates import (
 )
 from algo_v2.config import Config, load_config
 from algo_v2.direction_block import DirectionBlockStore
+from algo_v2.m1_cooldown import M1CooldownStore
 from algo_v2.entries import EntryMode, select_sl
 from algo_v2.intervention import (
     check_manual_pending_cancellations, check_manual_position_closes, check_sl_hit_closes,
@@ -258,7 +259,7 @@ def _ob_still_exists(source_tf: str, direction: int, event_time: int,
 
 
 def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
-                                   runtime: RuntimeState,
+                                   runtime: RuntimeState, m1_cooldown: M1CooldownStore,
                                    m1: Optional[OBSnapshot], m3: Optional[OBSnapshot],
                                    m5: Optional[OBSnapshot]) -> None:
     """Cancels a resting pending order the instant either:
@@ -282,6 +283,19 @@ def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
     it only clears the same way a manual block does: a genuinely
     different/newer OB confirmed latest (release_stale_blocks), or a
     manual reset.
+
+    For source_tf == M1 specifically, this ALSO raises that direction's
+    m1_cooldown floor to this OB's event_time, for both reasons above --
+    confirmed live one invalidated M1 OB can be immediately followed by
+    build_m1_candidate falling back to an older, previously-untried M1 OB
+    still sitting in the list, which is just as likely to be part of the
+    same choppy patch of price that invalidated the newer one. The floor
+    blocks that fallback: no M1 candidate in that direction is accepted
+    again until one with a start_time newer than this cancelled OB's own
+    event_time actually forms (see m1_cooldown.py). M3/M5 aren't in scope
+    for this -- they don't exhibit the same "list has several stale
+    virgin-looking OBs from the same reversal" pattern M1's much higher
+    OB turnover produces.
 
     Deliberately pending-orders only: a FILLED position still only closes
     on a bias flip or an opposing OB (per the original spec -- "that event
@@ -331,11 +345,13 @@ def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
                 continue
             runtime.expected_cancellations.add(order.ticket)
             blocked.block(source_tf, zone_key, reason="zone_ineligible" if zone_ineligible else "ob_invalidated")
+            if source_tf == "M1":
+                m1_cooldown.raise_floor(direction, event_time)
 
 
 def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore,
             direction_blocks: DirectionBlockStore, runtime: RuntimeState,
-            sl_manager: SLManager) -> None:
+            sl_manager: SLManager, m1_cooldown: M1CooldownStore) -> None:
     m15 = read_zone(cfg.symbol, 15)
     m5 = read_zone(cfg.symbol, 5)
     m3 = read_zone(cfg.symbol, 3)
@@ -368,8 +384,13 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore,
     candidates = []
 
     def eligible(c, strict: bool = False) -> bool:
-        return (c is not None
-                and not store.is_traded(c.zone_key)
+        if c is None:
+            return False
+        if c.source_tf == "M1":
+            floor = m1_cooldown.floor(c.direction)
+            if floor is not None and c.event_time <= floor:
+                return False
+        return (not store.is_traded(c.zone_key)
                 and not blocked.is_blocked(c.source_tf, c.zone_key)
                 and not direction_blocks.is_blocked(c.direction)
                 and is_eligible(zone, c.direction, c.event_time, strict=strict))
@@ -417,7 +438,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore,
     #    zone has turned against (Strong<->Weak flip, no opposing OB
     #    needed) gets cancelled too. Positions are untouched here -- see
     #    the function's docstring for why.
-    cancel_zone_ineligible_pending(cfg, zone, blocked, runtime, m1, m3, m5)
+    cancel_zone_ineligible_pending(cfg, zone, blocked, runtime, m1_cooldown, m1, m3, m5)
 
     # 4. Trail every open position in its own direction, regardless of which
     #    source timeframe opened it. Two methods combined every cycle --
@@ -543,12 +564,13 @@ def main() -> None:
     blocked = BlockedZoneStore(cfg.blocked_state_file)
     direction_blocks = DirectionBlockStore(cfg.direction_block_state_file)
     sl_manager = SLManager(cfg.sl_state_file)
+    m1_cooldown = M1CooldownStore(cfg.m1_cooldown_state_file)
     runtime = RuntimeState()
 
     try:
         while True:
             try:
-                run_once(cfg, store, blocked, direction_blocks, runtime, sl_manager)
+                run_once(cfg, store, blocked, direction_blocks, runtime, sl_manager, m1_cooldown)
             except Exception as exc:
                 print(f"[ERROR] {exc}")
                 # The MT5 IPC channel can get stuck without the process
