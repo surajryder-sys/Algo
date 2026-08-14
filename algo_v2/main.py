@@ -72,8 +72,12 @@ class RuntimeState:
     pending_block_release: dict = field(default_factory=dict)
 
 
-def _direction_edges(direction: int, m15: Optional[OBSnapshot], m5: Optional[OBSnapshot],
-                     m3: Optional[OBSnapshot]) -> dict:
+def _direction_edges(direction: int, m15: Optional[OBSnapshot],
+                     m5: Optional[OBSnapshot]) -> dict:
+    """SL-edge trailing source, deliberately M15+M5 only -- M3 dropped per
+    explicit request: M3's own much higher OB turnover was producing edges
+    that shifted the trailing SL around more choppily than M15/M5's
+    steadier structure justified."""
     def edge(snap: Optional[OBSnapshot]):
         if snap is None:
             return None
@@ -82,7 +86,7 @@ def _direction_edges(direction: int, m15: Optional[OBSnapshot], m5: Optional[OBS
             return None
         return history[0].low if direction == 1 else history[0].high
 
-    return {"M15": edge(m15), "M5": edge(m5), "M3": edge(m3)}
+    return {"M15": edge(m15), "M5": edge(m5)}
 
 
 def sync_filled_zones(cfg: Config, store: TradedZoneStore) -> None:
@@ -442,23 +446,27 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore,
 
     # 4. Trail every open position in its own direction, regardless of which
     #    source timeframe opened it. Two methods combined every cycle --
-    #    OB-edge (M15/M5/M3 structure, same as always) and point-based
-    #    (breakeven at +7, then a running 10pt gap off the best price seen
-    #    since entry) -- whichever proposes the more protective SL wins,
-    #    never loosening either way. A manually-changed SL pauses both
-    #    methods for that position until a genuinely new OB edge or a new
-    #    price extreme appears -- see sl_manager.py for the full mechanics
-    #    and the worked examples this was verified against.
+    #    OB-edge (M15/M5 structure only -- M3 deliberately excluded, see
+    #    _direction_edges) and point-based (breakeven at +7, then a running
+    #    10pt gap off the best price seen since entry) -- whichever
+    #    proposes the more protective SL wins, never loosening either way.
+    #    A manually-changed SL pauses both methods for that position until
+    #    a genuinely new OB edge or a new price extreme appears -- see
+    #    sl_manager.py for the full mechanics and the worked examples this
+    #    was verified against.
     open_positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     for pos in open_positions:
         direction = 1 if pos.type == mt5.POSITION_TYPE_BUY else -1
-        edges = _direction_edges(direction, m15, m5, m3)
+        edges = _direction_edges(direction, m15, m5)
         ob_candidate = select_sl(direction, current_price, edges)
         # Passed separately from ob_candidate: sl_manager needs the RAW OB
         # timestamp (not the derived closest-edge value) to tell a
         # genuinely new OB apart from "closest edge" just switching between
-        # M15/M5/M3 as price moves -- see sl_manager.py's module docstring.
-        newest_ob_time = _newest_ob_time_in_direction(direction, m15, m5, m3)
+        # M15/M5 as price moves -- see sl_manager.py's module docstring.
+        # Scoped to M15/M5 only, matching _direction_edges above -- an M3
+        # OB is no longer part of what trailing even looks at, so it
+        # shouldn't be able to release a manual override for this either.
+        newest_ob_time = _newest_ob_time_in_direction(direction, m15, m5)
         new_sl = sl_manager.compute(pos.ticket, direction, pos.price_open, current_price,
                                     pos.sl or None, ob_candidate, newest_ob_time)
         if new_sl is not None:
