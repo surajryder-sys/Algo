@@ -50,6 +50,7 @@ from algo_v2.m1_cooldown import M1CooldownStore
 from algo_v2.entries import EntryMode, select_sl
 from algo_v2.intervention import (
     check_manual_pending_cancellations, check_manual_position_closes, check_sl_hit_closes,
+    check_tp_hit_closes,
 )
 from algo_v2.sl_manager import SLManager
 from algo_v2.state_store import TradedZoneStore
@@ -109,8 +110,13 @@ def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore,
     poll's, and blocks the underlying zone for any that disappeared due to
     a manual (client/mobile/web) cancel or close -- never for a fill, a
     bot-initiated action, or an SL/TP/stop-out. Separately, a genuine SL
-    hit on a position blocks that entire DIRECTION (all of M1/M3/M5, not
-    just the one zone) -- see direction_block.py."""
+    hit OR TP hit on a position blocks that entire DIRECTION (all of
+    M1/M3/M5, not just the one zone), released the same way in both cases
+    -- a genuinely newer same-direction OB -- see direction_block.py. The
+    bot never sets a TP itself, so a TP-hit close only happens from one
+    set manually on the position; treated the same as an SL hit either
+    way, both mean that direction just resolved and shouldn't immediately
+    re-enter on the same stale structure."""
     current_pending = {o.ticket for o in broker.get_pending_orders(cfg.symbol, cfg.magic_number)}
     current_positions = {p.ticket for p in broker.get_positions(cfg.symbol, cfg.magic_number)}
 
@@ -129,6 +135,12 @@ def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore,
 
         for direction, block_time in check_sl_hit_closes(disappeared_positions):
             print(f"[BLOCK] {'BUY' if direction == 1 else 'SELL'} SL hit -> "
+                  f"blocking all {'BUY' if direction == 1 else 'SELL'} entries "
+                  f"until a new {'bullish' if direction == 1 else 'bearish'} OB appears")
+            direction_blocks.block(direction, block_time)
+
+        for direction, block_time in check_tp_hit_closes(disappeared_positions):
+            print(f"[BLOCK] {'BUY' if direction == 1 else 'SELL'} TP hit -> "
                   f"blocking all {'BUY' if direction == 1 else 'SELL'} entries "
                   f"until a new {'bullish' if direction == 1 else 'bearish'} OB appears")
             direction_blocks.block(direction, block_time)

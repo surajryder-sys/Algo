@@ -90,6 +90,32 @@ def check_sl_hit_closes(disappeared_tickets: set) -> list:
     return results
 
 
+def check_tp_hit_closes(disappeared_tickets: set) -> list:
+    """Same as check_sl_hit_closes above, but for DEAL_REASON_TP -- the bot
+    itself never sets a TP (see broker.modify_position_sl's default tp=0.0,
+    only ever preserving whatever TP the position already carries), so a
+    TP hit only ever happens from one you set manually on the position.
+    Direction-blocked the same way a genuine SL hit is: that side has just
+    proven itself wrong (SL) or already paid out (TP) recently enough that
+    re-entering the same direction on stale structure isn't wanted until
+    something genuinely new confirms it."""
+    results = []
+    for ticket in disappeared_tickets:
+        deals = mt5.history_deals_get(position=ticket) or ()
+        entry_deals = [d for d in deals if d.entry == mt5.DEAL_ENTRY_IN]
+        exit_deals = [d for d in deals if d.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY)]
+        if not entry_deals or not exit_deals:
+            continue
+
+        if exit_deals[-1].reason != mt5.DEAL_REASON_TP:
+            continue  # manual, bot-initiated, or SL -- not our concern here
+
+        direction = 1 if entry_deals[0].type == mt5.DEAL_TYPE_BUY else -1
+        results.append((direction, exit_deals[-1].time))
+
+    return results
+
+
 def check_manual_position_closes(disappeared_tickets: set) -> list:
     """disappeared_tickets: position tickets seen last poll but gone now.
     Returns [(source_tf, zone_key), ...] for the ones a manual close (not
