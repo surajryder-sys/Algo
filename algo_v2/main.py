@@ -46,7 +46,7 @@ from algo_v2.candidates import (
 )
 from algo_v2.config import Config, load_config
 from algo_v2.direction_block import DirectionBlockStore
-from algo_v2.m1_cooldown import M1CooldownStore
+from algo_v2.zone_cooldown import ZoneCooldownStore
 from algo_v2.entries import EntryMode, select_sl
 from algo_v2.intervention import (
     check_manual_pending_cancellations, check_manual_position_closes, check_sl_hit_closes,
@@ -105,7 +105,8 @@ def sync_filled_zones(cfg: Config, store: TradedZoneStore) -> None:
 
 
 def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore,
-                             direction_blocks: DirectionBlockStore, runtime: RuntimeState) -> None:
+                             direction_blocks: DirectionBlockStore, zone_cooldown: ZoneCooldownStore,
+                             runtime: RuntimeState) -> None:
     """Compares this poll's live pending/position tickets against last
     poll's, and blocks the underlying zone for any that disappeared due to
     a manual (client/mobile/web) cancel or close -- never for a fill, a
@@ -116,7 +117,18 @@ def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore,
     bot never sets a TP itself, so a TP-hit close only happens from one
     set manually on the position; treated the same as an SL hit either
     way, both mean that direction just resolved and shouldn't immediately
-    re-enter on the same stale structure."""
+    re-enter on the same stale structure.
+
+    Both manual-cancellation cases also raise zone_cooldown's floor for
+    (source_tf, direction) to the cancelled zone's own event_time -- same
+    reasoning as cancel_zone_ineligible_pending's floor raise: the
+    per-zone block in `blocked` only ever covers that EXACT zone_key, so
+    if it later gets mitigated/invalidated off the chart, the candidate-
+    builder can fall back to a different (possibly older, previously-
+    untried) OB on the same timeframe that the block never covered at
+    all -- confirmed live this looked like "I cancelled a trade, the
+    zone got mitigated, and an older zone appeared and reset the block."
+    See zone_cooldown.py."""
     current_pending = {o.ticket for o in broker.get_pending_orders(cfg.symbol, cfg.magic_number)}
     current_positions = {p.ticket for p in broker.get_positions(cfg.symbol, cfg.magic_number)}
 
@@ -127,11 +139,15 @@ def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore,
         for source_tf, zone_key in check_manual_pending_cancellations(disappeared_pending, runtime.expected_cancellations):
             print(f"[BLOCK] manual pending cancellation -> blocking {source_tf} zone {zone_key}")
             blocked.block(source_tf, zone_key, reason="manual_cancel")
+            _, direction_str, event_time_str = zone_key.split("|")
+            zone_cooldown.raise_floor(source_tf, int(direction_str), int(event_time_str))
 
     if disappeared_positions:
         for source_tf, zone_key in check_manual_position_closes(disappeared_positions):
             print(f"[BLOCK] manual position close -> blocking {source_tf} zone {zone_key}")
             blocked.block(source_tf, zone_key, reason="manual_close")
+            _, direction_str, event_time_str = zone_key.split("|")
+            zone_cooldown.raise_floor(source_tf, int(direction_str), int(event_time_str))
 
         for direction, block_time in check_sl_hit_closes(disappeared_positions):
             print(f"[BLOCK] {'BUY' if direction == 1 else 'SELL'} SL hit -> "
@@ -275,7 +291,7 @@ def _ob_still_exists(source_tf: str, direction: int, event_time: int,
 
 
 def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
-                                   runtime: RuntimeState, m1_cooldown: M1CooldownStore,
+                                   runtime: RuntimeState, zone_cooldown: ZoneCooldownStore,
                                    m1: Optional[OBSnapshot], m3: Optional[OBSnapshot],
                                    m5: Optional[OBSnapshot]) -> None:
     """Cancels a resting pending order the instant either:
@@ -300,18 +316,18 @@ def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
     different/newer OB confirmed latest (release_stale_blocks), or a
     manual reset.
 
-    For source_tf == M1 specifically, this ALSO raises that direction's
-    m1_cooldown floor to this OB's event_time, for both reasons above --
-    confirmed live one invalidated M1 OB can be immediately followed by
-    build_m1_candidate falling back to an older, previously-untried M1 OB
-    still sitting in the list, which is just as likely to be part of the
-    same choppy patch of price that invalidated the newer one. The floor
-    blocks that fallback: no M1 candidate in that direction is accepted
-    again until one with a start_time newer than this cancelled OB's own
-    event_time actually forms (see m1_cooldown.py). M3/M5 aren't in scope
-    for this -- they don't exhibit the same "list has several stale
-    virgin-looking OBs from the same reversal" pattern M1's much higher
-    OB turnover produces.
+    This ALSO raises (source_tf, direction)'s zone_cooldown floor to this
+    OB's event_time -- confirmed live an invalidated OB can be immediately
+    followed by the candidate-builder falling back to an older,
+    previously-untried OB still sitting in the list on the SAME
+    timeframe, which is just as likely to be part of the same reversal
+    that invalidated the newer one. The floor blocks that fallback: no
+    candidate on (source_tf, direction) is accepted again until one with
+    a start_time newer than this cancelled OB's own event_time actually
+    forms (see zone_cooldown.py). Originally M1-only (its much higher OB
+    turnover made the pattern most visible there first), generalized to
+    all of M1/M3/M5 once the same hole was confirmed on the manual-
+    cancellation path too (see sync_manual_intervention).
 
     Deliberately pending-orders only: a FILLED position still only closes
     on a bias flip or an opposing OB (per the original spec -- "that event
@@ -361,13 +377,12 @@ def cancel_zone_ineligible_pending(cfg: Config, zone, blocked: BlockedZoneStore,
                 continue
             runtime.expected_cancellations.add(order.ticket)
             blocked.block(source_tf, zone_key, reason="zone_ineligible" if zone_ineligible else "ob_invalidated")
-            if source_tf == "M1":
-                m1_cooldown.raise_floor(direction, event_time)
+            zone_cooldown.raise_floor(source_tf, direction, event_time)
 
 
 def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore,
             direction_blocks: DirectionBlockStore, runtime: RuntimeState,
-            sl_manager: SLManager, m1_cooldown: M1CooldownStore) -> None:
+            sl_manager: SLManager, zone_cooldown: ZoneCooldownStore) -> None:
     m15 = read_zone(cfg.symbol, 15)
     m5 = read_zone(cfg.symbol, 5)
     m3 = read_zone(cfg.symbol, 3)
@@ -387,7 +402,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore,
         # 0b. Detect manual cancels/closes since the last poll and block
         #     their zones; auto-release blocks a new same-direction OB
         #     has superseded.
-        sync_manual_intervention(cfg, blocked, direction_blocks, runtime)
+        sync_manual_intervention(cfg, blocked, direction_blocks, zone_cooldown, runtime)
         release_stale_blocks(blocked, runtime, m1, m3, m5)
         release_stale_direction_blocks(direction_blocks, m1, m3, m5)
 
@@ -402,10 +417,9 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore,
     def eligible(c, strict: bool = False) -> bool:
         if c is None:
             return False
-        if c.source_tf == "M1":
-            floor = m1_cooldown.floor(c.direction)
-            if floor is not None and c.event_time <= floor:
-                return False
+        floor = zone_cooldown.floor(c.source_tf, c.direction)
+        if floor is not None and c.event_time <= floor:
+            return False
         return (not store.is_traded(c.zone_key)
                 and not blocked.is_blocked(c.source_tf, c.zone_key)
                 and not direction_blocks.is_blocked(c.direction)
@@ -454,7 +468,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore,
     #    zone has turned against (Strong<->Weak flip, no opposing OB
     #    needed) gets cancelled too. Positions are untouched here -- see
     #    the function's docstring for why.
-    cancel_zone_ineligible_pending(cfg, zone, blocked, runtime, m1_cooldown, m1, m3, m5)
+    cancel_zone_ineligible_pending(cfg, zone, blocked, runtime, zone_cooldown, m1, m3, m5)
 
     # 4. Trail every open position in its own direction, regardless of which
     #    source timeframe opened it. Two methods combined every cycle --
@@ -584,13 +598,13 @@ def main() -> None:
     blocked = BlockedZoneStore(cfg.blocked_state_file)
     direction_blocks = DirectionBlockStore(cfg.direction_block_state_file)
     sl_manager = SLManager(cfg.sl_state_file)
-    m1_cooldown = M1CooldownStore(cfg.m1_cooldown_state_file)
+    zone_cooldown = ZoneCooldownStore(cfg.zone_cooldown_state_file)
     runtime = RuntimeState()
 
     try:
         while True:
             try:
-                run_once(cfg, store, blocked, direction_blocks, runtime, sl_manager, m1_cooldown)
+                run_once(cfg, store, blocked, direction_blocks, runtime, sl_manager, zone_cooldown)
             except Exception as exc:
                 print(f"[ERROR] {exc}")
                 # The MT5 IPC channel can get stuck without the process
