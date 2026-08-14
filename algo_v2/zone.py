@@ -62,6 +62,11 @@ class ZoneState(Enum):
 class ZoneResult:
     state: ZoneState     # STRONG = effective direction bullish, WEAK = bearish, NONE = no data yet
     event_time: int      # the winning (most recent) of the three source timestamps
+    source: str = "NONE"  # which of the three signals won: "ATR", "M5_BULL", or "M5_BEAR" --
+                          # purely informational (logging/diagnostics), not used by any eligibility
+                          # logic, added so a flip in the effective direction can be logged with
+                          # WHY it flipped instead of just that it did -- see main.py's
+                          # log_zone_transitions()
 
 
 def _m5_ob_time(m5: Optional[OBSnapshot], direction: int) -> int:
@@ -83,25 +88,25 @@ def compute_zone(atr: Optional[ATRSnapshot], m5: Optional[OBSnapshot]) -> ZoneRe
     """Combines the ATR Trail flip with M5's own latest bullish/bearish OB
     times -- whichever of the three is most recent sets the effective
     direction and event_time boundary."""
-    candidates = []  # (event_time, direction)
+    candidates = []  # (event_time, direction, source)
 
     if atr is not None:
-        candidates.append((atr.event_time, 1 if atr.trend > 0 else -1))
+        candidates.append((atr.event_time, 1 if atr.trend > 0 else -1, "ATR"))
 
     bull_time = _m5_ob_time(m5, 1)
     if bull_time > 0:
-        candidates.append((bull_time, 1))
+        candidates.append((bull_time, 1, "M5_BULL"))
 
     bear_time = _m5_ob_time(m5, -1)
     if bear_time > 0:
-        candidates.append((bear_time, -1))
+        candidates.append((bear_time, -1, "M5_BEAR"))
 
     if not candidates:
         return ZoneResult(ZoneState.NONE, 0)
 
-    event_time, direction = max(candidates, key=lambda c: c[0])
+    event_time, direction, source = max(candidates, key=lambda c: c[0])
     state = ZoneState.STRONG if direction == 1 else ZoneState.WEAK
-    return ZoneResult(state, event_time)
+    return ZoneResult(state, event_time, source)
 
 
 def is_eligible(zone: ZoneResult, direction: int, ob_event_time: int, strict: bool = False) -> bool:

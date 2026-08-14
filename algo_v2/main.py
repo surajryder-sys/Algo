@@ -29,6 +29,7 @@ every decision is printed but nothing touches the account.
 """
 from __future__ import annotations
 
+import datetime
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -54,7 +55,7 @@ from algo_v2.intervention import (
 )
 from algo_v2.sl_manager import SLManager
 from algo_v2.state_store import TradedZoneStore
-from algo_v2.zone import compute_zone, is_eligible
+from algo_v2.zone import compute_zone, is_eligible, ZoneState
 
 
 @dataclass
@@ -71,6 +72,13 @@ class RuntimeState:
     # source_tf -> (candidate_zone_key, first_seen_monotonic_time) for a
     # manual block whose release is being confirmed -- see release_stale_blocks.
     pending_block_release: dict = field(default_factory=dict)
+    # The last (state, event_time, source) actually logged by
+    # log_zone_transitions -- None until the first poll. Compared every
+    # cycle so a flip in the effective direction (zone.py's compute_zone)
+    # gets printed with a real timestamp and WHICH signal caused it,
+    # instead of only being reconstructible after the fact from sparse
+    # ENTRY/EXIT lines -- see log_zone_transitions.
+    last_logged_zone: Optional[tuple] = None
 
 
 def _direction_edges(direction: int, m15: Optional[OBSnapshot],
@@ -177,6 +185,36 @@ def sync_manual_intervention(cfg: Config, blocked: BlockedZoneStore,
 # specific zone the bridge's ordering currently favors. Still requires
 # that fact to hold for this many real seconds before acting on it, as a
 # last line of defense against a single-poll misread.
+def log_zone_transitions(zone, runtime: RuntimeState) -> None:
+    """Prints a line the instant compute_zone's effective direction or its
+    event_time boundary actually changes -- direct evidence of exactly
+    WHEN a flip happened and WHICH of the three signals (ATR's own flip,
+    M5's own latest bullish OB, or M5's own latest bearish OB) caused it,
+    instead of only being reconstructible after the fact from sparse
+    ENTRY/EXIT lines. Confirmed live this reconstruction is unreliable --
+    the bridge only exposes CURRENT state, so a signal that briefly won
+    and was mitigated/invalidated before the next check leaves no trace.
+
+    Compares against the last state THIS FUNCTION itself logged (not the
+    raw zone value every poll, which is unchanged almost every cycle), so
+    only genuine transitions print, not once-a-second noise. Runs every
+    poll regardless of enable_trading -- this is diagnostic, not a
+    trading decision."""
+    current = (zone.state, zone.event_time, zone.source)
+    if runtime.last_logged_zone == current:
+        return
+    runtime.last_logged_zone = current
+
+    if zone.state == ZoneState.NONE:
+        print("[ZONE] effective direction -> NONE (no data yet)")
+        return
+
+    event_dt = datetime.datetime.fromtimestamp(zone.event_time, datetime.timezone.utc)
+    direction_label = "BULLISH" if zone.state == ZoneState.STRONG else "BEARISH"
+    print(f"[ZONE] effective direction -> {direction_label} (source={zone.source}, "
+          f"event_time={event_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC)")
+
+
 BLOCK_RELEASE_CONFIRM_SECONDS = 5.0
 
 
@@ -390,6 +428,7 @@ def run_once(cfg: Config, store: TradedZoneStore, blocked: BlockedZoneStore,
     atr = read_atr(cfg.symbol, cfg.atr_timeframe_minutes)
 
     zone = compute_zone(atr, m5)
+    log_zone_transitions(zone, runtime)
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = (bid + ask) / 2.0
 
