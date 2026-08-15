@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import MetaTrader5 as mt5
 
-from algo_v2_tv_xauusd.candidates import parse_order_comment
+from v3.algo_v2_tv_xauusd.candidates import parse_order_comment
 
 MANUAL_DEAL_REASONS = (mt5.DEAL_REASON_CLIENT, mt5.DEAL_REASON_MOBILE, mt5.DEAL_REASON_WEB)
 

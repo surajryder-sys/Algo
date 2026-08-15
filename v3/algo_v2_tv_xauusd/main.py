@@ -29,21 +29,21 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from algo_v2_tv_xauusd import broker, reader
-from algo_v2_tv_xauusd.blocking import BlockedZoneStore
-from algo_v2_tv_xauusd.candidates import (
+from v3.algo_v2_tv_xauusd import broker, reader
+from v3.algo_v2_tv_xauusd.blocking import BlockedZoneStore
+from v3.algo_v2_tv_xauusd.candidates import (
     build_m1_candidate, build_m3_candidate, build_m5_candidate,
     choose_winning_candidate, should_replace_pending,
     order_comment, parse_order_comment,
 )
-from algo_v2_tv_xauusd.config import Config, load_config
-from algo_v2_tv_xauusd.entries import EntryMode, select_sl
-from algo_v2_tv_xauusd.intervention import check_manual_pending_cancellations, check_manual_position_closes
-from algo_v2_tv_xauusd.management import fresh_opposite_ob_exists
-from algo_v2_tv_xauusd.reader import OBSnapshot, read_zone, read_atr
-from algo_v2_tv_xauusd.sl_manager import SLManager
-from algo_v2_tv_xauusd.state_store import TradedZoneStore
-from algo_v2_tv_xauusd.zone import ZoneState, compute_zone, is_eligible
+from v3.algo_v2_tv_xauusd.config import Config, load_config
+from v3.algo_v2_tv_xauusd.entries import EntryMode, select_sl
+from v3.algo_v2_tv_xauusd.intervention import check_manual_pending_cancellations, check_manual_position_closes
+from v3.algo_v2_tv_xauusd.management import fresh_opposite_ob_exists
+from v3.algo_v2_tv_xauusd.reader import OBSnapshot, read_zone, read_atr
+from v3.algo_v2_tv_xauusd.sl_manager import SLManager
+from v3.algo_v2_tv_xauusd.state_store import TradedZoneStore
+from v3.algo_v2_tv_xauusd.zone import ZoneState, compute_zone, is_eligible
 
 # Event-log/bias-history coverage only (see event_watcher.py) -- the
 # ACTUAL strategy in run_once() below is unchanged, still just M1/M3/M5

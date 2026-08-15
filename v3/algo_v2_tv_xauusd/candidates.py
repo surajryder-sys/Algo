@@ -16,10 +16,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from algo_v2_tv_xauusd.entries import (
+from v3.algo_v2_tv_xauusd.entries import (
     EntryMode, EntryPlan, m1_entry_price, m3_entry, m5_entry, select_sl,
 )
-from algo_v2_tv_xauusd.reader import OBSnapshot, Zone
+from v3.algo_v2_tv_xauusd.reader import OBSnapshot, Zone
 
 # Keeps this bot's orders visually distinct from V1's "SMC"-prefixed and
 # V2's "V2"-prefixed comments while all three run on the same terminal/

@@ -31,7 +31,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from tv_bridge.config import BridgeConfig, load_bridge_config
+from v3.tv_bridge.config import BridgeConfig, load_bridge_config
 
 _EVENT_SCHEMAS = {
     "atr_trail": ("timeframe", "trail_stop", "trend", "event_time", "bar_time"),

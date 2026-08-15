@@ -21,14 +21,14 @@ from typing import Optional
 
 from playwright.sync_api import Browser, Page, sync_playwright
 
-from tradingview_bot.atr_store import AtrStore
-from tradingview_bot.zone_store import ZoneStore
-from tv_scraper.atr_trend_tracker import AtrTrendTracker
-from tv_scraper.config import Config, load_config
-from tv_scraper.first_seen_store import FirstSeenStore
-from tv_scraper.live_snapshot_store import LiveSnapshotStore
-from tv_scraper.parser import parse_data_window
-from tv_scraper.retest_tracker import RetestTracker
+from v3.tradingview_bot.atr_store import AtrStore
+from v3.tradingview_bot.zone_store import ZoneStore
+from v3.tv_scraper.atr_trend_tracker import AtrTrendTracker
+from v3.tv_scraper.config import Config, load_config
+from v3.tv_scraper.first_seen_store import FirstSeenStore
+from v3.tv_scraper.live_snapshot_store import LiveSnapshotStore
+from v3.tv_scraper.parser import parse_data_window
+from v3.tv_scraper.retest_tracker import RetestTracker
 
 _DATA_WINDOW_TAB = "Data window"
 
