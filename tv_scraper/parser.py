@@ -24,6 +24,21 @@ _NUMBER_RE = re.compile(r"^-?[\d,]+(\.\d+)?$")
 # manually switched to a different symbol, e.g. for testing while XAUUSD's
 # market is closed on weekends).
 _SYMBOL_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,9})\s*·\s*(\w+)\s*·\s*[A-Za-z]")
+_HOUR_TF_RE = re.compile(r"^(\d+)[hH]$")
+
+
+def _normalize_timeframe(raw: str) -> str:
+    """The Data Window header shows hour timeframes as "1h"/"2h"/"4h", but
+    Pine's timeframe.period (what the alert path sends -- see
+    OBD_SecretTrader.pine's payloads) reports the SAME timeframes as plain
+    minutes: "60"/"120"/"240". Left unnormalized, H1/H2/H4 data from the
+    two paths would land under different keys and never merge (confirmed
+    live: an old scraper-only run left a stray "XAUUSD|1h" key sitting
+    next to the alert path's "XAUUSD|60" for the exact same real
+    timeframe). Minute/day/week/month labels ("1", "15", "D", "W") are
+    already in Pine's own format and pass through unchanged."""
+    m = _HOUR_TF_RE.match(raw)
+    return str(int(m.group(1)) * 60) if m else raw
 
 _ATR_LABELS = {"Trailing Stop": "trail_stop", "Trend": "trend"}
 # The symbol's own live Close, from the Data Window's own O/H/L/C block (not
@@ -35,13 +50,35 @@ _ATR_LABELS = {"Trailing Stop": "trail_stop", "Trend": "trend"}
 # negative, M3/M5 entries always NONE).
 _PRICE_LABELS = {"Close": "close"}
 _ZONE_LABELS = {
-    f"{direction}{n} {field}": (direction.lower(), n, field.lower())
+    f"{direction}{n} {suffix}": (direction.lower(), n, field_key)
     for direction in ("Bull", "Bear")
     for n in (1, 2, 3, 4)  # matches this indicator's deployed bull/bear_ext_last=4
-    for field in ("Top", "Btm", "Retested")  # no Start -- see ob_detector_webhook.pine.
-    # Retested is Pine's own wick-based check (1/0), authoritative over
-    # tv_scraper's own live-Close approximation in _apply_direction --
-    # see that indicator's mark_retests()/"Retested" Data Window plots.
+    # and the Data Window's 4 exposed slots per direction -- kept 1:1 with what's
+    # actually drawn on the chart by explicit request (was briefly 8, giving
+    # tv_scraper visibility beyond the drawn boxes to dodge top-4-churn
+    # misreads -- see OBD_SecretTrader.pine's own comment on this tradeoff).
+    for suffix, field_key in (
+        ("Top", "top"), ("Btm", "btm"),
+        # Retested is Pine's own wick-based check (1/0), authoritative over
+        # tv_scraper's own live-Close approximation in _apply_direction --
+        # see that indicator's mark_retests()/"Retested" Data Window plots.
+        ("Retested", "retested"),
+        # Elapsed real SECONDS (not raw timestamps -- see OBD_SecretTrader.
+        # pine's own comment on why a raw absolute timestamp broke this
+        # chart's price-scale autoscale), computed by Pine itself from its
+        # own timenow against the formation/retest bar's real time[] --
+        # replaces the earlier bar-COUNT fields (FormedBarsAgo/
+        # RetestedBarsAgo, scraper.py converting bars*timeframe_seconds
+        # using ITS OWN wall clock), which was silently wrong by however
+        # much the underlying price feed itself is delayed (e.g. a broker
+        # CFD feed running a few minutes behind true market time) -- see
+        # that Pine function's own comment. Works retroactively for zones
+        # that predate this scraper ever polling, unlike the alert()
+        # webhook path.
+        ("FormedSecondsAgo", "formed_seconds_ago"),
+        ("RetestedSecondsAgo", "retested_seconds_ago"),
+    )
+    # no Start -- see ob_detector_webhook.pine.
 }
 
 
@@ -118,12 +155,20 @@ def parse_data_window(text: str) -> ParsedState:
                 # rather than silently treating "missing" as "not retested".
                 if "retested" in f:
                     zone["retested"] = f["retested"] > 0.5
+                # Elapsed real seconds (int, but Data Window numbers always
+                # parse as float -- cast down). Missing entirely if this
+                # indicator build predates the FormedSecondsAgo/
+                # RetestedSecondsAgo plots (an older, un-updated build).
+                if "formed_seconds_ago" in f:
+                    zone["formed_seconds_ago"] = int(f["formed_seconds_ago"])
+                if "retested_seconds_ago" in f:
+                    zone["retested_seconds_ago"] = int(f["retested_seconds_ago"])
                 out.append(zone)
         return out
 
     symbol_match = _SYMBOL_RE.search(text)
     symbol = symbol_match.group(1) if symbol_match else None
-    timeframe = symbol_match.group(2) if symbol_match else None
+    timeframe = _normalize_timeframe(symbol_match.group(2)) if symbol_match else None
 
     return ParsedState(atr=atr, bull_zones=_zones("bull"), bear_zones=_zones("bear"),
                         symbol=symbol, timeframe=timeframe, close=price_fields.get("close"))

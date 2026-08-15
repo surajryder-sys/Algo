@@ -4,9 +4,9 @@ Run with: python -m tradingview_bot.main
 
 v1 scope: no trading. It resumes from the last processed byte offset in the
 shared signal log tv_bridge.receiver writes, folds each event into the
-matching store (ZoneStore for ob_zone_formed/ob_zone_mitigated, AtrStore for
-atr_trail), and prints it. Entry/exit logic gets built on top of this once
-the strategy is defined.
+matching store (ZoneStore for ob_zone_formed/ob_zone_mitigated/
+ob_zone_retested, AtrStore for atr_trail), and prints it. Entry/exit logic
+gets built on top of this once the strategy is defined.
 """
 from __future__ import annotations
 
@@ -33,6 +33,8 @@ def run_once(cfg: Config, cursor_store: SignalStore, zones: ZoneStore, atr: AtrS
             zones.apply_formed(ev.symbol, timeframe, ev.data["direction"], ev.data)
         elif ev.type == "ob_zone_mitigated":
             zones.apply_mitigated(ev.symbol, timeframe, ev.data["direction"], ev.data)
+        elif ev.type == "ob_zone_retested":
+            zones.apply_retested(ev.symbol, timeframe, ev.data["direction"], ev.data)
 
     cursor_store.record(new_cursor, [ev.data for ev in events])
 

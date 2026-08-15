@@ -12,17 +12,21 @@ log in once.
 """
 from __future__ import annotations
 
+import subprocess
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Browser, Page, sync_playwright
 
 from tradingview_bot.atr_store import AtrStore
 from tradingview_bot.zone_store import ZoneStore
 from tv_scraper.atr_trend_tracker import AtrTrendTracker
 from tv_scraper.config import Config, load_config
 from tv_scraper.first_seen_store import FirstSeenStore
+from tv_scraper.live_snapshot_store import LiveSnapshotStore
 from tv_scraper.parser import parse_data_window
 from tv_scraper.retest_tracker import RetestTracker
 
@@ -71,6 +75,32 @@ def _ensure_logged_in(page: Page, chart_url: str) -> None:
     time.sleep(3)
 
 
+def _chart_content_width(page: Page, window_width: float) -> float:
+    """The Data Window/Object Tree sidebar takes a roughly FIXED PIXEL
+    width, not a fraction of the window -- confirmed live: grid math based
+    on window.innerWidth alone worked fine at a ~2147px-wide window (the
+    sidebar was a small enough fraction of that to not matter), but broke
+    as soon as the window was pinned narrower (~1720px, to fit half a
+    monitor) -- the SAME sidebar pixel width now ate a bigger fraction of
+    the total, so the rightmost column's click fraction (0.875) overshot
+    past the actual chart content into the sidebar itself, landing on
+    whatever pane was already focused instead of changing it (the
+    persistent, not-self-healing duplicate-pane symptom this fixes).
+    Detects the sidebar's real left edge from the "Data window" tab's own
+    bounding box (same element _panel_scroll_point already locates) and
+    uses THAT as the chart's true usable width; falls back to the full
+    window width if the tab can't be found (e.g. mid-navigation)."""
+    tab = page.get_by_role("tab", name=_DATA_WINDOW_TAB, exact=True)
+    if tab.count() == 0:
+        tab = page.get_by_text(_DATA_WINDOW_TAB, exact=True)
+    if tab.count() == 0:
+        return window_width
+    box = tab.first.bounding_box()
+    if box is None or box["x"] <= 0:
+        return window_width
+    return box["x"]
+
+
 def _focus_pane(page: Page, x_fraction: float, y_fraction: float) -> None:
     """The layout has multiple chart panes in a grid; the sidebar panels
     (Data Window included) reflect whichever pane last had focus. Click
@@ -78,9 +108,14 @@ def _focus_pane(page: Page, x_fraction: float, y_fraction: float) -> None:
     not legend text, since panes can show the same timeframe label
     (ambiguous to search for) and symbols get changed manually during
     testing anyway. page.viewport_size is None under no_viewport=True
-    (maximized window), so read the real size from the page itself."""
+    (maximized window), so read the real size from the page itself.
+
+    x_fraction is applied against the CHART's own content width (see
+    _chart_content_width), not the full window width -- the sidebar isn't
+    part of the grid."""
     size = page.evaluate("({width: window.innerWidth, height: window.innerHeight})")
-    page.mouse.click(size["width"] * x_fraction, size["height"] * y_fraction)
+    chart_width = _chart_content_width(page, size["width"])
+    page.mouse.click(chart_width * x_fraction, size["height"] * y_fraction)
 
 
 def _grid_panes(rows: int, cols: int) -> list[tuple[str, float, float]]:
@@ -113,12 +148,26 @@ def _panel_scroll_point(page: Page) -> Optional[tuple[float, float]]:
     return (box["x"] + box["width"] / 2, box["y"] + box["height"] + 100)
 
 
-def _collect_data_window_text(page: Page, steps: int = 8) -> str:
+def _collect_data_window_text(page: Page, steps: int = 16) -> str:
     """The Data Window is a scrollable list that TradingView virtualizes --
     rows outside the current scroll position aren't in the DOM at all, so a
     single innerText read can silently miss most indicators. Scrolls through
     the panel capturing text at each position and concatenates everything;
-    re-parsing the same label twice is harmless."""
+    re-parsing the same label twice is harmless.
+
+    steps was dropped to 8 when OBD_SecretTrader went from 8 zones/side back
+    down to 4, but that revert happened BEFORE FormedBarsAgo/RetestedBarsAgo
+    were added -- those two new plots per slot brought row count back up
+    (Top/Btm/Retested/FormedBarsAgo/RetestedBarsAgo x 4 slots x 2 directions
+    = 40 rows for this indicator alone) without steps being raised back to
+    match. Confirmed live: BTCUSD/M1 was silently missing FormedBarsAgo/
+    RetestedBarsAgo every poll (present in the Pine plots, absent from
+    parsed zones), which made _apply_direction fall back to wall-clock
+    approximation for every zone -- and since a fresh poll first-sees (and
+    first-marks-retested) everything in one batch, that fallback reads as
+    "all zones detected/retested at the identical time", indistinguishable
+    from a real bug without checking for the missing fields specifically.
+    Back to 16 so the extra rows are actually reached."""
     point = _panel_scroll_point(page)
     if point is None:
         # Can't safely locate the panel -- read whatever's there right now
@@ -170,20 +219,81 @@ def _price_key(zone: dict) -> int:
     return int(round(zone["top"] * 1000))
 
 
+# A zone's price_key must be missing this many CONSECUTIVE polls before
+# it's treated as mitigated -- see _apply_direction's own docstring for why
+# a single missing poll isn't proof enough.
+_MITIGATION_DEBOUNCE_POLLS = 2
+
+
+def _round_hint(raw: Optional[int]) -> Optional[int]:
+    """Rounds a reconstructed real timestamp down to the minute -- NOT for
+    display precision (the reconstruction is now genuinely second-accurate,
+    see _apply_direction's own retested_at docstring paragraph), but for
+    STABILITY: the resurrection check (ZoneStore.get() exact-match) and the
+    non-first-sighting consistency check both need the SAME real zone to
+    reconstruct to the EXACT same value on every poll. The old bar-count
+    approach got that for free (discrete bar boundaries, always landing on
+    a clean multiple of the timeframe's seconds). This one subtracts two
+    independently-sampled live values (tv_scraper's own `now` and Pine's
+    live-computed elapsed seconds) that can drift a second or two apart
+    poll to poll from ordinary scrape/network timing skew -- rounding the
+    RESULT (not either input alone, which would drift the wrong way
+    within a single minute) absorbs that jitter with the same tolerance
+    margin the old approach had for free, without reintroducing the
+    feed-delay bug this replaced (that was about WHICH clock anchors the
+    subtraction, not about display/matching granularity)."""
+    if raw is None:
+        return None
+    return raw - (raw % 60)
+
+
 def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: RetestTracker,
                       symbol: str, timeframe: str, direction: str, current: list[dict],
-                      previously_seen: dict[int, int], close_price: Optional[float]) -> dict[int, int]:
-    """Applies formed zones for one direction and marks any zone that was
-    visible last poll but has now dropped out of view as mitigated -- LuxAlgo
-    only removes a zone once it's actually violated, so "disappeared" here
-    means mitigated (we just don't get its exact mitigation price/time, only
-    that it happened by this poll).
+                      previously_seen: dict[int, int], missing_streak: dict[int, int],
+                      pending_retest: dict[int, int],
+                      close_price: Optional[float]) -> tuple[dict[int, int], dict[int, int], dict[int, int]]:
+    """Applies formed zones for one direction and marks any zone that has
+    dropped out of view for _MITIGATION_DEBOUNCE_POLLS consecutive polls as
+    mitigated -- LuxAlgo only removes a zone once it's actually violated, so
+    "genuinely, persistently gone" here means mitigated (we just don't get
+    its exact mitigation price/time, only that it happened by this poll).
 
-    previously_seen / the return value: {price_key: start_time actually
-    written to ZoneStore} -- price_key alone (as the old set-of-ints used to
-    hold) isn't enough to mitigate correctly once start_time is a separately
-    tracked, persisted value rather than being derived from price_key
-    on the spot.
+    A SINGLE missing poll is not treated as mitigation, only counted --
+    confirmed live: a zone still clearly visible on the actual chart (never
+    left LuxAlgo's real top-4 array) got falsely mitigated, then falsely
+    "reformed" as a brand-new zone with a fresh start_time on the very next
+    poll, discarding its real retest history in the process. Root cause was
+    a transient scrape miss (Data Window not yet repainted, a pane read
+    landing wrong) for that one poll, not an actual removal. Requiring 2
+    consecutive misses before declaring mitigation costs one extra poll's
+    delay (~5-10s) on GENUINE mitigations, in exchange for not fabricating
+    false zone churn out of ordinary scrape flakiness.
+
+    previously_seen / the first return value: {price_key: start_time
+    actually written to ZoneStore} -- price_key alone (as the old
+    set-of-ints used to hold) isn't enough to mitigate correctly once
+    start_time is a separately tracked, persisted value rather than being
+    derived from price_key on the spot. A price_key currently mid-debounce
+    (missing, but not yet for long enough) is kept in this dict too, so it
+    isn't lost while its streak is still building.
+
+    missing_streak / the second return value: {price_key: consecutive
+    missed-poll count}, cleared for any price_key seen again this poll.
+
+    pending_retest / the third return value: {price_key: the retest_hint
+    timestamp computed from LAST poll's RetestedSecondsAgo}, used to
+    require the SAME hint value on two consecutive polls before it's
+    trusted enough to call retested.mark() -- see the "row-level"
+    consistency comment further down for the confirmed-live corruption
+    this guards against (the multi-second Data Window scroll catching a
+    row mid-reshuffle, which the formed_hint-vs-known-start_time check
+    alone doesn't catch when it's ONLY RetestedSecondsAgo that's corrupted
+    for that one poll, not FormedSecondsAgo). A genuine retest's
+    seconds-ago-derived hint is deterministic (after _round_hint()'s
+    stability rounding) -- the same real retest bar reconstructs to the
+    same timestamp every time it's recomputed -- so two consecutive polls
+    agreeing is strong confirmation, not coincidence, at the cost of one
+    extra poll's delay (~5-10s) on a genuine first-time retest.
 
     detected_price is the live Close read off the Data Window this same
     poll, NOT the zone's own opposite edge -- algo_v2_tv_xauusd's M3/M5
@@ -208,24 +318,194 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
     either source) rather than simply preferred, so upgrading the Pine
     script doesn't regress zones this module's own check already caught.
 
-    retested_at: wall-clock time this module first observed the retest
-    (from either source) -- not the true retest bar's own time, same
-    "first observed, not true origin" tradeoff start_time already makes
-    (see first_seen_store.py/retest_tracker.py's module docstring for why
-    a raw Pine bar_time can't be plotted here directly)."""
+    retested_at: EXACT real timestamp when formed_seconds_ago/
+    retested_seconds_ago are present in this poll's parsed zone (see
+    OBD_SecretTrader.pine's Data Window plot section) -- computed as
+    `now - seconds_ago`, using tv_scraper's own wall clock as "now" and
+    Pine's own timenow-derived elapsed-seconds value for the rest. This
+    works retroactively for zones that already existed before this
+    scraper (or even this script) ever started watching, unlike the
+    alert() webhook path, because Pine computes the elapsed time from its
+    own real history every time the script loads -- and unlike the earlier
+    bar-COUNT approach this replaced (bars_ago * timeframe_seconds using
+    tv_scraper's wall clock as the OTHER half of the subtraction too),
+    doesn't silently drift by however much the underlying price FEED
+    itself is delayed (e.g. a broker CFD feed running a few minutes behind
+    the real market) -- confirmed live: past detected/retested_at
+    timestamps disagreed with the chart's own marked positions by
+    multiple minutes on a delayed Pepperstone BTC feed, while live Close
+    (read directly, not reconstructed) lined up fine. Falls back to the
+    old wall-clock "first observed" approximation only if those plots
+    aren't present (e.g. an older, un-updated indicator build) -- see
+    first_seen_store.py/retest_tracker.py's own docstrings for that
+    approximation's tradeoffs."""
     price_field = "btm" if direction == "bull" else "top"
     now = int(time.time())
     seen_now: dict[int, int] = {}
+    new_missing_streak: dict[int, int] = {}
+    new_pending_retest: dict[int, int] = {}
 
     for zone in current:
         price_key = _price_key(zone)
-        start_time = first_seen.get_or_create(symbol, timeframe, direction, price_key)
+        formed_seconds_ago = zone.get("formed_seconds_ago")
+        retested_seconds_ago = zone.get("retested_seconds_ago")
+        # Pine guarantees retested comes on or after formation for a given
+        # zone -- mark_retests() only ever sets a retest's bar_index on or
+        # after that same zone's own formed_bar (see its own `bar_index >=
+        # ...` guard), so retested_seconds_ago can never exceed
+        # formed_seconds_ago. Confirmed live (BTCUSD/M15, right after
+        # switching timeframe/panes): the two numbers can still arrive
+        # inconsistent with each other for one poll -- most likely a
+        # leftover paint from the pane just switched away from, mixed with
+        # freshly-rendered rows from the new one. Trusting a mismatched
+        # pair produced a "retested before it formed" entry.
+        # Treating BOTH as untrustworthy for this poll (not just the
+        # retest one) when they contradict each other, and falling back to
+        # the wall-clock approximation this cycle, means a bad single-poll
+        # pairing gets retried next poll instead of permanently cached.
+        seconds_ago_consistent = (
+            formed_seconds_ago is None or retested_seconds_ago is None
+            or retested_seconds_ago <= formed_seconds_ago
+        )
+        if not seconds_ago_consistent:
+            formed_seconds_ago = None
+            retested_seconds_ago = None
+
+        # hint, not a direct assignment -- get_or_create() only USES this
+        # on the zone's actual first sighting and caches it from then on;
+        # every later poll recomputes a slightly different value here
+        # (seconds_ago keeps advancing every poll, `now` too, but not
+        # perfectly in lockstep down to the second), and feeding that
+        # drift straight into ZoneStore's start_time-keyed history
+        # fragmented one real zone into several near-duplicate entries
+        # seconds apart (confirmed live, BTCUSD/M5) before this hint/cache
+        # split existed. See that method's own docstring. No timeframe-
+        # seconds multiplication needed anymore -- Pine now reports real
+        # elapsed seconds directly (see this function's own retested_at
+        # docstring paragraph) -- just `now - seconds_ago`, rounded via
+        # _round_hint() for poll-to-poll stability (see that function's
+        # own docstring).
+        formed_hint = _round_hint(now - formed_seconds_ago) if formed_seconds_ago is not None else None
+
+        # NOT `start_time == now` -- FirstSeenStore.get_or_create() can
+        # deliberately hand out a start_time a few synthetic seconds ahead
+        # of the real "now" to dodge a same-second collision with another
+        # zone in this same batch (see that method's own comment), so a
+        # genuinely-first-seen zone processed later in this loop can have
+        # start_time > now and silently fail this equality check.
+        # Confirmed live (BTCUSD/M5): that let the retest-marking guard
+        # below unlock on a zone's actual first sighting, producing a
+        # retested_at that predates the zone's own start_time. Whether
+        # this price_key was present in LAST poll's seen set is a direct,
+        # timestamp-independent answer to "is this genuinely new."
+        is_first_sighting = price_key not in previously_seen
+
+        # Before minting a brand new start_time for a genuinely
+        # first-seen price_key, check whether this is actually the SAME
+        # zone reappearing after being wrongly declared mitigated -- see
+        # ZoneStore.get()'s own comment for the confirmed-live case this
+        # fixes (a zone pushed out of the visible top-4 by newer zones,
+        # NOT genuinely invalidated by LuxAlgo, gets missing_streak-ed
+        # into a false mitigation, then reappears once churn moves on).
+        # formed_hint is the real formation minute recomputed fresh from
+        # Pine's own FormedSecondsAgo THIS poll -- for the SAME real zone,
+        # that reconstructs the same minute (after _round_hint()'s
+        # stability rounding) no matter how many times or how long after
+        # it's re-derived, so an EXACT match against an existing ZoneStore
+        # entry -- even a currently-mitigated one -- is strong proof of
+        # identity, not coincidence.
+        resurrect_start_time = None
+        if is_first_sighting and formed_hint is not None:
+            existing = zones.get(symbol, timeframe, direction, formed_hint)
+            if existing is not None and existing.mitigated_time is not None:
+                resurrect_start_time = formed_hint
+
+        if resurrect_start_time is not None:
+            start_time = resurrect_start_time
+            first_seen.restore(symbol, timeframe, direction, price_key, start_time)
+        else:
+            start_time = first_seen.get_or_create(symbol, timeframe, direction, price_key,
+                                                  hint=formed_hint)
         seen_now[price_key] = start_time
-        is_first_sighting = (start_time == now)
-        retested_at = retested.check(symbol, timeframe, direction, price_key,
-                                     close_price, zone["btm"], zone["top"], is_first_sighting)
-        if retested_at is None and zone.get("retested"):
-            retested_at = retested.mark(symbol, timeframe, direction, price_key)
+
+        # A non-first-sighting zone's formed_hint should EXACTLY reproduce
+        # its own already-known, persisted start_time every single time --
+        # deterministic for the same real zone (Pine's own timenow-based
+        # elapsed-seconds calc, not a guess), after _round_hint()'s
+        # stability rounding -- so any mismatch means this poll's ROW data
+        # for this price_key is corrupted -- most likely the multi-second
+        # Data Window scroll (_collect_data_window_text takes several
+        # seconds per pane) caught this row mid-reshuffle, the same class
+        # of bug as the symbol-switch guard above but at the row level
+        # instead of the pane level. Confirmed live (BTCUSD/M1): a
+        # retested_seconds_ago read this way got permanently cached via
+        # mark() below -- tagged "pine", so reconcile() can never correct
+        # it -- for a zone whose live Retested flag otherwise read False on
+        # every surrounding poll. Distrusting BOTH seconds_ago values here
+        # (not just retested_seconds_ago) matches the existing
+        # formed<=retested self-consistency guard above, just checked
+        # against real persisted history instead of only this poll's own
+        # internal consistency -- a bad single-poll row read gets retried
+        # next poll instead of permanently cached.
+        if not is_first_sighting and formed_hint is not None and formed_hint != start_time:
+            formed_seconds_ago = None
+            retested_seconds_ago = None
+
+        # Let Pine's own Retested plot (when present this poll, regardless
+        # of whether RetestedSecondsAgo specifically came through) correct
+        # a previously-recorded false positive from this module's own
+        # live-Close approximation -- see RetestTracker.reconcile()'s own
+        # docstring for the confirmed-live case this fixes. Deliberately
+        # BEFORE the mark()/check() calls below, so this poll's read
+        # already reflects the corrected state instead of the stale one.
+        pine_retested_flag = zone.get("retested")
+        if pine_retested_flag is not None:
+            retested.reconcile(symbol, timeframe, direction, price_key, pine_retested_flag)
+
+        # Same hint/cache split as start_time above, and for the same
+        # reason: RetestedSecondsAgo is recomputed fresh every poll, so
+        # only the value from the FIRST poll that reports a retest should
+        # ever be kept. (Already nulled out above if it failed the
+        # formed<=retested consistency check for this poll.)
+        #
+        # A hint that hasn't been recorded yet ALSO needs to match what
+        # last poll computed before it's trusted -- see this function's
+        # own pending_retest docstring for the confirmed-live corruption
+        # (a row-level scroll/reshuffle glitch affecting ONLY
+        # RetestedSecondsAgo, independent of FormedSecondsAgo) that the
+        # formed_hint-vs-start_time guard above doesn't catch. A single
+        # unconfirmed poll falls through to the weaker Close-based check()
+        # instead -- still recoverable via reconcile() later if it's wrong
+        # too, unlike an immediate mark() (tagged "pine", never
+        # auto-corrected).
+        if retested_seconds_ago is not None:
+            retest_hint = _round_hint(now - retested_seconds_ago)
+            already_recorded = retested.peek(symbol, timeframe, direction, price_key)
+            if already_recorded is not None or pending_retest.get(price_key) == retest_hint:
+                retested_at = retested.mark(symbol, timeframe, direction, price_key, hint=retest_hint)
+            else:
+                new_pending_retest[price_key] = retest_hint
+                retested_at = retested.check(symbol, timeframe, direction, price_key,
+                                             close_price, zone["btm"], zone["top"], is_first_sighting)
+        else:
+            retested_at = retested.check(symbol, timeframe, direction, price_key,
+                                         close_price, zone["btm"], zone["top"], is_first_sighting)
+            # Same first-sighting guard as the Close-based check() above --
+            # Pine's own "Retested" Data Window plot is keyed by ARRAY SLOT
+            # INDEX (Bull1-4/Bear1-4), not a stable zone identity (see
+            # OBD_SecretTrader.pine's plot section). When LuxAlgo's array
+            # shifts -- an old zone removed, a new one taking over that same
+            # slot number -- the new zone can inherit the old one's
+            # Retested=1 flag for one poll before price has ever touched it.
+            # Confirmed live: a zone with start_time == retested_at to the
+            # exact second (retested at the literal instant it was first
+            # observed). Skipping this on the first-sighting poll costs at
+            # most one poll's delay before a GENUINE same-bar retest is
+            # caught (mark_retests() keeps setting the flag every tick until
+            # this module next polls), which is a fine trade for not
+            # fabricating retests out of slot reuse.
+            if retested_at is None and pine_retested_flag and not is_first_sighting:
+                retested_at = retested.mark(symbol, timeframe, direction, price_key)
 
         zones.apply_formed(symbol, timeframe, direction, {
             "start_time": start_time,
@@ -239,6 +519,16 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
         })
 
     for price_key in previously_seen.keys() - seen_now.keys():
+        streak = missing_streak.get(price_key, 0) + 1
+        if streak < _MITIGATION_DEBOUNCE_POLLS:
+            # Not yet confirmed gone -- carry it forward as still "seen" so
+            # a transient miss doesn't lose the zone's identity/start_time,
+            # but track the streak so a genuine mitigation isn't delayed
+            # past the next poll that also misses it.
+            seen_now[price_key] = previously_seen[price_key]
+            new_missing_streak[price_key] = streak
+            continue
+
         zones.apply_mitigated(symbol, timeframe, direction, {
             "start_time": previously_seen[price_key],
             "mitigated_time": now,
@@ -247,7 +537,7 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
         first_seen.forget(symbol, timeframe, direction, price_key)
         retested.forget(symbol, timeframe, direction, price_key)
 
-    return seen_now
+    return seen_now, new_missing_streak, new_pending_retest
 
 
 # Keyed by (symbol, timeframe, direction) rather than just pane label --
@@ -257,11 +547,22 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
 # zones into another's "previously seen" set. Value is {price_key:
 # start_time} -- see _apply_direction's docstring for why both are needed.
 _last_seen: dict[tuple[str, str, str], dict[int, int]] = {}
+# Same keying, tracking consecutive missed-poll counts per price_key for
+# the mitigation debounce -- see _apply_direction's docstring.
+_missing_streak: dict[tuple[str, str, str], dict[int, int]] = {}
+# Same keying, tracking the pending (unconfirmed) retest_hint per
+# price_key for the 2-poll retest-confirmation gate -- see
+# _apply_direction's own pending_retest docstring.
+_pending_retest: dict[tuple[str, str, str], dict[int, int]] = {}
+# Keyed by pane_label -- the last (symbol, timeframe) this pane
+# successfully processed. See run_once_pane's own comment on the
+# symbol-switch guard this enables.
+_last_symbol_tf: dict[str, tuple[str, str]] = {}
 
 
 def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: FirstSeenStore,
-                   retested: RetestTracker, trend_tracker: AtrTrendTracker, pane_label: str,
-                   x_fraction: float, y_fraction: float, configured_symbol: str,
+                   retested: RetestTracker, trend_tracker: AtrTrendTracker, live: LiveSnapshotStore,
+                   pane_label: str, x_fraction: float, y_fraction: float, configured_symbol: str,
                    configured_timeframe: str) -> None:
     _focus_pane(page, x_fraction, y_fraction)
     # The Data Window sidebar doesn't repaint for the newly-focused pane
@@ -301,6 +602,27 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
     symbol = parsed.symbol
     timeframe = parsed.timeframe or configured_timeframe
 
+    # A pane's symbol/timeframe changing since last poll means someone
+    # just manually switched it on the actual chart -- skip processing
+    # THIS one poll rather than risk a transition-window read. Confirmed
+    # live (BTCUSD/M3 + M1 dual-pane): right after switching a pane's
+    # symbol on TradingView, one poll landed with the Data Window HEADER
+    # already showing the new symbol but the PLOTTED zone prices still
+    # reflecting the old symbol (Pine's plots hadn't recomputed yet),
+    # writing XAUUSD-scale prices (~4370) under a "BTCUSD" key. The
+    # existing missing-streak debounce eventually cleans up the resulting
+    # bogus entries (they vanish next poll and get marked mitigated), but
+    # by then they're already sitting in the permanent history. Skipping
+    # the one transition poll avoids writing it at all -- costs one
+    # poll's delay (~5s) on a deliberate, infrequent user action.
+    last_symbol_tf = _last_symbol_tf.get(pane_label)
+    _last_symbol_tf[pane_label] = (symbol, timeframe)
+    if last_symbol_tf is not None and last_symbol_tf != (symbol, timeframe):
+        print(f"[tv_scraper][{pane_label}] symbol/timeframe changed "
+              f"({last_symbol_tf[0]}/{last_symbol_tf[1]} -> {symbol}/{timeframe}) "
+              f"-- skipping this poll to let the chart settle")
+        return
+
     atr_data = None
     if parsed.atr is not None:
         atr_data = dict(parsed.atr)
@@ -319,20 +641,119 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
 
     for direction, direction_zones in (("bull", parsed.bull_zones), ("bear", parsed.bear_zones)):
         cache_key = (symbol, timeframe, direction)
-        _last_seen[cache_key] = _apply_direction(
+        seen, streak, pending = _apply_direction(
             zones, first_seen, retested, symbol, timeframe, direction, direction_zones,
-            _last_seen.get(cache_key, {}), parsed.close)
+            _last_seen.get(cache_key, {}), _missing_streak.get(cache_key, {}),
+            _pending_retest.get(cache_key, {}), parsed.close)
+        _last_seen[cache_key] = seen
+        _pending_retest[cache_key] = pending
+        _missing_streak[cache_key] = streak
+
+    # Raw mirror -- exactly this poll's parsed Bull1-4/Bear1-4 (top/btm/
+    # retested) and Close/ATR, no history, no interpretation. See
+    # live_snapshot_store.py's own docstring for why this exists
+    # separately from the zones/atr stores above.
+    live.apply(symbol, timeframe, parsed.close, atr_data, parsed.bull_zones, parsed.bear_zones, now)
 
     print(f"[tv_scraper][{pane_label}] symbol={symbol} tf={timeframe} atr={atr_data} "
           f"close={parsed.close} bull={len(parsed.bull_zones)} bear={len(parsed.bear_zones)}")
 
 
 def run_once(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: FirstSeenStore,
-             retested: RetestTracker, trend_tracker: AtrTrendTracker, symbol: str, timeframe: str,
-             panes: list[tuple[str, float, float]]) -> None:
+             retested: RetestTracker, trend_tracker: AtrTrendTracker, live: LiveSnapshotStore,
+             symbol: str, timeframe: str, panes: list[tuple[str, float, float]]) -> None:
     for pane_label, x_fraction, y_fraction in panes:
-        run_once_pane(page, zones, atr, first_seen, retested, trend_tracker, pane_label,
+        run_once_pane(page, zones, atr, first_seen, retested, trend_tracker, live, pane_label,
                       x_fraction, y_fraction, symbol, timeframe)
+
+
+# Anti-throttling flags shared by both the CDP-launch path (below) and the
+# old launch_persistent_context call this replaced -- Windows-native
+# window-occlusion detection (CalculateNativeWinOcclusion) throttles the
+# whole renderer process when the window is minimized/covered, confirmed
+# live to freeze data updates solid even with the page-JS visibility
+# override (see main()) also in place. Chromium only honors the LAST
+# --disable-features on the command line, so this repeats Playwright's own
+# default list (as observed in its launch command) instead of silently
+# wiping it out.
+_ANTI_THROTTLE_FLAG = (
+    "--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,"
+    "BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,"
+    "DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,"
+    "MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,"
+    "BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,"
+    "OptimizationHints,msForceBrowserSignIn,"
+    "msEdgeUpdateLaunchServicesPreferredVersion,CalculateNativeWinOcclusion"
+)
+
+_DEFAULT_BRAVE_PATH = r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
+
+
+def _cdp_endpoint(port: int) -> str:
+    return f"http://127.0.0.1:{port}"
+
+
+def _cdp_port_open(port: int) -> bool:
+    """True if something's already listening on the CDP port and answering
+    like a real DevTools endpoint -- checked BEFORE trying
+    playwright.connect_over_cdp() so a launch-and-wait only happens when
+    genuinely nothing is there yet, not on every single restart."""
+    try:
+        with urllib.request.urlopen(f"{_cdp_endpoint(port)}/json/version", timeout=2):
+            return True
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def _launch_browser_for_cdp(cfg: Config) -> None:
+    """Starts Brave as a plain OS subprocess (not through Playwright) with
+    remote debugging enabled, then returns immediately -- main() polls
+    _cdp_port_open() afterward and connects once it's actually up. A plain
+    subprocess, not launch_persistent_context, specifically so this
+    process doesn't hold an exclusive Playwright-side handle on the
+    browser: once launched this way, ANY later tv_scraper run (or the user
+    manually, or another tool) can attach to the SAME instance over CDP
+    instead of fighting over the profile lock -- see config.py's own
+    comment on cdp_port for the "profile already in use" crashes this
+    replaces."""
+    executable = cfg.browser_executable_path or _DEFAULT_BRAVE_PATH
+    profile_dir = Path(cfg.profile_dir).resolve()
+    args = [
+        executable,
+        f"--remote-debugging-port={cfg.cdp_port}",
+        f"--user-data-dir={profile_dir}",
+        f"--window-position={cfg.window_x},{cfg.window_y}",
+        f"--window-size={cfg.window_width},{cfg.window_height}",
+        _ANTI_THROTTLE_FLAG,
+        "about:blank",
+    ]
+    subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                      stdin=subprocess.DEVNULL, close_fds=True)
+
+
+def _connect_browser(p, cfg: Config) -> Browser:
+    """Attaches over CDP to an already-running Brave if one's listening on
+    cfg.cdp_port; otherwise launches one (see _launch_browser_for_cdp) and
+    waits for it to come up. Either way, the result is a SHARED browser --
+    unlike the old launch_persistent_context call this replaced, nothing
+    here exclusively locks the profile, so the same window can be looked
+    at / interacted with directly, and restarting this script for a code
+    change no longer requires closing and reopening the browser."""
+    if not _cdp_port_open(cfg.cdp_port):
+        print(f"[tv_scraper] no browser on CDP port {cfg.cdp_port} -- launching one")
+        _launch_browser_for_cdp(cfg)
+        for _ in range(30):
+            if _cdp_port_open(cfg.cdp_port):
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError(
+                f"Browser didn't come up on CDP port {cfg.cdp_port} after 30s -- "
+                f"check TV_SCRAPER_BROWSER_PATH points at a real Brave/Chrome install."
+            )
+    else:
+        print(f"[tv_scraper] attaching to existing browser on CDP port {cfg.cdp_port}")
+    return p.chromium.connect_over_cdp(_cdp_endpoint(cfg.cdp_port))
 
 
 def main() -> None:
@@ -342,38 +763,15 @@ def main() -> None:
     first_seen = FirstSeenStore(cfg.first_seen_state_file)
     retested = RetestTracker(cfg.retest_state_file)
     trend_tracker = AtrTrendTracker(cfg.trend_state_file)
-    profile_dir = Path(cfg.profile_dir).resolve()
+    live = LiveSnapshotStore(cfg.live_snapshot_file)
 
     with sync_playwright() as p:
-        launch_kwargs = {}
-        if cfg.browser_executable_path:
-            launch_kwargs["executable_path"] = cfg.browser_executable_path
-
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=str(profile_dir),
-            headless=False,
-            no_viewport=True,  # let the window (below) dictate content size --
-            args=[
-                "--start-maximized",  # a fixed viewport would fight this
-                # Confirmed live: minimizing the window froze data updates
-                # even with the page-JS visibility override below in place.
-                # Windows-native window-occlusion detection throttles the
-                # whole renderer process below the JS layer when a window is
-                # minimized/covered -- CalculateNativeWinOcclusion is the
-                # actual Chromium flag controlling that. Chromium only
-                # honors the LAST --disable-features on the command line, so
-                # this repeats Playwright's own default list (as observed in
-                # its launch command) instead of silently wiping it out.
-                "--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,"
-                "BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,"
-                "DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,"
-                "MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,"
-                "BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,"
-                "OptimizationHints,msForceBrowserSignIn,"
-                "msEdgeUpdateLaunchServicesPreferredVersion,CalculateNativeWinOcclusion",
-            ],
-            **launch_kwargs,
-        )
+        browser = _connect_browser(p, cfg)
+        # A CDP-attached browser launched with --user-data-dir already has
+        # one default context (there's no separate "create the context"
+        # step the way launch_persistent_context did it) -- attach to
+        # that, or create one in the unlikely event none exists yet.
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
 
         # TradingView's own JS throttles/pauses live updates when it thinks
         # the page is backgrounded (Page Visibility API), independent of any
@@ -390,19 +788,24 @@ def main() -> None:
             }
         """)
 
-        # This real profile's restored browsing session can open several
-        # tabs (confirmed live: garbage zone data from what looks like BTC
-        # and other unrelated symbols got mixed into our XAUUSD output,
-        # because whichever tab happened to be active got scraped). Always
-        # work from one dedicated fresh tab, and close every other one so
-        # there's never ambiguity about which page is being read.
-        page = context.new_page()
-        for other in list(context.pages):
-            if other is not page:
-                try:
-                    other.close()
-                except Exception:
-                    pass
+        # Reuse an already-open tab for this exact chart instead of always
+        # spawning a new one -- confirmed live: repeated tv_scraper
+        # restarts (many times over, this session alone) each left behind
+        # an orphaned tab whenever the process was force-killed rather
+        # than shut down cleanly (a force-kill skips the `finally:
+        # page.close()` below entirely, since Python cleanup code never
+        # runs on SIGKILL), piling up duplicate tabs of the same chart.
+        # Checking first means a restart reattaches to its own leftover
+        # tab instead of adding another. Prefix match (not exact
+        # equality) because TradingView can append query params/hashes
+        # after navigation that a fresh cfg.chart_url string won't have.
+        # Other tabs may legitimately belong to the user or another tool
+        # -- this only ever touches one matching THIS chart's URL, never
+        # closes anything outside of it.
+        chart_prefix = cfg.chart_url.rstrip("/")
+        page = next((pg for pg in context.pages if pg.url.rstrip("/").startswith(chart_prefix)), None)
+        if page is None:
+            page = context.new_page()
 
         # Go straight to the chart -- if this profile is already logged in
         # (the common case, reusing your real browser profile), this is the
@@ -428,7 +831,7 @@ def main() -> None:
         try:
             while True:
                 try:
-                    run_once(page, zones, atr, first_seen, retested, trend_tracker,
+                    run_once(page, zones, atr, first_seen, retested, trend_tracker, live,
                              cfg.symbol, cfg.timeframe, panes)
                 except Exception as exc:
                     print(f"[tv_scraper] ERROR: {exc}")
@@ -436,7 +839,12 @@ def main() -> None:
         except KeyboardInterrupt:
             pass
         finally:
-            context.close()
+            # Close only OUR tab, never the shared browser/context -- see
+            # the "work from our own dedicated new tab" comment above.
+            try:
+                page.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

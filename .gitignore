@@ -52,3 +52,8 @@ fx_bot_state.json
 tvx_bot_state.json
 tvx_bot_blocks.json
 tvx_bot_sl_state.json
+tvx_event_log.jsonl
+tv_scraper_live.json
+tvx_active_events.json
+smc_v2_bot_direction_blocks.json
+smc_v2_bot_zone_cooldown.json
