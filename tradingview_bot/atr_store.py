@@ -67,3 +67,18 @@ class AtrStore:
 
     def get(self, symbol: str, timeframe: str) -> Optional[TVAtrState]:
         return self._state.get(self._key(symbol, timeframe))
+
+    def reload(self) -> None:
+        """Re-reads the backing file, discarding whatever was in memory.
+        For read-only consumers of a file THIS process doesn't write to
+        (see algo_v2_tv_xauusd/reader.py) -- without this, a long-running
+        reader that only ever calls __init__ once stays frozen at whatever
+        the file contained at that exact moment forever, never seeing any
+        later write from the actual writer process. Confirmed live: this
+        made a continuously-running bot silently stop picking up new
+        zones/ATR flips entirely after its first poll, with no error --
+        each poll's `.get()`/`.zones()` just kept returning the same
+        startup-time snapshot. Writers (tv_scraper, tradingview_bot.main)
+        don't need this -- they own the file's mutations via apply(), so
+        their own in-memory state is already authoritative."""
+        self._load()

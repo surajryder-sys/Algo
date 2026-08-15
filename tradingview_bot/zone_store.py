@@ -67,12 +67,11 @@ class ZoneStore:
         # virgin here means "not yet RETESTED" -- matching the MT5 indicator's
         # own definition (OB_ATR_Bridge_Indicator_v1.00.mq5's virgin = !visited,
         # where visited comes from a dedicated retest check), not "not yet
-        # mitigated"/removed-from-chart. Callers that can determine retest
-        # status (tv_scraper, via live Close vs the zone's range -- see
-        # retest_tracker.py) pass it explicitly; callers that can't (the
-        # alert path has no way to observe a live retest, only formation/
-        # full-mitigation events) get the correct default for a zone that
-        # was JUST formed: not yet retested.
+        # mitigated"/removed-from-chart. Correct default for a zone that was
+        # JUST formed: not yet retested. The alert path updates this later via
+        # apply_retested() once OBD_SecretTrader.pine's own ob_zone_retested
+        # webhook fires (carrying the exact retest bar time); tv_scraper sets
+        # it directly here instead, from its own live-Close approximation.
         retested_at = data.get("retested_at")
         zones[start_time] = TVZone(
             start_time=start_time,
@@ -97,7 +96,44 @@ class ZoneStore:
         zone.mitigated_price = float(price) if price is not None else None
         self._save()
 
+    def apply_retested(self, symbol: str, timeframe: str, direction: str, data: dict) -> None:
+        """From OBD_SecretTrader.pine's ob_zone_retested alert -- the EXACT
+        bar time the retest happened, Pine's own knowledge, not tv_scraper's
+        "whenever it happened to next poll" approximation. Never overwrites
+        an earlier retested_at (e.g. tv_scraper's own approximation getting
+        there first) with a later one -- whichever source noticed first
+        stays authoritative for "when," even if this one is more precise."""
+        key = self._key(symbol, timeframe, direction)
+        zone = self._zones.get(key, {}).get(int(data["start_time"]))
+        if zone is None:
+            return  # retest for a zone we never saw formed -- ignore
+        retested_time = int(data["retested_time"])
+        zone.virgin = False
+        if zone.retested_at is None or retested_time < zone.retested_at:
+            zone.retested_at = retested_time
+        self._save()
+
+    def get(self, symbol: str, timeframe: str, direction: str, start_time: int) -> Optional[TVZone]:
+        """Direct lookup by exact start_time -- used by scraper.py's zone-
+        resurrection check (see _apply_direction's own comment) to find a
+        previously-mitigated entry whose real formation time (recomputed
+        fresh from Pine's own FormedBarsAgo this poll) exactly matches a
+        zone that reappeared after being pushed out of the visible top-4
+        window and wrongly declared mitigated -- confirmed live (BTCUSD/M1):
+        a zone continuously tracked by LuxAlgo since 12:49 had TWO ghost
+        duplicate entries created this way, one of them showing as
+        mitigated for a zone that was, at that exact moment, still fully
+        live and unretested on the actual chart."""
+        key = self._key(symbol, timeframe, direction)
+        return self._zones.get(key, {}).get(start_time)
+
     def zones(self, symbol: str, timeframe: str, direction: str) -> list[TVZone]:
         """Newest first, matching ob_bridge.OBSnapshot's bull/bear ordering."""
         key = self._key(symbol, timeframe, direction)
         return sorted(self._zones.get(key, {}).values(), key=lambda z: -z.start_time)
+
+    def reload(self) -> None:
+        """Re-reads the backing file -- see AtrStore.reload()'s docstring
+        for the full rationale (same bug, same fix, same class of store)."""
+        self._zones = {}
+        self._load()

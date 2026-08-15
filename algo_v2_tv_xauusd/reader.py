@@ -75,6 +75,12 @@ class Zone:
     # which only ever check `.virgin`), but exposed for anything that
     # wants "how long has this been retested" specifically.
     retested_at: Optional[int]
+    # When this zone was fully mitigated (LuxAlgo's own array-removal),
+    # distinct from retested_at -- a zone can be retested well before it's
+    # ever fully mitigated. None while still active/visible on the chart.
+    # Used by event_tracker.py to tell a retest-only transition apart from
+    # a full mitigation.
+    mitigated_time: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -100,6 +106,7 @@ def _to_zone(z: TVZone) -> Zone:
         detected_time=z.detected_time,
         detected_price=z.detected_price,
         retested_at=z.retested_at,
+        mitigated_time=z.mitigated_time,
     )
 
 
@@ -158,6 +165,16 @@ def _freshest_atr(a: Optional[TVAtrState], b: Optional[TVAtrState]) -> Optional[
 
 
 def read_zone(symbol: str, tf_minutes: int) -> Optional[OBSnapshot]:
+    # Reload both stores first -- each was constructed once in configure()
+    # and otherwise never picks up anything tv_scraper/tradingview_bot.main
+    # (the actual writers) save after that (see ZoneStore.reload()'s own
+    # docstring for the bug this fixes: a long-running reader silently
+    # froze at whatever the files contained at startup, forever).
+    if _alert_zones is not None:
+        _alert_zones.reload()
+    if _scraper_zones is not None:
+        _scraper_zones.reload()
+
     tf = str(tf_minutes)
     bull = [_to_zone(z) for z in _merged_zones(symbol, tf, "bull")]
     bear = [_to_zone(z) for z in _merged_zones(symbol, tf, "bear")]
@@ -167,6 +184,11 @@ def read_zone(symbol: str, tf_minutes: int) -> Optional[OBSnapshot]:
 
 
 def read_atr(symbol: str, tf_minutes: int) -> Optional[ATRSnapshot]:
+    if _alert_atr is not None:
+        _alert_atr.reload()
+    if _scraper_atr is not None:
+        _scraper_atr.reload()
+
     tf = str(tf_minutes)
     a = _alert_atr.get(symbol, tf) if _alert_atr else None
     b = _scraper_atr.get(symbol, tf) if _scraper_atr else None

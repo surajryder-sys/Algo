@@ -20,6 +20,7 @@ the alert() calls added) for the exact shape. Every payload carries "secret",
                          detected_time, detected_price
   ob_zone_mitigated  -- timeframe, direction, start_time, mitigated_time,
                          mitigated_price
+  ob_zone_retested   -- timeframe, direction, start_time, retested_time
 """
 from __future__ import annotations
 
@@ -38,6 +39,7 @@ _EVENT_SCHEMAS = {
                         "detected_time", "detected_price"),
     "ob_zone_mitigated": ("timeframe", "direction", "start_time",
                            "mitigated_time", "mitigated_price"),
+    "ob_zone_retested": ("timeframe", "direction", "start_time", "retested_time"),
 }
 _write_lock = threading.Lock()
 

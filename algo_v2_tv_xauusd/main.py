@@ -45,6 +45,15 @@ from algo_v2_tv_xauusd.sl_manager import SLManager
 from algo_v2_tv_xauusd.state_store import TradedZoneStore
 from algo_v2_tv_xauusd.zone import ZoneState, compute_zone, is_eligible
 
+# Event-log/bias-history coverage only (see event_watcher.py) -- the
+# ACTUAL strategy in run_once() below is unchanged, still just M1/M3/M5
+# entries + M15 SL edges + M5 ATR bias, exactly as algo_v2's does. Values
+# are read_zone/read_atr's tf_minutes-as-string form; H1/H2/H4 are "60"/
+# "120"/"240" (Pine's timeframe.period convention -- see
+# tv_scraper/parser.py's _normalize_timeframe for why the scraper path
+# has to be converted to match rather than left as "1h"/"2h"/"4h").
+TRACKED_TIMEFRAMES = ("1", "3", "5", "15", "30", "60", "120", "240")
+
 
 @dataclass
 class RuntimeState:

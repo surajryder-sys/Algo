@@ -37,6 +37,11 @@ class Config:
     blocked_state_file: str
     sl_state_file: str
     atr_timeframe_minutes: int
+    event_log_file: str
+    # Currently-live zones only (added on ob_formed, removed on
+    # ob_mitigated) -- distinct from event_log_file's append-only history.
+    # See active_events.py's own docstring.
+    active_events_file: str
 
     # Two independent, read-only data sources this bot merges (see
     # reader.py) -- tv_bridge/tradingview_bot's alert-fed files, and
@@ -69,6 +74,8 @@ def load_config() -> Config:
         blocked_state_file=os.getenv("TVX_BLOCKED_STATE_FILE", "tvx_bot_blocks.json"),
         sl_state_file=os.getenv("TVX_SL_STATE_FILE", "tvx_bot_sl_state.json"),
         atr_timeframe_minutes=int(os.getenv("TVX_ATR_TIMEFRAME_MINUTES", "5")),
+        event_log_file=os.getenv("TVX_EVENT_LOG_FILE", "tvx_event_log.jsonl"),
+        active_events_file=os.getenv("TVX_ACTIVE_EVENTS_FILE", "tvx_active_events.json"),
         tv_zone_state_file=os.getenv("TV_ZONE_STATE_FILE", "tradingview_bot_zones.json"),
         tv_atr_state_file=os.getenv("TV_ATR_STATE_FILE", "tradingview_bot_atr.json"),
         tv_scraper_zone_state_file=os.getenv("TV_SCRAPER_ZONE_STATE_FILE", "tv_scraper_zones.json"),
