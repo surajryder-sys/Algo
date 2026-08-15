@@ -17,8 +17,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from algo_v2_tv_xauusd.entries import select_sl
-from algo_v2_tv_xauusd.reader import ATRSnapshot, OBSnapshot
+from v3.algo_v2_tv_xauusd.entries import select_sl
+from v3.algo_v2_tv_xauusd.reader import ATRSnapshot, OBSnapshot
 
 # Floating-point tolerance for the "did the SL actually improve" check below.
 # Same value/reasoning as algo_v2/management.py (confirmed live on the

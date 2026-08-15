@@ -39,8 +39,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from tradingview_bot.atr_store import AtrStore, TVAtrState
-from tradingview_bot.zone_store import TVZone, ZoneStore
+from v3.tradingview_bot.atr_store import AtrStore, TVAtrState
+from v3.tradingview_bot.zone_store import TVZone, ZoneStore
 
 _alert_zones: Optional[ZoneStore] = None
 _alert_atr: Optional[AtrStore] = None

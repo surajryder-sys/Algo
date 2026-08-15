@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import time
 
-from algo_v2_tv_xauusd import reader
-from algo_v2_tv_xauusd.active_events import ActiveEventStore
-from algo_v2_tv_xauusd.config import Config, load_config
-from algo_v2_tv_xauusd.event_log import EventLog
-from algo_v2_tv_xauusd.event_tracker import EventTracker
-from algo_v2_tv_xauusd.main import TRACKED_TIMEFRAMES
+from v3.algo_v2_tv_xauusd import reader
+from v3.algo_v2_tv_xauusd.active_events import ActiveEventStore
+from v3.algo_v2_tv_xauusd.config import Config, load_config
+from v3.algo_v2_tv_xauusd.event_log import EventLog
+from v3.algo_v2_tv_xauusd.event_tracker import EventTracker
+from v3.algo_v2_tv_xauusd.main import TRACKED_TIMEFRAMES
 
 
 def run_once(cfg: Config, events: EventTracker) -> None:

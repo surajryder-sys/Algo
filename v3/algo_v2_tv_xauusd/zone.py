@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from algo_v2_tv_xauusd.reader import ATRSnapshot, OBSnapshot
+from v3.algo_v2_tv_xauusd.reader import ATRSnapshot, OBSnapshot
 
 
 class ZoneState(Enum):

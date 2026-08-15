@@ -24,10 +24,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from algo_v2_tv_xauusd.active_events import ActiveEventStore
-from algo_v2_tv_xauusd.event_log import EventLog
-from algo_v2_tv_xauusd.reader import ATRSnapshot, OBSnapshot, Zone
-from algo_v2_tv_xauusd.zone import ZoneState, compute_zone
+from v3.algo_v2_tv_xauusd.active_events import ActiveEventStore
+from v3.algo_v2_tv_xauusd.event_log import EventLog
+from v3.algo_v2_tv_xauusd.reader import ATRSnapshot, OBSnapshot, Zone
+from v3.algo_v2_tv_xauusd.zone import ZoneState, compute_zone
 
 
 @dataclass

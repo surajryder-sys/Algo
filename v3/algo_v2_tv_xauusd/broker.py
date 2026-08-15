@@ -10,7 +10,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from algo_v2_tv_xauusd.config import Config
+from v3.algo_v2_tv_xauusd.config import Config
 
 
 def connect(cfg: Config) -> None:

@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import time
 
-from tradingview_bot.atr_store import AtrStore
-from tradingview_bot.config import Config, load_config
-from tradingview_bot.state_store import SignalStore
-from tradingview_bot.zone_store import ZoneStore
-from tv_bridge.reader import read_new
+from v3.tradingview_bot.atr_store import AtrStore
+from v3.tradingview_bot.config import Config, load_config
+from v3.tradingview_bot.state_store import SignalStore
+from v3.tradingview_bot.zone_store import ZoneStore
+from v3.tv_bridge.reader import read_new
 
 
 def run_once(cfg: Config, cursor_store: SignalStore, zones: ZoneStore, atr: AtrStore) -> None:

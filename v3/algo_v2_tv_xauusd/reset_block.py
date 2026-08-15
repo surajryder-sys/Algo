@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import sys
 
-from algo_v2_tv_xauusd.blocking import BlockedZoneStore
-from algo_v2_tv_xauusd.config import load_config
+from v3.algo_v2_tv_xauusd.blocking import BlockedZoneStore
+from v3.algo_v2_tv_xauusd.config import load_config
 
 VALID = ("M1", "M3", "M5", "all")
 
