@@ -18,9 +18,10 @@ scraper._zone_key(zone)'s existing rounded-top-price identity, used here
 purely as a lookup key, not written anywhere downstream itself.
 
 get_or_create() accepts an optional `hint` -- a real timestamp
-reconstructed by scraper.py from Pine's FormedBarsAgo Data Window plot
-(bars_ago * timeframe_seconds, see OBD_SecretTrader.pine's own comment on
-why that's a bar count, not a raw timestamp). When given, and this is
+reconstructed by scraper.py from Pine's FormedSecondsAgo Data Window plot
+(plain `now - seconds_ago`, Pine computing the elapsed seconds itself from
+its own timenow -- see OBD_SecretTrader.pine's own comment on why that's
+real seconds, not a raw timestamp). When given, and this is
 genuinely the first sighting of this price_key, `hint` is stored as the
 zone's first-seen time INSTEAD OF `now` -- letting a zone that already
 existed before this scraper started watching (or before this exact

@@ -63,12 +63,17 @@ _ZONE_LABELS = {
         # tv_scraper's own live-Close approximation in _apply_direction --
         # see that indicator's mark_retests()/"Retested" Data Window plots.
         ("Retested", "retested"),
-        # Bar counts, not raw timestamps -- see OBD_SecretTrader.pine's own
-        # comment on why (a raw start_time value once broke this chart's
-        # price-scale autoscale). scraper.py turns these into real
-        # timestamps via bars_ago * timeframe_seconds.
-        ("FormedBarsAgo", "formed_bars_ago"),
-        ("RetestedBarsAgo", "retested_bars_ago"),
+        # Elapsed real SECONDS, not raw timestamps -- see OBD_SecretTrader.
+        # pine's own comment on why (a raw start_time value once broke this
+        # chart's price-scale autoscale), computed by Pine itself from its
+        # own timenow against the formation/retest bar's real time[] --
+        # replaces the earlier bar-COUNT fields (FormedBarsAgo/
+        # RetestedBarsAgo, scraper.py converting bars*timeframe_seconds
+        # using ITS OWN wall clock), which was silently wrong by however
+        # much the underlying price feed itself is delayed. See that Pine
+        # function's own comment.
+        ("FormedSecondsAgo", "formed_seconds_ago"),
+        ("RetestedSecondsAgo", "retested_seconds_ago"),
     )
     # no Start -- see ob_detector_webhook.pine.
 }
@@ -147,14 +152,14 @@ def parse_data_window(text: str) -> ParsedState:
                 # rather than silently treating "missing" as "not retested".
                 if "retested" in f:
                     zone["retested"] = f["retested"] > 0.5
-                # int(), not left as float -- these are bar counts (small
-                # whole numbers), and scraper.py's arithmetic/dict-key use
-                # assumes int. na (unmatched by _NUMBER_RE) already comes
-                # through as simply absent from f, same as any other field.
-                if "formed_bars_ago" in f:
-                    zone["formed_bars_ago"] = int(f["formed_bars_ago"])
-                if "retested_bars_ago" in f:
-                    zone["retested_bars_ago"] = int(f["retested_bars_ago"])
+                # int(), not left as float -- Data Window numbers always
+                # parse as float, but these are whole seconds. na (unmatched
+                # by _NUMBER_RE) already comes through as simply absent from
+                # f, same as any other field.
+                if "formed_seconds_ago" in f:
+                    zone["formed_seconds_ago"] = int(f["formed_seconds_ago"])
+                if "retested_seconds_ago" in f:
+                    zone["retested_seconds_ago"] = int(f["retested_seconds_ago"])
                 out.append(zone)
         return out
 

@@ -126,19 +126,32 @@ class RetestTracker:
         return None
 
     def mark(self, symbol: str, timeframe: str, direction: str, price_key: int,
-             hint: int | None = None) -> int:
-        """Unconditionally records this zone as retested (used when Pine's
-        own wick-based check reports true) and returns the retested_at
-        timestamp -- the existing one if already recorded (never
-        downgraded/overwritten), otherwise `hint` if given, else `now`.
+             hint: int | None = None, force: bool = False) -> int:
+        """Records this zone as retested (used when Pine's own wick-based
+        check reports true) and returns the retested_at timestamp -- the
+        existing one if already recorded and NOT overridden by `force`,
+        otherwise `hint` if given, else `now`.
 
         `hint` is a real timestamp reconstructed by scraper.py from Pine's
-        RetestedBarsAgo Data Window plot -- lets a retest that happened
+        RetestedSecondsAgo Data Window plot -- lets a retest that happened
         before this scraper's own polling caught it (e.g. right after a
         restart, or during the 2-poll confirmation gate's own delay) get
         its true bar time instead of "whenever this module first noticed
-        it." See OBD_SecretTrader.pine's own comment on why this is a bar
-        count, not a raw timestamp.
+        it."
+
+        force=True allows overwriting an ALREADY-recorded value with a new
+        hint -- confirmed live: a value cached before this session's
+        switch from bar-count to seconds-based Pine timestamps stayed
+        stuck (e.g. showing 18:18 for a retest the chart's own dot clearly
+        marks at 18:13), since this method previously just returned
+        `existing` unconditionally once anything was recorded, with no
+        path to correct it even when fresh Pine data disagreed. Callers
+        should only pass force=True after independently confirming the
+        NEW hint on two consecutive polls (see scraper.py's pending_retest
+        gate) -- exactly the same protection a first-time recording
+        already gets, applied here to a CORRECTION instead, so a single
+        poll's corrupted row-read can't blindly overwrite a previously
+        correct cached value.
 
         Always tags the source "pine", even if it's replacing/confirming a
         "close"-sourced value -- Pine's own check is strictly more
@@ -147,7 +160,7 @@ class RetestTracker:
         close-only downgrade."""
         key = self._key(symbol, timeframe, direction, price_key)
         existing = self._retested_at.get(key)
-        if existing is not None:
+        if existing is not None and not (force and hint is not None and hint != existing):
             if self._source.get(key) != "pine":
                 self._source[key] = "pine"
                 self._save()
