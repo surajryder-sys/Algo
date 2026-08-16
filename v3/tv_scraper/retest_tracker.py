@@ -102,15 +102,6 @@ class RetestTracker:
         }
         self._path.write_text(json.dumps(out))
 
-    def peek(self, symbol: str, timeframe: str, direction: str, price_key: int) -> Optional[int]:
-        """Read-only lookup, no side effects -- used by scraper.py's
-        pending_retest 2-poll confirmation gate to tell "already recorded
-        on some earlier poll" (trust it, no need to re-confirm) apart from
-        "genuinely new this poll" (needs confirmation before mark() is
-        called)."""
-        key = self._key(symbol, timeframe, direction, price_key)
-        return self._retested_at.get(key)
-
     def check(self, symbol: str, timeframe: str, direction: str, price_key: int,
               close: Optional[float], btm: float, top: float,
               is_first_sighting: bool) -> Optional[int]:
@@ -139,12 +130,15 @@ class RetestTracker:
         """Unconditionally records this zone as retested (used when Pine's
         own wick-based check reports true) and returns the retested_at
         timestamp -- the existing one if already recorded (never
-        downgraded/overwritten, and `hint` is ignored once a value already
-        exists -- same reasoning as FirstSeenStore.get_or_create()'s own
-        `hint` param: the caller recomputes it fresh from RetestedBarsAgo
-        every poll, and it drifts a few seconds poll to poll, so only the
-        FIRST recorded value should ever stick), otherwise `hint` if given
-        (an exact bar-derived timestamp -- see scraper.py) or now.
+        downgraded/overwritten), otherwise `hint` if given, else `now`.
+
+        `hint` is a real timestamp reconstructed by scraper.py from Pine's
+        RetestedBarsAgo Data Window plot -- lets a retest that happened
+        before this scraper's own polling caught it (e.g. right after a
+        restart, or during the 2-poll confirmation gate's own delay) get
+        its true bar time instead of "whenever this module first noticed
+        it." See OBD_SecretTrader.pine's own comment on why this is a bar
+        count, not a raw timestamp.
 
         Always tags the source "pine", even if it's replacing/confirming a
         "close"-sourced value -- Pine's own check is strictly more
@@ -158,16 +152,51 @@ class RetestTracker:
                 self._source[key] = "pine"
                 self._save()
             return existing
-        now = hint if hint is not None else int(time.time())
-        self._retested_at[key] = now
+        value = hint if hint is not None else int(time.time())
+        self._retested_at[key] = value
         self._source[key] = "pine"
         self._save()
-        return now
+        return value
+
+    def peek(self, symbol: str, timeframe: str, direction: str, price_key: int) -> Optional[int]:
+        """Read-only lookup -- unlike check(), never records anything, just
+        reports the currently-known retested_at (or None). Used by
+        scraper._find_resurrectable() to source a value for
+        RetestTracker.restore() without side effects."""
+        key = self._key(symbol, timeframe, direction, price_key)
+        return self._retested_at.get(key)
+
+    def restore(self, symbol: str, timeframe: str, direction: str, price_key: int,
+                retested_at: Optional[int], source: str = "pine") -> None:
+        """Re-establishes a retested_at entry at an EXACT known value --
+        used by scraper._find_resurrectable() alongside
+        FirstSeenStore.restore() when a zone falsely read as mitigated
+        (pure top-4 display churn) reappears, so its real retest history
+        (from the ZoneStore entry being resurrected) isn't silently
+        replaced by a fresh wall-clock guess on the very next poll.
+        retested_at=None means the resurrected zone was never actually
+        retested -- clears any stale entry rather than leaving one
+        behind."""
+        key = self._key(symbol, timeframe, direction, price_key)
+        if retested_at is None:
+            changed = False
+            if key in self._retested_at:
+                del self._retested_at[key]
+                changed = True
+            if key in self._source:
+                del self._source[key]
+                changed = True
+            if changed:
+                self._save()
+            return
+        if self._retested_at.get(key) != retested_at or self._source.get(key) != source:
+            self._retested_at[key] = retested_at
+            self._source[key] = source
+            self._save()
 
     def reconcile(self, symbol: str, timeframe: str, direction: str, price_key: int,
                   pine_retested: bool) -> None:
-        """Called whenever Pine's own Retested plot is present this poll
-        (regardless of whether RetestedBarsAgo specifically came through),
+        """Called whenever Pine's own Retested plot is present this poll,
         to let its authoritative signal correct a previously-recorded
         FALSE POSITIVE from this module's own live-Close approximation
         (check()). Confirmed live (BTCUSD/M1, zone continuously tracked
@@ -188,9 +217,8 @@ class RetestTracker:
         investigate.
 
         pine_retested=True needs no handling here -- mark() (called
-        separately once retested_bars_ago/the raw flag confirm it) is
-        what records a positive; this method only ever removes, never
-        adds."""
+        separately once the raw flag confirms it) is what records a
+        positive; this method only ever removes, never adds."""
         if pine_retested:
             return
         key = self._key(symbol, timeframe, direction, price_key)

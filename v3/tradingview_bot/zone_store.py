@@ -113,24 +113,21 @@ class ZoneStore:
             zone.retested_at = retested_time
         self._save()
 
-    def get(self, symbol: str, timeframe: str, direction: str, start_time: int) -> Optional[TVZone]:
-        """Direct lookup by exact start_time -- used by scraper.py's zone-
-        resurrection check (see _apply_direction's own comment) to find a
-        previously-mitigated entry whose real formation time (recomputed
-        fresh from Pine's own FormedBarsAgo this poll) exactly matches a
-        zone that reappeared after being pushed out of the visible top-4
-        window and wrongly declared mitigated -- confirmed live (BTCUSD/M1):
-        a zone continuously tracked by LuxAlgo since 12:49 had TWO ghost
-        duplicate entries created this way, one of them showing as
-        mitigated for a zone that was, at that exact moment, still fully
-        live and unretested on the actual chart."""
-        key = self._key(symbol, timeframe, direction)
-        return self._zones.get(key, {}).get(start_time)
-
     def zones(self, symbol: str, timeframe: str, direction: str) -> list[TVZone]:
         """Newest first, matching ob_bridge.OBSnapshot's bull/bear ordering."""
         key = self._key(symbol, timeframe, direction)
         return sorted(self._zones.get(key, {}).values(), key=lambda z: -z.start_time)
+
+    def get(self, symbol: str, timeframe: str, direction: str, start_time: int) -> Optional[TVZone]:
+        """Direct lookup by exact start_time -- used by
+        scraper._find_resurrectable() to check whether a candidate
+        formation-time match (within its own tolerance window) corresponds
+        to a real, already-known zone (including a currently-mitigated
+        one, so a false-mitigation resurrection has something to resurrect
+        FROM) before deciding to reuse its identity instead of minting a
+        fresh one."""
+        key = self._key(symbol, timeframe, direction)
+        return self._zones.get(key, {}).get(start_time)
 
     def reload(self) -> None:
         """Re-reads the backing file -- see AtrStore.reload()'s docstring

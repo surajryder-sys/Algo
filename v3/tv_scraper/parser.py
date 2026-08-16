@@ -63,20 +63,12 @@ _ZONE_LABELS = {
         # tv_scraper's own live-Close approximation in _apply_direction --
         # see that indicator's mark_retests()/"Retested" Data Window plots.
         ("Retested", "retested"),
-        # Elapsed real SECONDS (not raw timestamps -- see OBD_SecretTrader.
-        # pine's own comment on why a raw absolute timestamp broke this
-        # chart's price-scale autoscale), computed by Pine itself from its
-        # own timenow against the formation/retest bar's real time[] --
-        # replaces the earlier bar-COUNT fields (FormedBarsAgo/
-        # RetestedBarsAgo, scraper.py converting bars*timeframe_seconds
-        # using ITS OWN wall clock), which was silently wrong by however
-        # much the underlying price feed itself is delayed (e.g. a broker
-        # CFD feed running a few minutes behind true market time) -- see
-        # that Pine function's own comment. Works retroactively for zones
-        # that predate this scraper ever polling, unlike the alert()
-        # webhook path.
-        ("FormedSecondsAgo", "formed_seconds_ago"),
-        ("RetestedSecondsAgo", "retested_seconds_ago"),
+        # Bar counts, not raw timestamps -- see OBD_SecretTrader.pine's own
+        # comment on why (a raw start_time value once broke this chart's
+        # price-scale autoscale). scraper.py turns these into real
+        # timestamps via bars_ago * timeframe_seconds.
+        ("FormedBarsAgo", "formed_bars_ago"),
+        ("RetestedBarsAgo", "retested_bars_ago"),
     )
     # no Start -- see ob_detector_webhook.pine.
 }
@@ -155,14 +147,14 @@ def parse_data_window(text: str) -> ParsedState:
                 # rather than silently treating "missing" as "not retested".
                 if "retested" in f:
                     zone["retested"] = f["retested"] > 0.5
-                # Elapsed real seconds (int, but Data Window numbers always
-                # parse as float -- cast down). Missing entirely if this
-                # indicator build predates the FormedSecondsAgo/
-                # RetestedSecondsAgo plots (an older, un-updated build).
-                if "formed_seconds_ago" in f:
-                    zone["formed_seconds_ago"] = int(f["formed_seconds_ago"])
-                if "retested_seconds_ago" in f:
-                    zone["retested_seconds_ago"] = int(f["retested_seconds_ago"])
+                # int(), not left as float -- these are bar counts (small
+                # whole numbers), and scraper.py's arithmetic/dict-key use
+                # assumes int. na (unmatched by _NUMBER_RE) already comes
+                # through as simply absent from f, same as any other field.
+                if "formed_bars_ago" in f:
+                    zone["formed_bars_ago"] = int(f["formed_bars_ago"])
+                if "retested_bars_ago" in f:
+                    zone["retested_bars_ago"] = int(f["retested_bars_ago"])
                 out.append(zone)
         return out
 

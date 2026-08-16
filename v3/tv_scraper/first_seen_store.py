@@ -16,6 +16,19 @@ colliding "0" digit).
 Keyed by (symbol, timeframe, direction, price_key) -- price_key is
 scraper._zone_key(zone)'s existing rounded-top-price identity, used here
 purely as a lookup key, not written anywhere downstream itself.
+
+get_or_create() accepts an optional `hint` -- a real timestamp
+reconstructed by scraper.py from Pine's FormedBarsAgo Data Window plot
+(bars_ago * timeframe_seconds, see OBD_SecretTrader.pine's own comment on
+why that's a bar count, not a raw timestamp). When given, and this is
+genuinely the first sighting of this price_key, `hint` is stored as the
+zone's first-seen time INSTEAD OF `now` -- letting a zone that already
+existed before this scraper started watching (or before this exact
+price_key first appeared, e.g. after a resurrection -- see
+scraper._find_resurrectable()) get its true formation time rather than
+"whenever this scraper first happened to notice it." Falls back to `now`
+when no hint is available (indicator not updated yet, or na this poll),
+same as before hints existed at all.
 """
 from __future__ import annotations
 
@@ -50,31 +63,21 @@ class FirstSeenStore:
         """Returns the stable first-seen timestamp for this zone, assigning
         a value the first time this exact price_key is seen for this
         symbol/timeframe/direction, and reusing it -- UNCHANGED -- on every
-        later call, regardless of what's passed as `hint` on those later
-        calls.
+        later call.
 
-        hint: if the caller has something more accurate than "now" for a
-        FIRST sighting (e.g. OBD_SecretTrader.pine's FormedBarsAgo plot,
-        converted to a real timestamp -- see scraper.py), pass it here to
-        seed the cache with that instead of the wall-clock guess. Ignored
-        on every call after the first for a given price_key -- this is
-        deliberate, not a bug: that value is recomputed by the CALLER from
-        `now - bars_ago * timeframe_seconds` every poll, and drifts by a
-        few seconds poll to poll (bars_ago only advances at bar
-        boundaries, `now` doesn't). Using a fresh hint on every poll
-        instead of caching it confirmed live (BTCUSD/M5): each poll's
-        slightly different value read as a "new" zone to ZoneStore (which
-        keys its history BY this exact value), fragmenting one real zone
-        into five near-duplicate entries within seconds. Caching the
-        first-seen hint and ignoring later ones keeps one real zone as
-        one stable entry, same as the plain wall-clock path.
+        `hint`, when given, is used as that first-assigned value instead of
+        `now` -- see this module's own docstring. Still runs through the
+        same collision-avoidance bump as a plain `now` would (a hint is
+        already rounded to the minute by scraper.py's _round_hint(), so two
+        distinct zones forming within the same minute could otherwise
+        collide exactly the way two same-second `now` calls could).
 
         Guaranteed unique within this (symbol, timeframe, direction) scope
-        regardless of source -- confirmed live (BTCUSD/M5): int(time.time())
-        only has 1-second resolution, and a single poll routinely first-sees
-        several distinct zones at once (right after a restart, or during a
-        burst of real formations), so a value handed out unmodified let two
-        or three genuinely different zones collide on the identical
+        -- confirmed live (BTCUSD/M5): int(time.time()) only has 1-second
+        resolution, and a single poll routinely first-sees several
+        distinct zones at once (right after a restart, or during a burst
+        of real formations), so a value handed out unmodified let two or
+        three genuinely different zones collide on the identical
         timestamp. That's directly fatal downstream -- ZoneStore keys its
         per-direction dict BY this value, so a collision isn't just a
         cosmetic duplicate, it's a silent overwrite: whichever zone got
@@ -82,35 +85,35 @@ class FirstSeenStore:
         earlier zone sharing the timestamp vanished from history with no
         error. Bumping forward one second at a time until a free slot is
         found costs at most a few seconds of drift from the true
-        first-observed moment (already just an approximation when there's
-        no hint) in exchange for never colliding."""
+        first-observed moment (already just an approximation) in exchange
+        for never colliding."""
         key = self._key(symbol, timeframe, direction, price_key)
         existing = self._seen.get(key)
         if existing is not None:
             return existing
         prefix = f"{symbol}|{timeframe}|{direction}|"
         used = {v for k, v in self._seen.items() if k.startswith(prefix)}
-        now = hint if hint is not None else int(time.time())
-        while now in used:
-            now += 1
-        self._seen[key] = now
+        candidate = hint if hint is not None else int(time.time())
+        while candidate in used:
+            candidate += 1
+        self._seen[key] = candidate
         self._save()
-        return now
+        return candidate
 
     def restore(self, symbol: str, timeframe: str, direction: str, price_key: int,
                 start_time: int) -> None:
-        """Directly (re-)establishes this price_key -> start_time mapping,
-        bypassing the collision-avoidance bump get_or_create() normally
-        does on a fresh guess -- used only when scraper.py has already
-        confirmed via ZoneStore.get() that this EXACT start_time belongs
-        to a real, previously-tracked zone reappearing after a false
-        mitigation (top-4 display churn, not a genuine LuxAlgo removal --
-        see _apply_direction's own comment), so there's no guessing here,
-        just reasserting a value already known to be correct and free of
-        collision risk (it was this exact price_key's own value before)."""
+        """Re-establishes a first-seen entry at an EXACT known value --
+        used by scraper._find_resurrectable() when a zone that was falsely
+        read as mitigated (pure top-4 display churn, not a real LuxAlgo
+        invalidation) reappears: reuses the resurrected ZoneStore entry's
+        own real start_time directly, bypassing get_or_create()'s
+        collision-bump entirely (this exact value already lived here
+        before, and is by definition not colliding with anything still
+        active right now)."""
         key = self._key(symbol, timeframe, direction, price_key)
-        self._seen[key] = start_time
-        self._save()
+        if self._seen.get(key) != start_time:
+            self._seen[key] = start_time
+            self._save()
 
     def forget(self, symbol: str, timeframe: str, direction: str, price_key: int) -> None:
         """Call once a zone is confirmed mitigated -- frees its price_key so

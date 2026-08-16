@@ -22,7 +22,7 @@ from typing import Optional
 from playwright.sync_api import Browser, Page, sync_playwright
 
 from v3.tradingview_bot.atr_store import AtrStore
-from v3.tradingview_bot.zone_store import ZoneStore
+from v3.tradingview_bot.zone_store import TVZone, ZoneStore
 from v3.tv_scraper.atr_trend_tracker import AtrTrendTracker
 from v3.tv_scraper.config import Config, load_config
 from v3.tv_scraper.first_seen_store import FirstSeenStore
@@ -224,27 +224,62 @@ def _price_key(zone: dict) -> int:
 # a single missing poll isn't proof enough.
 _MITIGATION_DEBOUNCE_POLLS = 2
 
+# How close (seconds) a freshly-computed formed_hint must land to an
+# existing ZoneStore entry's own start_time to be treated as "the same real
+# zone" -- both for resurrection matching (_find_resurrectable) and for the
+# row-corruption consistency guard in _apply_direction. Not an exact-match
+# requirement: a formation time sitting right at a minute boundary can
+# round to either adjacent minute across polls due to ordinary timing
+# skew between when this scraper samples "now" and when Pine itself last
+# recomputed bar_index -- a ±60s window absorbs that without risking a
+# genuinely different zone at a similar time being matched by mistake.
+_RESURRECT_TOLERANCE_SECONDS = 60
 
-def _round_hint(raw: Optional[int]) -> Optional[int]:
-    """Rounds a reconstructed real timestamp down to the minute -- NOT for
-    display precision (the reconstruction is now genuinely second-accurate,
-    see _apply_direction's own retested_at docstring paragraph), but for
-    STABILITY: the resurrection check (ZoneStore.get() exact-match) and the
-    non-first-sighting consistency check both need the SAME real zone to
-    reconstruct to the EXACT same value on every poll. The old bar-count
-    approach got that for free (discrete bar boundaries, always landing on
-    a clean multiple of the timeframe's seconds). This one subtracts two
-    independently-sampled live values (tv_scraper's own `now` and Pine's
-    live-computed elapsed seconds) that can drift a second or two apart
-    poll to poll from ordinary scrape/network timing skew -- rounding the
-    RESULT (not either input alone, which would drift the wrong way
-    within a single minute) absorbs that jitter with the same tolerance
-    margin the old approach had for free, without reintroducing the
-    feed-delay bug this replaced (that was about WHICH clock anchors the
-    subtraction, not about display/matching granularity)."""
-    if raw is None:
-        return None
+
+def _tf_seconds(timeframe: str) -> Optional[int]:
+    """Seconds per bar for this pane's timeframe, or None if it can't be
+    determined (e.g. "D"/"W" aren't plain digit-minutes) -- callers treat
+    None as "no bar-count reconstruction possible this poll", falling back
+    to plain wall-clock behavior for that poll only."""
+    return int(timeframe) * 60 if timeframe.isdigit() else None
+
+
+def _round_hint(raw: int) -> int:
+    """Rounds a reconstructed timestamp down to the nearest minute -- for
+    STABILITY, not display precision. bars_ago * tf_seconds is always a
+    multiple of 60, but the `now` used to anchor it is sampled at whatever
+    moment this poll happens to run, so two different polls reconstructing
+    the SAME real zone can land a few seconds apart without this. Rounding
+    both down to the same minute boundary makes repeated polls agree
+    exactly, which resurrection matching and the consistency guard both
+    depend on."""
     return raw - (raw % 60)
+
+
+def _find_resurrectable(zone_store: ZoneStore, symbol: str, timeframe: str, direction: str,
+                         formed_hint: Optional[int]) -> Optional[TVZone]:
+    """Looks for an existing ZoneStore entry (active OR already-mitigated --
+    ZoneStore never deletes an entry on mitigation, just flags it, so a
+    falsely-mitigated real zone is still sitting right there to match
+    against) whose own start_time is within _RESURRECT_TOLERANCE_SECONDS of
+    this poll's freshly-computed formed_hint. Returns the closest match, or
+    None.
+
+    This is what lets a zone that got falsely read as mitigated (pure
+    top-4 Data Window display churn -- newer zones pushing it out of the
+    visible slots, not a real LuxAlgo invalidation) reappear under its
+    OWN original identity instead of minting a duplicate with a fresh
+    start_time and a blank retest history."""
+    if formed_hint is None:
+        return None
+    best: Optional[TVZone] = None
+    best_diff: Optional[int] = None
+    for z in zone_store.zones(symbol, timeframe, direction):
+        diff = abs(z.start_time - formed_hint)
+        if diff <= _RESURRECT_TOLERANCE_SECONDS and (best_diff is None or diff < best_diff):
+            best = z
+            best_diff = diff
+    return best
 
 
 def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: RetestTracker,
@@ -280,21 +315,6 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
     missing_streak / the second return value: {price_key: consecutive
     missed-poll count}, cleared for any price_key seen again this poll.
 
-    pending_retest / the third return value: {price_key: the retest_hint
-    timestamp computed from LAST poll's RetestedSecondsAgo}, used to
-    require the SAME hint value on two consecutive polls before it's
-    trusted enough to call retested.mark() -- see the "row-level"
-    consistency comment further down for the confirmed-live corruption
-    this guards against (the multi-second Data Window scroll catching a
-    row mid-reshuffle, which the formed_hint-vs-known-start_time check
-    alone doesn't catch when it's ONLY RetestedSecondsAgo that's corrupted
-    for that one poll, not FormedSecondsAgo). A genuine retest's
-    seconds-ago-derived hint is deterministic (after _round_hint()'s
-    stability rounding) -- the same real retest bar reconstructs to the
-    same timestamp every time it's recomputed -- so two consecutive polls
-    agreeing is strong confirmation, not coincidence, at the cost of one
-    extra poll's delay (~5-10s) on a genuine first-time retest.
-
     detected_price is the live Close read off the Data Window this same
     poll, NOT the zone's own opposite edge -- algo_v2_tv_xauusd's M3/M5
     entry math (ported from algo_v2/entries.py) reads this as "how far has
@@ -318,194 +338,118 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
     either source) rather than simply preferred, so upgrading the Pine
     script doesn't regress zones this module's own check already caught.
 
-    retested_at: EXACT real timestamp when formed_seconds_ago/
-    retested_seconds_ago are present in this poll's parsed zone (see
-    OBD_SecretTrader.pine's Data Window plot section) -- computed as
-    `now - seconds_ago`, using tv_scraper's own wall clock as "now" and
-    Pine's own timenow-derived elapsed-seconds value for the rest. This
-    works retroactively for zones that already existed before this
-    scraper (or even this script) ever started watching, unlike the
-    alert() webhook path, because Pine computes the elapsed time from its
-    own real history every time the script loads -- and unlike the earlier
-    bar-COUNT approach this replaced (bars_ago * timeframe_seconds using
-    tv_scraper's wall clock as the OTHER half of the subtraction too),
-    doesn't silently drift by however much the underlying price FEED
-    itself is delayed (e.g. a broker CFD feed running a few minutes behind
-    the real market) -- confirmed live: past detected/retested_at
-    timestamps disagreed with the chart's own marked positions by
-    multiple minutes on a delayed Pepperstone BTC feed, while live Close
-    (read directly, not reconstructed) lined up fine. Falls back to the
-    old wall-clock "first observed" approximation only if those plots
-    aren't present (e.g. an older, un-updated indicator build) -- see
-    first_seen_store.py/retest_tracker.py's own docstrings for that
-    approximation's tradeoffs."""
+    start_time / retested_at: reconstructed from Pine's FormedBarsAgo/
+    RetestedBarsAgo Data Window plots when available (bars_ago *
+    timeframe_seconds -- see _tf_seconds/_round_hint), giving the real
+    candle time instead of "whenever this module happened to first poll
+    it." Falls back to plain wall-clock "first observed now" whenever a
+    hint can't be computed (indicator not updated on this pane yet, na
+    this poll, or timeframe isn't plain digit-minutes).
+
+    A hint drives THREE pieces of behavior, in order of how much trust
+    they place in it:
+      1. Resurrection (_find_resurrectable): on a zone's first sighting,
+         its formed_hint is checked against every zone this store already
+         knows about (active or mitigated) within _RESURRECT_TOLERANCE_
+         SECONDS. A match means this "new" sighting is really a zone that
+         got falsely marked mitigated (pure top-4 display churn, not a
+         genuine LuxAlgo invalidation) reappearing -- its real start_time
+         and retested_at are restored instead of minting a duplicate
+         identity with a blank history.
+      2. The row-corruption consistency guard: on every LATER sighting of
+         an already-known zone, this poll's formed_hint is compared
+         against that zone's own already-persisted start_time. Disagreeing
+         by more than the tolerance means this poll's Data Window row for
+         this zone was probably caught mid-reshuffle (a scroll glitch) --
+         both formed_bars_ago and retested_bars_ago are distrusted for
+         this poll only, falling back to plain wall-clock/close-based
+         behavior rather than let corrupted numbers get recorded.
+      3. The 2-poll retest confirmation gate (pending_retest): a NEW
+         retested_hint isn't trusted until the exact same value appears on
+         two consecutive polls -- guards against a row-level scroll
+         glitch corrupting just the retest number for one poll
+         independently of the formation number (so neither of the above
+         two checks alone would catch it)."""
     price_field = "btm" if direction == "bull" else "top"
     now = int(time.time())
+    tf_sec = _tf_seconds(timeframe)
     seen_now: dict[int, int] = {}
     new_missing_streak: dict[int, int] = {}
     new_pending_retest: dict[int, int] = {}
 
     for zone in current:
         price_key = _price_key(zone)
-        formed_seconds_ago = zone.get("formed_seconds_ago")
-        retested_seconds_ago = zone.get("retested_seconds_ago")
-        # Pine guarantees retested comes on or after formation for a given
-        # zone -- mark_retests() only ever sets a retest's bar_index on or
-        # after that same zone's own formed_bar (see its own `bar_index >=
-        # ...` guard), so retested_seconds_ago can never exceed
-        # formed_seconds_ago. Confirmed live (BTCUSD/M15, right after
-        # switching timeframe/panes): the two numbers can still arrive
-        # inconsistent with each other for one poll -- most likely a
-        # leftover paint from the pane just switched away from, mixed with
-        # freshly-rendered rows from the new one. Trusting a mismatched
-        # pair produced a "retested before it formed" entry.
-        # Treating BOTH as untrustworthy for this poll (not just the
-        # retest one) when they contradict each other, and falling back to
-        # the wall-clock approximation this cycle, means a bad single-poll
-        # pairing gets retried next poll instead of permanently cached.
-        seconds_ago_consistent = (
-            formed_seconds_ago is None or retested_seconds_ago is None
-            or retested_seconds_ago <= formed_seconds_ago
-        )
-        if not seconds_ago_consistent:
-            formed_seconds_ago = None
-            retested_seconds_ago = None
-
-        # hint, not a direct assignment -- get_or_create() only USES this
-        # on the zone's actual first sighting and caches it from then on;
-        # every later poll recomputes a slightly different value here
-        # (seconds_ago keeps advancing every poll, `now` too, but not
-        # perfectly in lockstep down to the second), and feeding that
-        # drift straight into ZoneStore's start_time-keyed history
-        # fragmented one real zone into several near-duplicate entries
-        # seconds apart (confirmed live, BTCUSD/M5) before this hint/cache
-        # split existed. See that method's own docstring. No timeframe-
-        # seconds multiplication needed anymore -- Pine now reports real
-        # elapsed seconds directly (see this function's own retested_at
-        # docstring paragraph) -- just `now - seconds_ago`, rounded via
-        # _round_hint() for poll-to-poll stability (see that function's
-        # own docstring).
-        formed_hint = _round_hint(now - formed_seconds_ago) if formed_seconds_ago is not None else None
-
-        # NOT `start_time == now` -- FirstSeenStore.get_or_create() can
-        # deliberately hand out a start_time a few synthetic seconds ahead
-        # of the real "now" to dodge a same-second collision with another
-        # zone in this same batch (see that method's own comment), so a
-        # genuinely-first-seen zone processed later in this loop can have
-        # start_time > now and silently fail this equality check.
-        # Confirmed live (BTCUSD/M5): that let the retest-marking guard
-        # below unlock on a zone's actual first sighting, producing a
-        # retested_at that predates the zone's own start_time. Whether
-        # this price_key was present in LAST poll's seen set is a direct,
-        # timestamp-independent answer to "is this genuinely new."
         is_first_sighting = price_key not in previously_seen
 
-        # Before minting a brand new start_time for a genuinely
-        # first-seen price_key, check whether this is actually the SAME
-        # zone reappearing after being wrongly declared mitigated -- see
-        # ZoneStore.get()'s own comment for the confirmed-live case this
-        # fixes (a zone pushed out of the visible top-4 by newer zones,
-        # NOT genuinely invalidated by LuxAlgo, gets missing_streak-ed
-        # into a false mitigation, then reappears once churn moves on).
-        # formed_hint is the real formation minute recomputed fresh from
-        # Pine's own FormedSecondsAgo THIS poll -- for the SAME real zone,
-        # that reconstructs the same minute (after _round_hint()'s
-        # stability rounding) no matter how many times or how long after
-        # it's re-derived, so an EXACT match against an existing ZoneStore
-        # entry -- even a currently-mitigated one -- is strong proof of
-        # identity, not coincidence.
-        resurrect_start_time = None
-        if is_first_sighting and formed_hint is not None:
-            existing = zones.get(symbol, timeframe, direction, formed_hint)
-            if existing is not None and existing.mitigated_time is not None:
-                resurrect_start_time = formed_hint
+        formed_bars_ago = zone.get("formed_bars_ago")
+        formed_hint: Optional[int] = None
+        if formed_bars_ago is not None and tf_sec is not None:
+            formed_hint = _round_hint(now - formed_bars_ago * tf_sec)
 
-        if resurrect_start_time is not None:
-            start_time = resurrect_start_time
-            first_seen.restore(symbol, timeframe, direction, price_key, start_time)
+        bars_ago_consistent = True
+        if is_first_sighting:
+            resurrect = _find_resurrectable(zones, symbol, timeframe, direction, formed_hint)
+            if resurrect is not None:
+                start_time = resurrect.start_time
+                first_seen.restore(symbol, timeframe, direction, price_key, start_time)
+                retested.restore(symbol, timeframe, direction, price_key, resurrect.retested_at)
+            else:
+                start_time = first_seen.get_or_create(symbol, timeframe, direction, price_key,
+                                                        hint=formed_hint)
         else:
-            start_time = first_seen.get_or_create(symbol, timeframe, direction, price_key,
-                                                  hint=formed_hint)
+            start_time = first_seen.get_or_create(symbol, timeframe, direction, price_key)
+            if formed_hint is not None and abs(formed_hint - start_time) > _RESURRECT_TOLERANCE_SECONDS:
+                bars_ago_consistent = False
+
         seen_now[price_key] = start_time
 
-        # A non-first-sighting zone's formed_hint should EXACTLY reproduce
-        # its own already-known, persisted start_time every single time --
-        # deterministic for the same real zone (Pine's own timenow-based
-        # elapsed-seconds calc, not a guess), after _round_hint()'s
-        # stability rounding -- so any mismatch means this poll's ROW data
-        # for this price_key is corrupted -- most likely the multi-second
-        # Data Window scroll (_collect_data_window_text takes several
-        # seconds per pane) caught this row mid-reshuffle, the same class
-        # of bug as the symbol-switch guard above but at the row level
-        # instead of the pane level. Confirmed live (BTCUSD/M1): a
-        # retested_seconds_ago read this way got permanently cached via
-        # mark() below -- tagged "pine", so reconcile() can never correct
-        # it -- for a zone whose live Retested flag otherwise read False on
-        # every surrounding poll. Distrusting BOTH seconds_ago values here
-        # (not just retested_seconds_ago) matches the existing
-        # formed<=retested self-consistency guard above, just checked
-        # against real persisted history instead of only this poll's own
-        # internal consistency -- a bad single-poll row read gets retried
-        # next poll instead of permanently cached.
-        if not is_first_sighting and formed_hint is not None and formed_hint != start_time:
-            formed_seconds_ago = None
-            retested_seconds_ago = None
-
-        # Let Pine's own Retested plot (when present this poll, regardless
-        # of whether RetestedSecondsAgo specifically came through) correct
-        # a previously-recorded false positive from this module's own
+        # Let Pine's own Retested plot (when present this poll) correct a
+        # previously-recorded false positive from this module's own
         # live-Close approximation -- see RetestTracker.reconcile()'s own
         # docstring for the confirmed-live case this fixes. Deliberately
-        # BEFORE the mark()/check() calls below, so this poll's read
-        # already reflects the corrected state instead of the stale one.
+        # BEFORE check()/mark() below, so this poll's read already
+        # reflects the corrected state instead of the stale one.
         pine_retested_flag = zone.get("retested")
         if pine_retested_flag is not None:
             retested.reconcile(symbol, timeframe, direction, price_key, pine_retested_flag)
 
-        # Same hint/cache split as start_time above, and for the same
-        # reason: RetestedSecondsAgo is recomputed fresh every poll, so
-        # only the value from the FIRST poll that reports a retest should
-        # ever be kept. (Already nulled out above if it failed the
-        # formed<=retested consistency check for this poll.)
-        #
-        # A hint that hasn't been recorded yet ALSO needs to match what
-        # last poll computed before it's trusted -- see this function's
-        # own pending_retest docstring for the confirmed-live corruption
-        # (a row-level scroll/reshuffle glitch affecting ONLY
-        # RetestedSecondsAgo, independent of FormedSecondsAgo) that the
-        # formed_hint-vs-start_time guard above doesn't catch. A single
-        # unconfirmed poll falls through to the weaker Close-based check()
-        # instead -- still recoverable via reconcile() later if it's wrong
-        # too, unlike an immediate mark() (tagged "pine", never
-        # auto-corrected).
-        if retested_seconds_ago is not None:
-            retest_hint = _round_hint(now - retested_seconds_ago)
-            already_recorded = retested.peek(symbol, timeframe, direction, price_key)
-            if already_recorded is not None or pending_retest.get(price_key) == retest_hint:
-                retested_at = retested.mark(symbol, timeframe, direction, price_key, hint=retest_hint)
+        retested_at = retested.check(symbol, timeframe, direction, price_key,
+                                     close_price, zone["btm"], zone["top"], is_first_sighting)
+
+        # retested_hint: same bars-ago reconstruction as formed_hint, but
+        # for the retest bar -- distrusted entirely this poll if the
+        # consistency guard above already flagged this row as corrupted
+        # (the same scroll glitch that corrupts one bars_ago value on a
+        # row very often corrupts the other too).
+        retested_bars_ago = zone.get("retested_bars_ago")
+        retested_hint: Optional[int] = None
+        if bars_ago_consistent and retested_bars_ago is not None and tf_sec is not None:
+            retested_hint = _round_hint(now - retested_bars_ago * tf_sec)
+
+        confirmed_retest_hint: Optional[int] = None
+        if retested_hint is not None:
+            if pending_retest.get(price_key) == retested_hint:
+                confirmed_retest_hint = retested_hint
             else:
-                new_pending_retest[price_key] = retest_hint
-                retested_at = retested.check(symbol, timeframe, direction, price_key,
-                                             close_price, zone["btm"], zone["top"], is_first_sighting)
-        else:
-            retested_at = retested.check(symbol, timeframe, direction, price_key,
-                                         close_price, zone["btm"], zone["top"], is_first_sighting)
-            # Same first-sighting guard as the Close-based check() above --
-            # Pine's own "Retested" Data Window plot is keyed by ARRAY SLOT
-            # INDEX (Bull1-4/Bear1-4), not a stable zone identity (see
-            # OBD_SecretTrader.pine's plot section). When LuxAlgo's array
-            # shifts -- an old zone removed, a new one taking over that same
-            # slot number -- the new zone can inherit the old one's
-            # Retested=1 flag for one poll before price has ever touched it.
-            # Confirmed live: a zone with start_time == retested_at to the
-            # exact second (retested at the literal instant it was first
-            # observed). Skipping this on the first-sighting poll costs at
-            # most one poll's delay before a GENUINE same-bar retest is
-            # caught (mark_retests() keeps setting the flag every tick until
-            # this module next polls), which is a fine trade for not
-            # fabricating retests out of slot reuse.
-            if retested_at is None and pine_retested_flag and not is_first_sighting:
-                retested_at = retested.mark(symbol, timeframe, direction, price_key)
+                new_pending_retest[price_key] = retested_hint
+
+        # Same first-sighting guard as the Close-based check() above --
+        # Pine's own "Retested" Data Window plot is keyed by ARRAY SLOT
+        # INDEX (Bull1-4/Bear1-4), not a stable zone identity (see
+        # OBD_SecretTrader.pine's plot section). When LuxAlgo's array
+        # shifts -- an old zone removed, a new one taking over that same
+        # slot number -- the new zone can inherit the old one's
+        # Retested=1 flag for one poll before price has ever touched it.
+        # Confirmed live: a zone with start_time == retested_at to the
+        # exact second (retested at the literal instant it was first
+        # observed). Skipping this on the first-sighting poll costs at
+        # most one poll's delay before a GENUINE same-bar retest is
+        # caught (mark_retests() keeps setting the flag every tick until
+        # this module next polls), which is a fine trade for not
+        # fabricating retests out of slot reuse.
+        if retested_at is None and pine_retested_flag and not is_first_sighting:
+            retested_at = retested.mark(symbol, timeframe, direction, price_key,
+                                         hint=confirmed_retest_hint)
 
         zones.apply_formed(symbol, timeframe, direction, {
             "start_time": start_time,
@@ -536,8 +480,14 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
         })
         first_seen.forget(symbol, timeframe, direction, price_key)
         retested.forget(symbol, timeframe, direction, price_key)
+        # No corresponding pending_retest cleanup needed -- new_pending_retest
+        # is rebuilt from scratch every poll (only ever populated for
+        # price_keys seen THIS poll), so a mitigated zone's stale pending
+        # hint simply isn't carried forward.
 
     return seen_now, new_missing_streak, new_pending_retest
+
+    return seen_now, new_missing_streak
 
 
 # Keyed by (symbol, timeframe, direction) rather than just pane label --
@@ -550,9 +500,9 @@ _last_seen: dict[tuple[str, str, str], dict[int, int]] = {}
 # Same keying, tracking consecutive missed-poll counts per price_key for
 # the mitigation debounce -- see _apply_direction's docstring.
 _missing_streak: dict[tuple[str, str, str], dict[int, int]] = {}
-# Same keying, tracking the pending (unconfirmed) retest_hint per
-# price_key for the 2-poll retest-confirmation gate -- see
-# _apply_direction's own pending_retest docstring.
+# Same keying, tracking retested_bars_ago-derived hints awaiting 2-poll
+# confirmation per price_key -- see _apply_direction's docstring on the
+# 2-poll retest confirmation gate.
 _pending_retest: dict[tuple[str, str, str], dict[int, int]] = {}
 # Keyed by pane_label -- the last (symbol, timeframe) this pane
 # successfully processed. See run_once_pane's own comment on the
@@ -646,8 +596,8 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
             _last_seen.get(cache_key, {}), _missing_streak.get(cache_key, {}),
             _pending_retest.get(cache_key, {}), parsed.close)
         _last_seen[cache_key] = seen
-        _pending_retest[cache_key] = pending
         _missing_streak[cache_key] = streak
+        _pending_retest[cache_key] = pending
 
     # Raw mirror -- exactly this poll's parsed Bull1-4/Bear1-4 (top/btm/
     # retested) and Close/ATR, no history, no interpretation. See
