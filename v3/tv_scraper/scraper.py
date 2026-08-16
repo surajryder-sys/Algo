@@ -27,6 +27,7 @@ from v3.tv_scraper.atr_trend_tracker import AtrTrendTracker
 from v3.tv_scraper.config import Config, load_config
 from v3.tv_scraper.first_seen_store import FirstSeenStore
 from v3.tv_scraper.live_snapshot_store import LiveSnapshotStore
+from v3.tv_scraper.mitigation_track_store import MitigationTrackStore
 from v3.tv_scraper.parser import parse_data_window
 from v3.tv_scraper.retest_tracker import RetestTracker
 
@@ -605,32 +606,19 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
     return seen_now, new_missing_streak, new_pending_retest, new_pending_formed
 
 
-# Keyed by (symbol, timeframe, direction) rather than just pane label --
-# every pane in the grid gets polled every cycle and can show different
-# symbols/timeframes (especially during weekend testing with manually-
-# switched symbols), so mitigation-detection must never mix one pane's
-# zones into another's "previously seen" set. Value is {price_key:
-# start_time} -- see _apply_direction's docstring for why both are needed.
-_last_seen: dict[tuple[str, str, str], dict[int, int]] = {}
-# Same keying, tracking consecutive missed-poll counts per price_key for
-# the mitigation debounce -- see _apply_direction's docstring.
-_missing_streak: dict[tuple[str, str, str], dict[int, int]] = {}
-# Same keying, tracking RetestedMinutesRef-derived hints awaiting 2-poll
-# confirmation per price_key -- see _apply_direction's docstring on the
-# 2-poll retest confirmation gate.
-_pending_retest: dict[tuple[str, str, str], dict[int, int]] = {}
-# Same keying, tracking FormedMinutesRef-derived hints awaiting 2-poll
-# confirmation per price_key -- see _apply_direction's docstring
-# point 5 on correcting an already-cached start_time.
-_pending_formed: dict[tuple[str, str, str], dict[int, int]] = {}
 # Keyed by pane_label -- the last (symbol, timeframe) this pane
 # successfully processed. See run_once_pane's own comment on the
-# symbol-switch guard this enables.
+# symbol-switch guard this enables. Deliberately still in-process-only
+# (not persisted like MitigationTrackStore below) -- resetting this on
+# restart only costs one extra "skip this poll" per pane the first time
+# it's read after a restart, harmless, unlike the mitigation-tracking
+# state this used to sit next to.
 _last_symbol_tf: dict[str, tuple[str, str]] = {}
 
 
 def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: FirstSeenStore,
                    retested: RetestTracker, trend_tracker: AtrTrendTracker, live: LiveSnapshotStore,
+                   mitigation_track: MitigationTrackStore,
                    pane_label: str, x_fraction: float, y_fraction: float, configured_symbol: str,
                    configured_timeframe: str) -> None:
     _focus_pane(page, x_fraction, y_fraction)
@@ -709,15 +697,13 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
         atr.apply(symbol, timeframe, atr_data, now)
 
     for direction, direction_zones in (("bull", parsed.bull_zones), ("bear", parsed.bear_zones)):
-        cache_key = (symbol, timeframe, direction)
         seen, streak, pending_retest, pending_formed = _apply_direction(
             zones, first_seen, retested, symbol, timeframe, direction, direction_zones,
-            _last_seen.get(cache_key, {}), _missing_streak.get(cache_key, {}),
-            _pending_retest.get(cache_key, {}), _pending_formed.get(cache_key, {}), parsed.close)
-        _last_seen[cache_key] = seen
-        _missing_streak[cache_key] = streak
-        _pending_retest[cache_key] = pending_retest
-        _pending_formed[cache_key] = pending_formed
+            mitigation_track.get_last_seen(symbol, timeframe, direction),
+            mitigation_track.get_missing_streak(symbol, timeframe, direction),
+            mitigation_track.get_pending_retest(symbol, timeframe, direction),
+            mitigation_track.get_pending_formed(symbol, timeframe, direction), parsed.close)
+        mitigation_track.update(symbol, timeframe, direction, seen, streak, pending_retest, pending_formed)
 
     # Raw mirror -- exactly this poll's parsed Bull1-4/Bear1-4 (top/btm/
     # retested) and Close/ATR, no history, no interpretation. See
@@ -731,10 +717,11 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
 
 def run_once(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: FirstSeenStore,
              retested: RetestTracker, trend_tracker: AtrTrendTracker, live: LiveSnapshotStore,
+             mitigation_track: MitigationTrackStore,
              symbol: str, timeframe: str, panes: list[tuple[str, float, float]]) -> None:
     for pane_label, x_fraction, y_fraction in panes:
-        run_once_pane(page, zones, atr, first_seen, retested, trend_tracker, live, pane_label,
-                      x_fraction, y_fraction, symbol, timeframe)
+        run_once_pane(page, zones, atr, first_seen, retested, trend_tracker, live, mitigation_track,
+                      pane_label, x_fraction, y_fraction, symbol, timeframe)
 
 
 # Anti-throttling flags shared by both the CDP-launch path (below) and the
@@ -834,6 +821,7 @@ def main() -> None:
     retested = RetestTracker(cfg.retest_state_file)
     trend_tracker = AtrTrendTracker(cfg.trend_state_file)
     live = LiveSnapshotStore(cfg.live_snapshot_file)
+    mitigation_track = MitigationTrackStore(cfg.mitigation_track_file)
 
     with sync_playwright() as p:
         browser = _connect_browser(p, cfg)
@@ -901,7 +889,7 @@ def main() -> None:
         try:
             while True:
                 try:
-                    run_once(page, zones, atr, first_seen, retested, trend_tracker, live,
+                    run_once(page, zones, atr, first_seen, retested, trend_tracker, live, mitigation_track,
                              cfg.symbol, cfg.timeframe, panes)
                 except Exception as exc:
                     print(f"[tv_scraper] ERROR: {exc}")

@@ -48,6 +48,7 @@ tv_scraper_atr.json
 tv_scraper_first_seen.json
 tv_scraper_trend.json
 tv_scraper_retest.json
+tv_scraper_mitigation_track.json
 fx_bot_state.json
 tvx_bot_state.json
 tvx_bot_blocks.json

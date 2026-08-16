@@ -27,6 +27,7 @@ class Config:
     retest_state_file: str
     trend_state_file: str
     live_snapshot_file: str
+    mitigation_track_file: str
     browser_executable_path: Optional[str]
     grid_rows: int
     grid_cols: int
@@ -60,6 +61,12 @@ def load_config() -> Config:
         # from zone_state_file/atr_state_file (those build an interpreted
         # history; this is just "what's on screen this poll").
         live_snapshot_file=os.getenv("TV_SCRAPER_LIVE_SNAPSHOT_FILE", "tv_scraper_live.json"),
+        # Mitigation-detection tracking state (which price_keys were seen
+        # last poll, missing-poll streaks, pending 2-poll confirmation
+        # gates) -- see mitigation_track_store.py's own docstring for why
+        # this needs to survive a restart now that ZoneStore.apply_mitigated
+        # deletes zones instead of just flagging them.
+        mitigation_track_file=os.getenv("TV_SCRAPER_MITIGATION_TRACK_FILE", "tv_scraper_mitigation_track.json"),
         browser_executable_path=os.getenv("TV_SCRAPER_BROWSER_PATH") or None,
         # Pane grid on the chart layout at chart_url -- e.g. 2x2 for a
         # 4-pane grid (M1/M3/M5/M15, one per pane), each pane self-detecting
