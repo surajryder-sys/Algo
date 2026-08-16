@@ -155,19 +155,20 @@ def _collect_data_window_text(page: Page, steps: int = 16) -> str:
     the panel capturing text at each position and concatenates everything;
     re-parsing the same label twice is harmless.
 
-    steps was dropped to 8 when OBD_SecretTrader went from 8 zones/side back
-    down to 4, but that revert happened BEFORE FormedBarsAgo/RetestedBarsAgo
-    were added -- those two new plots per slot brought row count back up
-    (Top/Btm/Retested/FormedBarsAgo/RetestedBarsAgo x 4 slots x 2 directions
-    = 40 rows for this indicator alone) without steps being raised back to
-    match. Confirmed live: BTCUSD/M1 was silently missing FormedBarsAgo/
-    RetestedBarsAgo every poll (present in the Pine plots, absent from
-    parsed zones), which made _apply_direction fall back to wall-clock
-    approximation for every zone -- and since a fresh poll first-sees (and
-    first-marks-retested) everything in one batch, that fallback reads as
-    "all zones detected/retested at the identical time", indistinguishable
-    from a real bug without checking for the missing fields specifically.
-    Back to 16 so the extra rows are actually reached."""
+    steps has a history of silently falling behind row count as this
+    indicator's own Data Window plots grew (was dropped to 8 when
+    OBD_SecretTrader went from 8 zones/side back down to 4, missing the
+    FormedBarsAgo/RetestedBarsAgo plots added right after; confirmed live
+    that miss made _apply_direction fall back to wall-clock approximation
+    for every zone, indistinguishable from a real bug without specifically
+    checking for the missing fields). Back at 16, matching the row count
+    of the CURRENT indicator build (Top/Btm/Retested/FormedMinutesRef/
+    RetestedMinutesRef x 4 slots x 2 directions = 40 rows for this
+    indicator alone) -- a FormedDay/FormedMinute/RetestedDay/
+    RetestedMinute split briefly existed here (56 rows, needing steps=24),
+    but got collapsed back to one combined field per formed/retest when it
+    pushed the indicator's total plot count over Pine's hard 64-per-script
+    ceiling (confirmed live: "RE10140 ... too many plots (66)")."""
     point = _panel_scroll_point(page)
     if point is None:
         # Can't safely locate the panel -- read whatever's there right now
@@ -224,29 +225,39 @@ def _price_key(zone: dict) -> int:
 # a single missing poll isn't proof enough.
 _MITIGATION_DEBOUNCE_POLLS = 2
 
-# How close (seconds) a freshly-computed formed_hint must land to an
-# existing ZoneStore entry's own start_time to be treated as "the same real
-# zone" -- both for resurrection matching (_find_resurrectable) and for the
-# row-corruption consistency guard in _apply_direction. Not an exact-match
-# requirement: a formation time sitting right at a minute boundary can
-# round to either adjacent minute across polls due to ordinary timing
-# skew between when this scraper samples "now" and when Pine itself last
-# recomputed bar_index -- a ±60s window absorbs that without risking a
-# genuinely different zone at a similar time being matched by mistake.
-_RESURRECT_TOLERANCE_SECONDS = 60
+# 2025-01-01 00:00 UTC as a Unix timestamp -- the same fixed reference
+# point OBD_SecretTrader.pine's _REF_EPOCH_MS uses (there as milliseconds,
+# here as seconds). Both sides must agree on this exact instant for
+# _reconstruct_hint() below to produce the real timestamp a Pine
+# FormedMinutesRef/RetestedMinutesRef value actually means.
+_REF_EPOCH_UTC = 1735689600
 
 
-def _round_hint(raw: int) -> int:
-    """Rounds a reconstructed timestamp down to the nearest minute -- for
-    STABILITY, not display precision. The reconstruction (now -
-    seconds_ago, see _apply_direction's own docstring) subtracts two
-    independently-sampled live values -- tv_scraper's own `now` and Pine's
-    live-computed elapsed seconds -- that can drift a second or two apart
-    poll to poll from ordinary scrape/network timing skew. Rounding the
-    RESULT down to the same minute boundary makes repeated polls agree
-    exactly, which resurrection matching and the consistency guard both
-    depend on."""
-    return raw - (raw % 60)
+def _reconstruct_hint(minutes_since_ref: Optional[int]) -> Optional[int]:
+    """Turns minutes-since-_REF_EPOCH_UTC -- OBD_SecretTrader.pine's
+    FormedMinutesRef or RetestedMinutesRef plot -- into a real Unix
+    timestamp. None if missing (na this poll, or an indicator build that
+    predates this plot).
+
+    Unlike the earlier elapsed-seconds approach (`now - seconds_ago`,
+    subtracting from tv_scraper's OWN wall clock), this needs no live
+    input from this process at all -- minutes_since_ref is the bar's own
+    real, fixed calendar position, so the SAME real zone reconstructs to
+    the EXACT same value on every single poll, forever. No rounding, no
+    jitter, no tolerance window needed for matching -- see
+    _find_resurrectable's own comment on why that used to be a real
+    liability (a tolerance window is exactly what let two unrelated
+    zones' reconstructed times collide and get merged).
+
+    (A separate days-since-reference / minutes-since-midnight pair briefly
+    existed here instead of this one combined value, but pushed
+    OBD_SecretTrader.pine's total Data Window plot count over Pine's hard
+    64-per-script ceiling -- confirmed live: "RE10140 ... too many plots
+    (66)". One value is exactly as safe to plot -- see that Pine
+    function's own comment -- and halves the row count.)"""
+    if minutes_since_ref is None:
+        return None
+    return _REF_EPOCH_UTC + minutes_since_ref * 60
 
 
 def _find_resurrectable(zone_store: ZoneStore, symbol: str, timeframe: str, direction: str,
@@ -255,18 +266,27 @@ def _find_resurrectable(zone_store: ZoneStore, symbol: str, timeframe: str, dire
     ZoneStore never deletes an entry on mitigation, just flags it, so a
     falsely-mitigated real zone is still sitting right there to match
     against) at the SAME price (top/btm, matching _price_key's own
-    tolerance) whose own start_time is within _RESURRECT_TOLERANCE_SECONDS
-    of this poll's freshly-computed formed_hint. Returns the closest
-    matching entry, or None.
+    tolerance) whose own start_time EXACTLY matches this poll's freshly-
+    reconstructed formed_hint. Returns that entry, or None.
 
-    top/btm are REQUIRED, not optional -- confirmed live (BTCUSD/M3): two
+    Exact match, not a tolerance window -- formed_hint is now a
+    deterministic reconstruction (see _reconstruct_hint's own docstring),
+    not a live approximation, so the SAME real zone reconstructs to the
+    identical value every time; there's nothing left for a tolerance
+    window to usefully absorb. An EARLIER version of this function used a
+    60-second tolerance (needed back when hints were seconds-ago-derived
+    and could drift a little poll to poll), and that tolerance was
+    confirmed live to be a real liability, not just unnecessary: two
     completely unrelated real zones (62866.36 and 61745.45) happened to
-    reconstruct formed_hints within the same 60-second tolerance window of
-    each other, and matching by time alone resurrected the WRONG one --
-    silently merging a brand-new zone's identity into a totally different
-    zone's history. Filtering to the same price FIRST (before ranking by
-    time proximity) is what actually makes "the same real zone reappearing"
-    a safe conclusion instead of a coincidence.
+    reconstruct formed_hints within that same 60-second window, and
+    matching by proximity resurrected the WRONG one -- silently merging a
+    brand-new zone's identity into a totally different zone's history.
+
+    top/btm are still REQUIRED (not just a historical leftover from that
+    fix) -- exact time match alone still isn't identity: two different
+    real zones COULD legitimately form on the exact same bar. Requiring
+    price too is what actually makes "the same real zone reappearing" a
+    safe conclusion.
 
     This is what lets a zone that got falsely read as mitigated (pure
     top-4 Data Window display churn -- newer zones pushing it out of the
@@ -275,16 +295,10 @@ def _find_resurrectable(zone_store: ZoneStore, symbol: str, timeframe: str, dire
     start_time and a blank retest history."""
     if formed_hint is None:
         return None
-    best: Optional[TVZone] = None
-    best_diff: Optional[int] = None
     for z in zone_store.zones(symbol, timeframe, direction):
-        if abs(z.top - top) > 0.01 or abs(z.btm - btm) > 0.01:
-            continue
-        diff = abs(z.start_time - formed_hint)
-        if diff <= _RESURRECT_TOLERANCE_SECONDS and (best_diff is None or diff < best_diff):
-            best = z
-            best_diff = diff
-    return best
+        if z.start_time == formed_hint and abs(z.top - top) <= 0.01 and abs(z.btm - btm) <= 0.01:
+            return z
+    return None
 
 
 def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: RetestTracker,
@@ -344,61 +358,72 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
     either source) rather than simply preferred, so upgrading the Pine
     script doesn't regress zones this module's own check already caught.
 
-    start_time / retested_at: reconstructed from Pine's FormedSecondsAgo/
-    RetestedSecondsAgo Data Window plots when available (plain `now -
-    seconds_ago` -- see _round_hint -- Pine computes the elapsed seconds
-    itself from its own timenow against the bar's real time[], so no
-    timeframe-to-seconds conversion is needed on this side at all), giving
-    the real candle time instead of "whenever this module happened to
-    first poll it." Falls back to plain wall-clock "first observed now"
-    whenever a hint can't be computed (indicator not updated on this pane
-    yet, or na this poll).
+    start_time / retested_at: reconstructed from Pine's FormedMinutesRef/
+    RetestedMinutesRef Data Window plots when available (see
+    _reconstruct_hint), giving the real candle time
+    instead of "whenever this module happened to first poll it." Falls
+    back to plain wall-clock "first observed now" whenever a hint can't
+    be computed (indicator not updated on this pane yet, na this poll, or
+    an indicator build old enough to only have the earlier elapsed-
+    seconds or bar-count fields).
 
-    This replaces an earlier bar-COUNT approach (FormedBarsAgo/
-    RetestedBarsAgo, reconstructed as `now - bars_ago * timeframe_seconds`
-    using tv_scraper's OWN wall clock for both halves of the subtraction)
-    -- that silently drifted by however much the underlying price FEED
-    itself was delayed (confirmed live: a Pepperstone BTC CFD feed a few
-    minutes behind the real market), since bar_index/bars_ago is anchored
-    to the feed's own lagging notion of "now", not true time. Pine's own
-    timenow doesn't have that problem -- it's the script's true current
-    time regardless of how stale the chart's price data is.
+    Two earlier approaches led here, each fixing a real problem the last
+    one had: bar-COUNT fields (FormedBarsAgo/RetestedBarsAgo,
+    reconstructed as `now - bars_ago * timeframe_seconds` using
+    tv_scraper's OWN wall clock for BOTH halves) silently drifted by
+    however much the underlying price FEED was delayed (confirmed live: a
+    Pepperstone BTC CFD feed a few minutes behind the real market), since
+    bar_index/bars_ago is anchored to the feed's own lagging notion of
+    "now". Elapsed-SECONDS fields (FormedSecondsAgo/RetestedSecondsAgo,
+    `now - seconds_ago`, Pine computing the seconds itself from its own
+    timenow) fixed the feed-delay problem, but still needed tv_scraper's
+    own wall clock for HALF the subtraction -- introducing a few seconds
+    of poll-to-poll jitter from ordinary timing skew, needing a rounding
+    step and a tolerance window to absorb. That tolerance window turned
+    out to be a real liability of its own -- see _find_resurrectable's own
+    comment for the confirmed-live case where it merged two unrelated
+    zones' identities. The current day/minute fields need NO input from
+    tv_scraper's own clock at all -- the SAME real zone reconstructs to
+    the identical value on every single poll, by construction, so
+    matching can be exact instead of tolerance-based.
 
-    A hint drives FOUR pieces of behavior, in order of how much trust
+    A hint drives FIVE pieces of behavior, in order of how much trust
     they place in it:
       1. Resurrection (_find_resurrectable): on a zone's first sighting,
          its formed_hint is checked against every zone this store already
-         knows about (active or mitigated) within _RESURRECT_TOLERANCE_
-         SECONDS. A match means this "new" sighting is really a zone that
-         got falsely marked mitigated (pure top-4 display churn, not a
-         genuine LuxAlgo invalidation) reappearing -- its real start_time
-         and retested_at are restored instead of minting a duplicate
-         identity with a blank history.
+         knows about (active or mitigated) for an EXACT start_time AND
+         price match. A match means this "new" sighting is really a zone
+         that got falsely marked mitigated (pure top-4 display churn, not
+         a genuine LuxAlgo invalidation) reappearing -- its real
+         start_time and retested_at are restored instead of minting a
+         duplicate identity with a blank history.
       2. The row-corruption consistency guard: on every LATER sighting of
          an already-known zone, this poll's formed_hint is compared
-         against that zone's own already-persisted start_time. Disagreeing
-         by more than the tolerance means this poll's Data Window row for
-         this zone was probably caught mid-reshuffle (a scroll glitch) --
-         both formed_seconds_ago and retested_seconds_ago are distrusted
-         for this poll only, falling back to plain wall-clock/close-based
-         behavior rather than let corrupted numbers get recorded.
+         against that zone's own already-persisted start_time. ANY
+         disagreement means this poll's Data Window row for this zone was
+         probably caught mid-reshuffle (a scroll glitch) -- both
+         formed_minutes_ref and retested_minutes_ref are distrusted for
+         this poll only, falling back to plain wall-clock/close-based
+         behavior rather than let corrupted numbers get
+         recorded.
       3. The 2-poll retest confirmation gate (pending_retest): a NEW
          retested_hint isn't trusted until the exact same value appears on
          two consecutive polls -- guards against a row-level scroll
-         glitch corrupting just the retest number for one poll
-         independently of the formation number (so neither of the above
-         two checks alone would catch it).
+         glitch corrupting just the retest fields for one poll
+         independently of the formation fields (so neither of the above
+         two checks alone would catch it). Still needed even though hints
+         are now deterministic -- this protects against a DIFFERENT
+         failure (a bad single-poll read), not clock jitter.
       4. Correcting an ALREADY-recorded retested_at (RetestTracker.mark's
          force=True): confirmed live -- a value cached before this
-         session's switch from bar-count to seconds-based Pine timestamps
-         stayed stuck (e.g. showing a retest 5 minutes later than the
-         chart's own dot), because nothing ever re-checked an already-set
-         value against fresh hints. A confirmed_retest_hint that
-         DISAGREES with what's already recorded goes through the SAME
-         2-poll confirmation gate as a first-time recording before it's
-         trusted enough to overwrite -- one poll's disagreement could
-         itself be the corrupted read, not proof the cached value is
-         wrong.
+         session's switch to real calendar-based Pine timestamps stayed
+         stuck (e.g. showing a retest 5 minutes later than the chart's
+         own dot), because nothing ever re-checked an already-set value
+         against fresh hints. A confirmed_retest_hint that DISAGREES with
+         what's already recorded goes through the SAME 2-poll
+         confirmation gate as a first-time recording before it's trusted
+         enough to overwrite -- one poll's disagreement could itself be
+         the corrupted read, not proof the cached value is wrong.
       5. Correcting an ALREADY-recorded start_time (FirstSeenStore.restore()
          + ZoneStore.rekey()): the same class of bug as #4, but for
          formation time instead of retest time -- confirmed live on a
@@ -413,8 +438,8 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
          docstring) rather than leaving an orphaned duplicate behind.
          Some zones (old enough that Pine's [] operator's 10000-bar hard
          ceiling makes formed_hint permanently unavailable -- see
-         seconds_since_formed()'s own comment) can never be corrected this
-         way at all; that's a known, accepted gap for very old zones, not
+         bar_day_minute()'s own comment) can never be corrected this way
+         at all; that's a known, accepted gap for very old zones, not
          something this mechanism claims to solve."""
     price_field = "btm" if direction == "bull" else "top"
     now = int(time.time())
@@ -427,12 +452,9 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
         price_key = _price_key(zone)
         is_first_sighting = price_key not in previously_seen
 
-        formed_seconds_ago = zone.get("formed_seconds_ago")
-        formed_hint: Optional[int] = None
-        if formed_seconds_ago is not None:
-            formed_hint = _round_hint(now - formed_seconds_ago)
+        formed_hint = _reconstruct_hint(zone.get("formed_minutes_ref"))
 
-        seconds_ago_consistent = True
+        hints_consistent = True
         if is_first_sighting:
             resurrect = _find_resurrectable(zones, symbol, timeframe, direction, formed_hint,
                                             zone["top"], zone["btm"])
@@ -445,8 +467,8 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
                                                         hint=formed_hint)
         else:
             start_time = first_seen.get_or_create(symbol, timeframe, direction, price_key)
-            if formed_hint is not None and abs(formed_hint - start_time) > _RESURRECT_TOLERANCE_SECONDS:
-                seconds_ago_consistent = False
+            if formed_hint is not None and formed_hint != start_time:
+                hints_consistent = False
                 # Disagreement could be THIS poll's row corrupted (the
                 # common case, see the comment above) -- but it could also
                 # mean the CACHED start_time itself is wrong, e.g. a
@@ -470,7 +492,7 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
                     if zones.rekey(symbol, timeframe, direction, start_time, formed_hint):
                         first_seen.restore(symbol, timeframe, direction, price_key, formed_hint)
                         start_time = formed_hint
-                        seconds_ago_consistent = True
+                        hints_consistent = True
                     else:
                         new_pending_formed[price_key] = formed_hint
                 else:
@@ -491,15 +513,14 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
         retested_at = retested.check(symbol, timeframe, direction, price_key,
                                      close_price, zone["btm"], zone["top"], is_first_sighting)
 
-        # retested_hint: same seconds-ago reconstruction as formed_hint, but
-        # for the retest bar -- distrusted entirely this poll if the
-        # consistency guard above already flagged this row as corrupted
-        # (the same scroll glitch that corrupts one seconds_ago value on a
-        # row very often corrupts the other too).
-        retested_seconds_ago = zone.get("retested_seconds_ago")
+        # retested_hint: same reconstruction as formed_hint, but for the
+        # retest bar -- distrusted entirely this poll if the consistency
+        # guard above already flagged this row as corrupted (the same
+        # scroll glitch that corrupts one field on a row very often
+        # corrupts the others too).
         retested_hint: Optional[int] = None
-        if seconds_ago_consistent and retested_seconds_ago is not None:
-            retested_hint = _round_hint(now - retested_seconds_ago)
+        if hints_consistent:
+            retested_hint = _reconstruct_hint(zone.get("retested_minutes_ref"))
 
         confirmed_retest_hint: Optional[int] = None
         if retested_hint is not None:
@@ -587,13 +608,13 @@ _last_seen: dict[tuple[str, str, str], dict[int, int]] = {}
 # Same keying, tracking consecutive missed-poll counts per price_key for
 # the mitigation debounce -- see _apply_direction's docstring.
 _missing_streak: dict[tuple[str, str, str], dict[int, int]] = {}
-# Same keying, tracking retested_seconds_ago-derived hints awaiting 2-poll
+# Same keying, tracking RetestedMinutesRef-derived hints awaiting 2-poll
 # confirmation per price_key -- see _apply_direction's docstring on the
 # 2-poll retest confirmation gate.
 _pending_retest: dict[tuple[str, str, str], dict[int, int]] = {}
-# Same keying, tracking formed_seconds_ago-derived hints awaiting 2-poll
-# confirmation per price_key -- see _apply_direction's docstring point 5
-# on correcting an already-cached start_time.
+# Same keying, tracking FormedMinutesRef-derived hints awaiting 2-poll
+# confirmation per price_key -- see _apply_direction's docstring
+# point 5 on correcting an already-cached start_time.
 _pending_formed: dict[tuple[str, str, str], dict[int, int]] = {}
 # Keyed by pane_label -- the last (symbol, timeframe) this pane
 # successfully processed. See run_once_pane's own comment on the

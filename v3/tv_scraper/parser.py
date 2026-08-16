@@ -63,17 +63,24 @@ _ZONE_LABELS = {
         # tv_scraper's own live-Close approximation in _apply_direction --
         # see that indicator's mark_retests()/"Retested" Data Window plots.
         ("Retested", "retested"),
-        # Elapsed real SECONDS, not raw timestamps -- see OBD_SecretTrader.
-        # pine's own comment on why (a raw start_time value once broke this
-        # chart's price-scale autoscale), computed by Pine itself from its
-        # own timenow against the formation/retest bar's real time[] --
-        # replaces the earlier bar-COUNT fields (FormedBarsAgo/
-        # RetestedBarsAgo, scraper.py converting bars*timeframe_seconds
-        # using ITS OWN wall clock), which was silently wrong by however
-        # much the underlying price feed itself is delayed. See that Pine
-        # function's own comment.
-        ("FormedSecondsAgo", "formed_seconds_ago"),
-        ("RetestedSecondsAgo", "retested_seconds_ago"),
+        # Real UTC timestamp of the formation/retest bar, as minutes
+        # since a fixed 2025-01-01 UTC reference -- not a raw timestamp
+        # (which once broke this chart's price-scale autoscale -- see
+        # OBD_SecretTrader.pine's own comment). Replaces the earlier
+        # FormedSecondsAgo/RetestedSecondsAgo fields (elapsed seconds,
+        # requiring scraper.py to subtract from ITS OWN wall clock to
+        # reconstruct a real timestamp -- a few seconds of poll-to-poll
+        # jitter from ordinary timing skew). This value needs no
+        # subtraction from anything live at all -- the SAME real zone
+        # reconstructs to the exact same value on every poll, by
+        # construction. (A FormedDay/FormedMinute/RetestedDay/
+        # RetestedMinute two-value split briefly existed here, but got
+        # collapsed back to one field per formed/retest when it pushed
+        # this indicator's total plot count over Pine's hard
+        # 64-per-script ceiling -- confirmed live: "RE10140 ... too many
+        # plots (66)".)
+        ("FormedMinutesRef", "formed_minutes_ref"),
+        ("RetestedMinutesRef", "retested_minutes_ref"),
     )
     # no Start -- see ob_detector_webhook.pine.
 }
@@ -153,13 +160,13 @@ def parse_data_window(text: str) -> ParsedState:
                 if "retested" in f:
                     zone["retested"] = f["retested"] > 0.5
                 # int(), not left as float -- Data Window numbers always
-                # parse as float, but these are whole seconds. na (unmatched
-                # by _NUMBER_RE) already comes through as simply absent from
-                # f, same as any other field.
-                if "formed_seconds_ago" in f:
-                    zone["formed_seconds_ago"] = int(f["formed_seconds_ago"])
-                if "retested_seconds_ago" in f:
-                    zone["retested_seconds_ago"] = int(f["retested_seconds_ago"])
+                # parse as float, but these are whole minutes. na
+                # (unmatched by _NUMBER_RE) already comes through as
+                # simply absent from f, same as any other field.
+                if "formed_minutes_ref" in f:
+                    zone["formed_minutes_ref"] = int(f["formed_minutes_ref"])
+                if "retested_minutes_ref" in f:
+                    zone["retested_minutes_ref"] = int(f["retested_minutes_ref"])
                 out.append(zone)
         return out
 
