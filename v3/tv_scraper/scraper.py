@@ -262,12 +262,19 @@ def _reconstruct_hint(minutes_since_ref: Optional[int]) -> Optional[int]:
 
 def _find_resurrectable(zone_store: ZoneStore, symbol: str, timeframe: str, direction: str,
                          formed_hint: Optional[int], top: float, btm: float) -> Optional[TVZone]:
-    """Looks for an existing ZoneStore entry (active OR already-mitigated --
-    ZoneStore never deletes an entry on mitigation, just flags it, so a
-    falsely-mitigated real zone is still sitting right there to match
-    against) at the SAME price (top/btm, matching _price_key's own
-    tolerance) whose own start_time EXACTLY matches this poll's freshly-
-    reconstructed formed_hint. Returns that entry, or None.
+    """Looks for an existing, still-live ZoneStore entry at the SAME price
+    (top/btm, matching _price_key's own tolerance) whose own start_time
+    EXACTLY matches this poll's freshly-reconstructed formed_hint. Returns
+    that entry, or None.
+
+    ZoneStore.apply_mitigated() now DELETES a zone on confirmed mitigation
+    (product decision: the store holds current state, not history -- see
+    that method's own docstring for the trade-off), so this can only ever
+    resurrect a zone that's still sitting in the store un-mitigated -- e.g.
+    one that's mid-debounce (missing 1 poll, not yet the 2 required to
+    count as mitigated). A zone that already crossed the mitigation
+    threshold and got deleted, then later reappeared, mints a fresh
+    identity instead of recovering its old one.
 
     Exact match, not a tolerance window -- formed_hint is now a
     deterministic reconstruction (see _reconstruct_hint's own docstring),

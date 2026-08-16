@@ -86,14 +86,28 @@ class ZoneStore:
         self._save()
 
     def apply_mitigated(self, symbol: str, timeframe: str, direction: str, data: dict) -> None:
+        """Removes the zone entirely rather than flagging it -- by explicit
+        design, this store only ever holds zones that are still live
+        (formed, possibly retested, not yet invalidated). A fully mitigated
+        zone has nothing further to say for bias/entry logic, so there's no
+        reason to keep it around.
+
+        Trade-off, stated plainly: this DOES remove the safety net
+        _find_resurrectable() used to lean on for a zone falsely read as
+        mitigated (pure top-4 Data Window display churn pushing a real,
+        still-live zone out of view for longer than the 2-poll debounce in
+        _apply_direction) -- previously such a zone could reappear under its
+        OWN original identity once it churned back into view; now it mints
+        a fresh start_time and starts its retest history over. The 2-poll
+        debounce is still the FIRST line of defense against ordinary
+        transient churn; this only matters for churn that outlasts it,
+        which is rarer. Kept simple (delete on confirmed mitigation) per
+        explicit product decision: the scraper's job is current zone
+        state (formed/retested/invalidated), not a full history."""
         key = self._key(symbol, timeframe, direction)
-        zone = self._zones.get(key, {}).get(int(data["start_time"]))
-        if zone is None:
+        zones = self._zones.get(key, {})
+        if zones.pop(int(data["start_time"]), None) is None:
             return  # mitigation for a zone we never saw formed -- ignore
-        zone.virgin = False
-        zone.mitigated_time = int(data["mitigated_time"])
-        price = data.get("mitigated_price")
-        zone.mitigated_price = float(price) if price is not None else None
         self._save()
 
     def apply_retested(self, symbol: str, timeframe: str, direction: str, data: dict) -> None:
@@ -119,13 +133,12 @@ class ZoneStore:
         return sorted(self._zones.get(key, {}).values(), key=lambda z: -z.start_time)
 
     def get(self, symbol: str, timeframe: str, direction: str, start_time: int) -> Optional[TVZone]:
-        """Direct lookup by exact start_time -- used by
-        scraper._find_resurrectable() to check whether a candidate
-        formation-time match (within its own tolerance window) corresponds
-        to a real, already-known zone (including a currently-mitigated
-        one, so a false-mitigation resurrection has something to resurrect
-        FROM) before deciding to reuse its identity instead of minting a
-        fresh one."""
+        """Direct lookup by exact start_time. Currently unused by scraper.py
+        (which matches via zones() + price instead -- see
+        _find_resurrectable) but kept as a straightforward accessor. Note
+        apply_mitigated() now DELETES on confirmed mitigation (see its own
+        docstring), so this will return None for any zone that's already
+        been fully mitigated -- it only finds zones still live."""
         key = self._key(symbol, timeframe, direction)
         return self._zones.get(key, {}).get(start_time)
 
