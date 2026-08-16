@@ -129,6 +129,50 @@ class ZoneStore:
         key = self._key(symbol, timeframe, direction)
         return self._zones.get(key, {}).get(start_time)
 
+    def rekey(self, symbol: str, timeframe: str, direction: str,
+              old_start_time: int, new_start_time: int) -> bool:
+        """Moves an entry from old_start_time to new_start_time within this
+        (symbol, timeframe, direction) store, preserving every other field
+        -- used when FirstSeenStore corrects an already-cached start_time
+        (see that module's peek()/restore() and the confirmed-live case in
+        their own docstrings: a rapidly top-4-churning zone can get a
+        wall-clock-fallback start_time locked in on a poll where its real
+        hint happened to be momentarily unavailable, with nothing to ever
+        re-check it afterward). This store is keyed BY start_time, so
+        correcting the value alone would leave the OLD key sitting there
+        as an orphaned duplicate forever -- moving it keeps exactly one
+        entry per real zone. A no-op (returns False) if old_start_time
+        isn't present (already moved, or never existed under that key).
+
+        Also a no-op if new_start_time is ALREADY occupied by a DIFFERENT
+        zone (different top/btm) -- confirmed live: two entirely separate
+        real zones independently reconstructed the exact same rounded
+        minute as their formation hint (one from a fresh Pine-derived
+        formed_hint, the other from an old cached value dating back to
+        before this zone's own hint became permanently unavailable -- see
+        seconds_since_formed()'s 10000-bar ceiling comment), and blindly
+        overwriting silently destroyed the first zone's entire ZoneStore
+        record. Refusing the move here is safer than corrupting a
+        DIFFERENT zone's history -- the caller's own 2-poll confirmation
+        gate will simply try again next poll, and by then either the
+        collision has resolved (the other zone mitigated) or it hasn't,
+        in which case retrying forever is still safer than merging two
+        real zones into one. Returns True if the move happened."""
+        key = self._key(symbol, timeframe, direction)
+        zones = self._zones.get(key, {})
+        zone = zones.pop(old_start_time, None)
+        if zone is None:
+            return False
+        occupant = zones.get(new_start_time)
+        if occupant is not None and (abs(occupant.top - zone.top) > 0.01
+                                      or abs(occupant.btm - zone.btm) > 0.01):
+            zones[old_start_time] = zone  # put it back -- refuse the move
+            return False
+        zone.start_time = new_start_time
+        zones[new_start_time] = zone
+        self._save()
+        return True
+
     def reload(self) -> None:
         """Re-reads the backing file -- see AtrStore.reload()'s docstring
         for the full rationale (same bug, same fix, same class of store)."""

@@ -250,13 +250,23 @@ def _round_hint(raw: int) -> int:
 
 
 def _find_resurrectable(zone_store: ZoneStore, symbol: str, timeframe: str, direction: str,
-                         formed_hint: Optional[int]) -> Optional[TVZone]:
+                         formed_hint: Optional[int], top: float, btm: float) -> Optional[TVZone]:
     """Looks for an existing ZoneStore entry (active OR already-mitigated --
     ZoneStore never deletes an entry on mitigation, just flags it, so a
     falsely-mitigated real zone is still sitting right there to match
-    against) whose own start_time is within _RESURRECT_TOLERANCE_SECONDS of
-    this poll's freshly-computed formed_hint. Returns the closest match, or
-    None.
+    against) at the SAME price (top/btm, matching _price_key's own
+    tolerance) whose own start_time is within _RESURRECT_TOLERANCE_SECONDS
+    of this poll's freshly-computed formed_hint. Returns the closest
+    matching entry, or None.
+
+    top/btm are REQUIRED, not optional -- confirmed live (BTCUSD/M3): two
+    completely unrelated real zones (62866.36 and 61745.45) happened to
+    reconstruct formed_hints within the same 60-second tolerance window of
+    each other, and matching by time alone resurrected the WRONG one --
+    silently merging a brand-new zone's identity into a totally different
+    zone's history. Filtering to the same price FIRST (before ranking by
+    time proximity) is what actually makes "the same real zone reappearing"
+    a safe conclusion instead of a coincidence.
 
     This is what lets a zone that got falsely read as mitigated (pure
     top-4 Data Window display churn -- newer zones pushing it out of the
@@ -268,6 +278,8 @@ def _find_resurrectable(zone_store: ZoneStore, symbol: str, timeframe: str, dire
     best: Optional[TVZone] = None
     best_diff: Optional[int] = None
     for z in zone_store.zones(symbol, timeframe, direction):
+        if abs(z.top - top) > 0.01 or abs(z.btm - btm) > 0.01:
+            continue
         diff = abs(z.start_time - formed_hint)
         if diff <= _RESURRECT_TOLERANCE_SECONDS and (best_diff is None or diff < best_diff):
             best = z
@@ -278,8 +290,9 @@ def _find_resurrectable(zone_store: ZoneStore, symbol: str, timeframe: str, dire
 def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: RetestTracker,
                       symbol: str, timeframe: str, direction: str, current: list[dict],
                       previously_seen: dict[int, int], missing_streak: dict[int, int],
-                      pending_retest: dict[int, int],
-                      close_price: Optional[float]) -> tuple[dict[int, int], dict[int, int], dict[int, int]]:
+                      pending_retest: dict[int, int], pending_formed: dict[int, int],
+                      close_price: Optional[float]
+                      ) -> tuple[dict[int, int], dict[int, int], dict[int, int], dict[int, int]]:
     """Applies formed zones for one direction and marks any zone that has
     dropped out of view for _MITIGATION_DEBOUNCE_POLLS consecutive polls as
     mitigated -- LuxAlgo only removes a zone once it's actually violated, so
@@ -385,12 +398,30 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
          2-poll confirmation gate as a first-time recording before it's
          trusted enough to overwrite -- one poll's disagreement could
          itself be the corrupted read, not proof the cached value is
-         wrong."""
+         wrong.
+      5. Correcting an ALREADY-recorded start_time (FirstSeenStore.restore()
+         + ZoneStore.rekey()): the same class of bug as #4, but for
+         formation time instead of retest time -- confirmed live on a
+         rapidly top-4-churning zone (mitigated and reappeared within 26
+         seconds): its own valid formed_hint happened to read na on the
+         exact poll it reappeared, locking in a wall-clock-fallback
+         start_time with nothing to ever re-check it afterward. Same
+         2-poll confirmation gate (pending_formed) before a disagreeing
+         formed_hint is trusted enough to overwrite the cached start_time
+         -- and since ZoneStore is keyed BY start_time, the correction
+         also moves that entry to its new key (see ZoneStore.rekey()'s own
+         docstring) rather than leaving an orphaned duplicate behind.
+         Some zones (old enough that Pine's [] operator's 10000-bar hard
+         ceiling makes formed_hint permanently unavailable -- see
+         seconds_since_formed()'s own comment) can never be corrected this
+         way at all; that's a known, accepted gap for very old zones, not
+         something this mechanism claims to solve."""
     price_field = "btm" if direction == "bull" else "top"
     now = int(time.time())
     seen_now: dict[int, int] = {}
     new_missing_streak: dict[int, int] = {}
     new_pending_retest: dict[int, int] = {}
+    new_pending_formed: dict[int, int] = {}
 
     for zone in current:
         price_key = _price_key(zone)
@@ -403,7 +434,8 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
 
         seconds_ago_consistent = True
         if is_first_sighting:
-            resurrect = _find_resurrectable(zones, symbol, timeframe, direction, formed_hint)
+            resurrect = _find_resurrectable(zones, symbol, timeframe, direction, formed_hint,
+                                            zone["top"], zone["btm"])
             if resurrect is not None:
                 start_time = resurrect.start_time
                 first_seen.restore(symbol, timeframe, direction, price_key, start_time)
@@ -415,6 +447,34 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
             start_time = first_seen.get_or_create(symbol, timeframe, direction, price_key)
             if formed_hint is not None and abs(formed_hint - start_time) > _RESURRECT_TOLERANCE_SECONDS:
                 seconds_ago_consistent = False
+                # Disagreement could be THIS poll's row corrupted (the
+                # common case, see the comment above) -- but it could also
+                # mean the CACHED start_time itself is wrong, e.g. a
+                # rapidly top-4-churning zone that got a wall-clock
+                # fallback locked in on a poll where its own formed_hint
+                # happened to read na. Only correct once the SAME
+                # disagreeing hint is confirmed on two consecutive polls
+                # -- same protection a first-time recording already gets,
+                # see this function's own docstring point 5.
+                if pending_formed.get(price_key) == formed_hint:
+                    # rekey() first, and only follow through on the
+                    # cache/start_time update if it actually succeeded --
+                    # see its own docstring for the confirmed-live
+                    # collision this guards (formed_hint landing on a
+                    # minute a COMPLETELY DIFFERENT real zone already
+                    # occupies, which would otherwise silently merge two
+                    # zones' histories into one). Leaving pending_formed
+                    # populated (not clearing it here) means a refused
+                    # correction keeps retrying every poll instead of
+                    # silently giving up.
+                    if zones.rekey(symbol, timeframe, direction, start_time, formed_hint):
+                        first_seen.restore(symbol, timeframe, direction, price_key, formed_hint)
+                        start_time = formed_hint
+                        seconds_ago_consistent = True
+                    else:
+                        new_pending_formed[price_key] = formed_hint
+                else:
+                    new_pending_formed[price_key] = formed_hint
 
         seen_now[price_key] = start_time
 
@@ -514,7 +574,7 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
         # price_keys seen THIS poll), so a mitigated zone's stale pending
         # hint simply isn't carried forward.
 
-    return seen_now, new_missing_streak, new_pending_retest
+    return seen_now, new_missing_streak, new_pending_retest, new_pending_formed
 
 
 # Keyed by (symbol, timeframe, direction) rather than just pane label --
@@ -531,6 +591,10 @@ _missing_streak: dict[tuple[str, str, str], dict[int, int]] = {}
 # confirmation per price_key -- see _apply_direction's docstring on the
 # 2-poll retest confirmation gate.
 _pending_retest: dict[tuple[str, str, str], dict[int, int]] = {}
+# Same keying, tracking formed_seconds_ago-derived hints awaiting 2-poll
+# confirmation per price_key -- see _apply_direction's docstring point 5
+# on correcting an already-cached start_time.
+_pending_formed: dict[tuple[str, str, str], dict[int, int]] = {}
 # Keyed by pane_label -- the last (symbol, timeframe) this pane
 # successfully processed. See run_once_pane's own comment on the
 # symbol-switch guard this enables.
@@ -618,13 +682,14 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
 
     for direction, direction_zones in (("bull", parsed.bull_zones), ("bear", parsed.bear_zones)):
         cache_key = (symbol, timeframe, direction)
-        seen, streak, pending = _apply_direction(
+        seen, streak, pending_retest, pending_formed = _apply_direction(
             zones, first_seen, retested, symbol, timeframe, direction, direction_zones,
             _last_seen.get(cache_key, {}), _missing_streak.get(cache_key, {}),
-            _pending_retest.get(cache_key, {}), parsed.close)
+            _pending_retest.get(cache_key, {}), _pending_formed.get(cache_key, {}), parsed.close)
         _last_seen[cache_key] = seen
         _missing_streak[cache_key] = streak
-        _pending_retest[cache_key] = pending
+        _pending_retest[cache_key] = pending_retest
+        _pending_formed[cache_key] = pending_formed
 
     # Raw mirror -- exactly this poll's parsed Bull1-4/Bear1-4 (top/btm/
     # retested) and Close/ATR, no history, no interpretation. See

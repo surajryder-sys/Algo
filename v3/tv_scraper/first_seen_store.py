@@ -101,6 +101,19 @@ class FirstSeenStore:
         self._save()
         return candidate
 
+    def peek(self, symbol: str, timeframe: str, direction: str, price_key: int) -> int | None:
+        """Read-only lookup -- unlike get_or_create(), never assigns
+        anything, just reports the currently-known start_time (or None).
+        Used by scraper.py to check whether a fresh formed_hint disagrees
+        with what's already cached, before attempting a correction via
+        restore() -- see _apply_direction's own comment on the confirmed-
+        live case this guards (a rapidly top-4-churning zone getting a
+        wall-clock-fallback start_time locked in on a poll where its hint
+        happened to be momentarily unavailable, with nothing to ever
+        re-check it afterward)."""
+        key = self._key(symbol, timeframe, direction, price_key)
+        return self._seen.get(key)
+
     def restore(self, symbol: str, timeframe: str, direction: str, price_key: int,
                 start_time: int) -> None:
         """Re-establishes a first-seen entry at an EXACT known value --
