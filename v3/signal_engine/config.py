@@ -41,6 +41,12 @@ class Config:
     symbols: list  # list[SymbolConfig]
     poll_seconds: float
     trade_state_file: str
+    # Reserved ahead of Execution Bridge actually placing MT5 orders off
+    # Trend Manager's signals -- not used for anything yet (nothing here
+    # touches MT5). Settled now, following this repo's existing
+    # YYMMDDNN magic-number convention (see .env.example's other bots),
+    # so it's already decided and collision-free before it's ever live.
+    magic_number: int
 
 
 def load_config() -> Config:
@@ -67,4 +73,5 @@ def load_config() -> Config:
         ],
         poll_seconds=float(os.getenv("SIGNAL_ENGINE_POLL_SECONDS", "5.0")),
         trade_state_file=os.getenv("SIGNAL_ENGINE_TRADE_STATE_FILE", "trend_manager_trade_state.json"),
+        magic_number=int(os.getenv("TREND_MANAGER_MAGIC_NUMBER", "26081701")),
     )
