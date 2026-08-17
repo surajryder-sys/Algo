@@ -131,6 +131,15 @@ def run_once(cfg: Config, alerted: AlertedZoneStore, confirmation: ConfirmationT
                 # alert lost, only delayed by however long tv_scraper
                 # takes to write its next poll for this symbol.
                 continue
+            if not confirmation.is_stable(sym_cfg.symbol, key, cfg.min_visible_seconds):
+                # Data-quality-confirmed but hasn't stayed in the
+                # eligible set long enough yet -- see ConfirmationTracker
+                # docstring point 2. Confirmed live: a zone can pass the
+                # 2-write check and still get superseded/pushed out of
+                # the chart's visible top-4 within minutes, which is what
+                # made several prior alerts look like phantoms after the
+                # fact even though the data was accurate at fire time.
+                continue
             if alerted.already_alerted(sym_cfg.symbol, zone["timeframe"], zone["direction"], zone["start_time"]):
                 continue
 
@@ -138,16 +147,20 @@ def run_once(cfg: Config, alerted: AlertedZoneStore, confirmation: ConfirmationT
             try:
                 send_message(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
                 alerted.mark_alerted(sym_cfg.symbol, zone["timeframe"], zone["direction"], zone["start_time"])
-                # Full range + trigger price logged here (not just the
-                # zone identity) -- confirmed live this was needed: a
-                # user-reported "alert fired but nothing shows on the
-                # actual chart" case couldn't be diagnosed after the
-                # fact because the zone had already aged out of
-                # tv_scraper's own store by the time it was investigated,
-                # and this line originally only logged the bare identity.
+                # Full zone snapshot (every field, not just range/price)
+                # logged here as JSON -- confirmed live this was needed
+                # multiple times: several user-reported "alert fired but
+                # nothing shows on the actual chart" cases couldn't be
+                # fully diagnosed after the fact because the zone had
+                # already aged out of tv_scraper's own store by the time
+                # it was investigated, and the old line only logged range
+                # + trigger price, not formed_time_confirmed or how long
+                # the zone had been visible before firing.
                 print(f"[alert_manager] sent alert: {sym_cfg.symbol} {zone['timeframe']} {zone['direction']} "
                       f"@ {zone['start_time']} range={zone['btm']:.2f}-{zone['top']:.2f} "
-                      f"trigger_price={price:.2f}")
+                      f"trigger_price={price:.2f} "
+                      f"visible_seconds={confirmation.visible_seconds(sym_cfg.symbol, key):.0f} "
+                      f"zone_snapshot={json.dumps(zone)}")
             except Exception as exc:
                 # Deliberately NOT marked alerted on a failed send -- a
                 # transient Telegram/network error should retry next

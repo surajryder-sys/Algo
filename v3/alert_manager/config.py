@@ -43,6 +43,18 @@ class Config:
     # all -- see project_tv_scraper_multi_symbol_setup) before this
     # exclusion was even asked for.
     excluded_timeframes: frozenset
+    # Minimum wall-clock seconds a zone must have been continuously
+    # virgin+data-confirmed (see ConfirmationTracker) before Alert Manager
+    # will fire on it, on top of (not instead of) the 2-distinct-write
+    # data-quality confirmation. Added 2026-08-17 after several confirmed
+    # reports (XAUUSD M30, ETHUSD H2, XAUUSD H1/M15/M5 simultaneously) of
+    # alerts firing correctly against tv_scraper's own snapshot at that
+    # instant, but the zone getting superseded/pushed out of the chart's
+    # visible top-4 boxes within minutes -- by the time the user checked,
+    # it looked like a phantom alert even though nothing was actually
+    # wrong with the data at fire time. This trades a little latency for
+    # only alerting on zones that stay visible long enough to verify.
+    min_visible_seconds: float
 
 
 def load_config() -> Config:
@@ -67,4 +79,5 @@ def load_config() -> Config:
         ],
         alerted_state_file=os.getenv("ALERT_MANAGER_ALERTED_STATE_FILE", "alert_manager_alerted_zones.json"),
         excluded_timeframes=frozenset(t.strip() for t in excluded_raw.split(",") if t.strip()),
+        min_visible_seconds=float(os.getenv("ALERT_MANAGER_MIN_VISIBLE_SECONDS", "180")),
     )
