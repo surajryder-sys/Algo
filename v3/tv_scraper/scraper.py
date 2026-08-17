@@ -578,6 +578,11 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
             "detected_price": close_price if close_price is not None else zone[price_field],
             "virgin": retested_at is None,
             "retested_at": retested_at,
+            # See ZoneStore.TVZone.formed_time_confirmed's own docstring
+            # -- False whenever formed_hint is na this poll (Pine's
+            # 10000-bar [] ceiling exceeded), meaning start_time is a
+            # wall-clock guess, not this zone's real formation time.
+            "formed_time_confirmed": formed_hint is not None,
         })
 
     for price_key in previously_seen.keys() - seen_now.keys():

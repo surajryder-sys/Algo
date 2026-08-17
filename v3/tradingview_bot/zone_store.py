@@ -29,6 +29,21 @@ class TVZone:
     # tv_scraper/retest_tracker.py for why this is "first observed", not
     # the retest bar's true own time.
     retested_at: Optional[int] = None
+    # True only when start_time came from a real Pine-provided
+    # FormedMinutesRef hint this poll, False when it's a wall-clock
+    # guess (Pine's own history-lookback ceiling exceeded -- see
+    # OBD_SecretTrader.pine's own comment on the [] operator's hard
+    # 10000-bar limit, ~35 days on M5). Confirmed live: a zone past that
+    # ceiling gets timestamped "as if formed just now" by the wall-clock
+    # fallback, even though it could genuinely be over a month old and
+    # already gone through its real retest/mitigation cycle -- v3's
+    # Alert Manager uses this flag to skip alerting on such zones
+    # entirely, since their apparent freshness is fabricated, not real.
+    # Defaults True so records written before this field existed don't
+    # break on load -- harmless, since apply_formed() rewrites every
+    # still-visible zone's record on its very next poll anyway, so the
+    # default only ever matters for a single split-second.
+    formed_time_confirmed: bool = True
 
 
 class ZoneStore:
@@ -82,6 +97,7 @@ class ZoneStore:
             detected_price=float(data["detected_price"]),
             virgin=bool(data.get("virgin", True)),
             retested_at=int(retested_at) if retested_at is not None else None,
+            formed_time_confirmed=bool(data.get("formed_time_confirmed", True)),
         )
         self._save()
 

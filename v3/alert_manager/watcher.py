@@ -18,6 +18,7 @@ from pathlib import Path
 from v3.alert_manager import mt5_price
 from v3.alert_manager.alerted_store import AlertedZoneStore
 from v3.alert_manager.config import Config, load_config
+from v3.alert_manager.confirmation_tracker import ConfirmationTracker
 from v3.alert_manager.telegram_client import send_message
 
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -57,8 +58,18 @@ def _read_zones(path: str) -> list[dict]:
                 "top": zone["top"],
                 "btm": zone["btm"],
                 "virgin": zone.get("virgin", True),
+                # False means start_time is a wall-clock guess, not a
+                # real Pine-confirmed formation time -- see
+                # ZoneStore.TVZone.formed_time_confirmed's own docstring.
+                # Default True matches that field's own pre-fix-data
+                # default, not a design choice made here.
+                "formed_time_confirmed": zone.get("formed_time_confirmed", True),
             })
     return out
+
+
+def _zone_key(symbol: str, zone: dict) -> str:
+    return f"{symbol}|{zone['timeframe']}|{zone['direction']}|{zone['start_time']}"
 
 
 def _format_alert(symbol: str, zone: dict, price: float) -> str:
@@ -80,7 +91,7 @@ def _format_alert(symbol: str, zone: dict, price: float) -> str:
     )
 
 
-def run_once(cfg: Config, alerted: AlertedZoneStore) -> None:
+def run_once(cfg: Config, alerted: AlertedZoneStore, confirmation: ConfirmationTracker) -> None:
     for sym_cfg in cfg.symbols:
         try:
             price = mt5_price.get_mid_price(sym_cfg.symbol)
@@ -88,12 +99,37 @@ def run_once(cfg: Config, alerted: AlertedZoneStore) -> None:
             print(f"[alert_manager] {sym_cfg.symbol} price ERROR: {exc}")
             continue
 
-        for zone in _read_zones(sym_cfg.zone_state_file):
+        zones = _read_zones(sym_cfg.zone_state_file)
+
+        # Eligible = virgin AND formed_time_confirmed (see
+        # ZoneStore.TVZone's own docstring -- skips zones tv_scraper can
+        # only wall-clock-guess a formation time for, which could
+        # genuinely be over a month old and already retested/mitigated
+        # in reality despite looking "just formed"). Excluded timeframes
+        # are filtered out of the confirmation set too, not just the
+        # final alert check -- no reason to track staleness for
+        # timeframes that can never fire an alert anyway.
+        eligible_now = {
+            _zone_key(sym_cfg.symbol, z) for z in zones
+            if z["virgin"] and z["formed_time_confirmed"] and z["timeframe"] not in cfg.excluded_timeframes
+        }
+        confirmation.update(sym_cfg.symbol, sym_cfg.zone_state_file, eligible_now)
+
+        for zone in zones:
             if zone["timeframe"] in cfg.excluded_timeframes:
                 continue
-            if not zone["virgin"]:
+            if not zone["virgin"] or not zone["formed_time_confirmed"]:
                 continue
             if not (zone["btm"] <= price <= zone["top"]):
+                continue
+            key = _zone_key(sym_cfg.symbol, zone)
+            if not confirmation.is_confirmed(sym_cfg.symbol, key):
+                # Seen for the first time (or only in the current, not
+                # yet the previous, distinct tv_scraper write) -- not
+                # stale/wrong necessarily, just not YET confirmed across
+                # 2 real refreshes. Will be re-checked next cycle; no
+                # alert lost, only delayed by however long tv_scraper
+                # takes to write its next poll for this symbol.
                 continue
             if alerted.already_alerted(sym_cfg.symbol, zone["timeframe"], zone["direction"], zone["start_time"]):
                 continue
@@ -102,8 +138,16 @@ def run_once(cfg: Config, alerted: AlertedZoneStore) -> None:
             try:
                 send_message(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
                 alerted.mark_alerted(sym_cfg.symbol, zone["timeframe"], zone["direction"], zone["start_time"])
+                # Full range + trigger price logged here (not just the
+                # zone identity) -- confirmed live this was needed: a
+                # user-reported "alert fired but nothing shows on the
+                # actual chart" case couldn't be diagnosed after the
+                # fact because the zone had already aged out of
+                # tv_scraper's own store by the time it was investigated,
+                # and this line originally only logged the bare identity.
                 print(f"[alert_manager] sent alert: {sym_cfg.symbol} {zone['timeframe']} {zone['direction']} "
-                      f"@ {zone['start_time']}")
+                      f"@ {zone['start_time']} range={zone['btm']:.2f}-{zone['top']:.2f} "
+                      f"trigger_price={price:.2f}")
             except Exception as exc:
                 # Deliberately NOT marked alerted on a failed send -- a
                 # transient Telegram/network error should retry next
@@ -118,12 +162,13 @@ def main() -> None:
 
     mt5_price.connect(cfg)
     alerted = AlertedZoneStore(cfg.alerted_state_file)
+    confirmation = ConfirmationTracker()
 
     print(f"[alert_manager] watching {[s.symbol for s in cfg.symbols]}, polling every {cfg.poll_seconds}s")
     try:
         while True:
             try:
-                run_once(cfg, alerted)
+                run_once(cfg, alerted, confirmation)
             except Exception as exc:
                 print(f"[alert_manager] ERROR: {exc}")
             time.sleep(cfg.poll_seconds)
