@@ -6,6 +6,14 @@ price enters a still-virgin zone -- see project_v3_crypto_architecture
 for why MT5's live feed is used instead of tv_scraper's own 5s-polled
 "retested" flag (lower latency, explicit user choice).
 
+Genuinely fresh zones still alert at normal ~1s latency -- the
+visibility-stability wait (see _passes_stability) only ever holds back
+a zone that CLAIMS to be older than the wait window but that Alert
+Manager has only just started seeing as eligible, which is what a zone
+reappearing in tv_scraper's visible top-4 after being crowded out looks
+like. User's explicit requirement: real-time "exactly when it gets
+retested" alerts must not be delayed for the common case.
+
 Run with: python -m v3.alert_manager.watcher
 """
 from __future__ import annotations
@@ -91,6 +99,38 @@ def _format_alert(symbol: str, zone: dict, price: float) -> str:
     )
 
 
+def _passes_stability(zone: dict, confirmation: ConfirmationTracker, symbol: str, key: str,
+                       min_visible_seconds: float) -> bool:
+    """Decides whether to trust this zone RIGHT NOW without waiting out
+    the full visibility-stability window -- added after the user pointed
+    out a blanket wait would delay "exactly when it gets retested" for
+    the common case of a genuinely fresh zone.
+
+    Two ways to pass:
+    1. Genuinely new -- zone['start_time'] is a real Pine-confirmed
+       formation time (guaranteed by the caller already having checked
+       formed_time_confirmed), and it's younger than min_visible_seconds
+       itself. Nothing to distrust here: the zone really did just form,
+       so there's no "reappeared after being crowded out of view"
+       possibility to guard against. Alerts fire with normal ~1s
+       latency, same as before this whole fix existed.
+    2. Old zone, continuously tracked -- zone['start_time'] claims to be
+       OLDER than the window, but Alert Manager has independently
+       observed it continuously eligible (virgin + confirmed) for the
+       full window via ConfirmationTracker.is_stable(). This is the only
+       path a zone that just reappeared in tv_scraper's visible top-4
+       can take, and it's exactly the case that produced the false
+       positives (XAUUSD M30, ETHUSD H2, the XAUUSD H1/M15/M5 burst) --
+       a zone claiming to be hours or days old that Alert Manager only
+       just started seeing as eligible is suspicious and has to prove
+       itself stable before triggering.
+    """
+    zone_age_seconds = time.time() - zone["start_time"]
+    if zone_age_seconds <= min_visible_seconds:
+        return True
+    return confirmation.is_stable(symbol, key, min_visible_seconds)
+
+
 def run_once(cfg: Config, alerted: AlertedZoneStore, confirmation: ConfirmationTracker) -> None:
     for sym_cfg in cfg.symbols:
         try:
@@ -131,14 +171,15 @@ def run_once(cfg: Config, alerted: AlertedZoneStore, confirmation: ConfirmationT
                 # alert lost, only delayed by however long tv_scraper
                 # takes to write its next poll for this symbol.
                 continue
-            if not confirmation.is_stable(sym_cfg.symbol, key, cfg.min_visible_seconds):
-                # Data-quality-confirmed but hasn't stayed in the
-                # eligible set long enough yet -- see ConfirmationTracker
-                # docstring point 2. Confirmed live: a zone can pass the
-                # 2-write check and still get superseded/pushed out of
-                # the chart's visible top-4 within minutes, which is what
-                # made several prior alerts look like phantoms after the
-                # fact even though the data was accurate at fire time.
+            if not _passes_stability(zone, confirmation, sym_cfg.symbol, key, cfg.min_visible_seconds):
+                # Data-quality-confirmed, but this zone claims to be
+                # older than the visibility window AND Alert Manager
+                # hasn't observed it continuously eligible for that long
+                # yet -- see _passes_stability's own docstring. A
+                # genuinely fresh zone never hits this branch (path 1
+                # there always passes it instantly), so this only ever
+                # holds back the "reappeared in view" case that caused
+                # the prior false positives.
                 continue
             if alerted.already_alerted(sym_cfg.symbol, zone["timeframe"], zone["direction"], zone["start_time"]):
                 continue
@@ -156,9 +197,11 @@ def run_once(cfg: Config, alerted: AlertedZoneStore, confirmation: ConfirmationT
                 # it was investigated, and the old line only logged range
                 # + trigger price, not formed_time_confirmed or how long
                 # the zone had been visible before firing.
+                zone_age_seconds = time.time() - zone["start_time"]
                 print(f"[alert_manager] sent alert: {sym_cfg.symbol} {zone['timeframe']} {zone['direction']} "
                       f"@ {zone['start_time']} range={zone['btm']:.2f}-{zone['top']:.2f} "
                       f"trigger_price={price:.2f} "
+                      f"zone_age_seconds={zone_age_seconds:.0f} "
                       f"visible_seconds={confirmation.visible_seconds(sym_cfg.symbol, key):.0f} "
                       f"zone_snapshot={json.dumps(zone)}")
             except Exception as exc:
