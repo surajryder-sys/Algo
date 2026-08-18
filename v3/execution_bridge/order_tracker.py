@@ -31,27 +31,38 @@ class TrackedOrder:
     exec_start_time: int
 
 
-def make_comment(exec_timeframe: str, direction: str, exec_start_time: int) -> str:
-    """Short enough to survive MT5's ~31-char comment limit with room to
-    spare. "TM" prefix distinguishes Trend Manager's own orders from any
-    other bot sharing this account/magic-number space (though magic
-    number alone already does that -- this is just belt-and-suspenders
-    for reading intent straight off the order in the MT5 terminal)."""
-    return f"TM|{exec_timeframe}|{direction[0]}|{exec_start_time}"
+def make_comment(prefix: str, exec_timeframe: str, direction: str, exec_start_time: int) -> str:
+    """Well under MT5's ~31-char comment limit even spelled out in full
+    (worst case "TM|240|bear|1787073660" is 22 chars). Prefix
+    distinguishes WHICH source decided this order -- "TM" (Trend
+    Manager) or "RM" (Reversal Manager), each its own magic number too,
+    but this is belt-and-suspenders for reading intent straight off the
+    order in the MT5 terminal, and also how
+    _find_matching_pending/_find_matching_position tell two sources'
+    orders on the same symbol apart even if a timeframe/direction/
+    start_time combination ever coincided.
+
+    Direction spelled out in full, not truncated to one letter --
+    "bull"[0] and "bear"[0] are BOTH "b", so a single-letter encoding
+    can never actually distinguish them (caught 2026-08-18 before this
+    ever mattered: parse_comment's own decoded direction was unused by
+    every caller so far, but would have silently always decoded as
+    "bull" the moment anything actually read it back)."""
+    return f"{prefix}|{exec_timeframe}|{direction}|{exec_start_time}"
 
 
 def parse_comment(comment: str) -> Optional[tuple]:
-    """Returns (exec_timeframe, direction, exec_start_time) or None if
-    this isn't one of ours (e.g. a manual close's exit deal sometimes
-    doesn't preserve the entry comment -- caller falls back to the
-    entry deal's own comment instead, see intervention.py)."""
+    """Returns (prefix, exec_timeframe, direction, exec_start_time) or
+    None if this isn't a recognized comment shape (e.g. a manual
+    close's exit deal sometimes doesn't preserve the entry comment --
+    caller falls back to the entry deal's own comment instead, see
+    intervention.py)."""
     parts = comment.split("|")
-    if len(parts) != 4 or parts[0] != "TM":
+    if len(parts) != 4 or parts[0] not in ("TM", "RM") or parts[2] not in ("bull", "bear"):
         return None
-    _, timeframe, direction_letter, start_time_str = parts
-    direction = "bull" if direction_letter == "b" else "bear"
+    prefix, timeframe, direction, start_time_str = parts
     try:
-        return timeframe, direction, int(start_time_str)
+        return prefix, timeframe, direction, int(start_time_str)
     except ValueError:
         return None
 

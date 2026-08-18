@@ -55,6 +55,14 @@ class ActiveReversalTrade:
     entry_price: float
     sl_price: Optional[float]
     mode: str  # "MARKET" or "PENDING"
+    # PENDING -> FILLED once price crosses entry_price (mirrors
+    # trade_tracker.py's own fill_pending) -- added 2026-08-18, before
+    # this existed a real PENDING order that filled in MT5 would look
+    # indistinguishable from "not yet placed" to Execution Bridge,
+    # which would then place a SECOND pending order on top of an
+    # already-filled position. MARKET starts FILLED immediately (fires
+    # the instant it's decided, nothing to wait for).
+    status: str = "PENDING"
 
 
 class ReversalTracker:
@@ -130,6 +138,12 @@ class ReversalTracker:
     def open_trade(self, symbol: str, trade: ActiveReversalTrade) -> None:
         self._active[symbol] = trade
         self._save()
+
+    def mark_filled(self, symbol: str) -> None:
+        trade = self._active.get(symbol)
+        if trade is not None:
+            trade.status = "FILLED"
+            self._save()
 
     def close_trade(self, symbol: str) -> None:
         self._active.pop(symbol, None)

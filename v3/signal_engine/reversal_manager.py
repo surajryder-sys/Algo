@@ -144,7 +144,7 @@ def _fire_m5_immediate(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symb
         if current_price is None:
             continue
         sl = entries.initial_sl(direction, zone.top, zone.btm)
-        trade = ActiveReversalTrade(direction, "5", zone.start_time, current_price, sl, "MARKET")
+        trade = ActiveReversalTrade(direction, "5", zone.start_time, current_price, sl, "MARKET", status="FILLED")
         tracker.open_trade(symbol, trade)
         tracker.mark_retest_processed(symbol, "5", direction, zone.start_time)
         label = _DIRECTION_LABELS[direction]
@@ -220,7 +220,8 @@ def _check_direction(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symbol
         sl = sl_zone.top + entries.SL_BUFFER
 
     effective_entry = current_price if mode == entries.EntryMode.MARKET else entry_price
-    trade = ActiveReversalTrade(direction, timeframe, start_time, effective_entry, sl, mode.value)
+    status = "FILLED" if mode == entries.EntryMode.MARKET else "PENDING"
+    trade = ActiveReversalTrade(direction, timeframe, start_time, effective_entry, sl, mode.value, status=status)
     tracker.open_trade(symbol, trade)
     tracker.clear_waiting(symbol, direction)
     tf_label = _TF_LABELS.get(timeframe, timeframe)
@@ -241,12 +242,26 @@ def _close_if_invalidated(store: ZoneStore, tracker: ReversalTracker, symbol: st
     return True
 
 
+def _price_crossed(direction: str, entry_price: float, current_price: float) -> bool:
+    """Same convention as trade_tracker's own -- a PENDING retracement
+    entry sits below current price at proposal time for a buy (price
+    must fall to reach it), above for a sell."""
+    return current_price <= entry_price if direction == "bull" else current_price >= entry_price
+
+
 def run_once_symbol(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolConfig) -> None:
     symbol = sym_cfg.symbol
     if _close_if_invalidated(store, tracker, symbol):
         print(f"[reversal_manager] {symbol}: active trade's entry OB was mitigated -- treating as closed")
 
-    if tracker.active_trade(symbol) is not None:
+    active = tracker.active_trade(symbol)
+    if active is not None:
+        if active.status == "PENDING":
+            current_price = _read_live_close(sym_cfg.live_state_file, symbol, active.entry_timeframe)
+            if current_price is not None and _price_crossed(active.direction, active.entry_price, current_price):
+                tracker.mark_filled(symbol)
+                print(f"[reversal_manager] {symbol}: REVERSAL TRADE FILLED (pending reached) "
+                      f"@ {active.entry_price:.2f}")
         return  # one reversal trade at a time per symbol
 
     if _fire_m5_immediate(store, tracker, sym_cfg):

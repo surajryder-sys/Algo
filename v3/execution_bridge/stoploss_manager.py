@@ -27,7 +27,7 @@ import math
 from typing import Optional
 
 from v3.execution_bridge import broker
-from v3.execution_bridge.config import Config, SymbolConfig
+from v3.execution_bridge.config import Config, SourceConfig, SymbolConfig
 from v3.execution_bridge.order_tracker import OrderTracker
 from v3.execution_bridge.sl_state import SLStateStore
 
@@ -54,7 +54,7 @@ def _current_price_for_close(symbol: str, direction: str) -> float:
     return bid if direction == "bull" else ask
 
 
-def run_once(cfg: Config, tracker: OrderTracker, sl_states: SLStateStore) -> None:
+def run_once(cfg: Config, source: SourceConfig, tracker: OrderTracker, sl_states: SLStateStore) -> None:
     for sym_cfg in cfg.symbols:
         symbol = sym_cfg.symbol
         tracked = tracker.get(symbol)
@@ -63,14 +63,15 @@ def run_once(cfg: Config, tracker: OrderTracker, sl_states: SLStateStore) -> Non
             continue
 
         try:
-            _manage_one(cfg, sym_cfg, tracked, sl_states)
+            _manage_one(cfg, source, sym_cfg, tracked, sl_states)
         except Exception as exc:
-            print(f"[stoploss_manager] {symbol} ERROR: {exc}")
+            print(f"[stoploss_manager:{source.name}] {symbol} ERROR: {exc}")
 
 
-def _manage_one(cfg: Config, sym_cfg: SymbolConfig, tracked, sl_states: SLStateStore) -> None:
+def _manage_one(cfg: Config, source: SourceConfig, sym_cfg: SymbolConfig, tracked, sl_states: SLStateStore) -> None:
     symbol = sym_cfg.symbol
-    positions = [p for p in broker.get_positions(symbol, cfg.magic_number) if p.ticket == tracked.ticket]
+    tag = f"[stoploss_manager:{source.name}]"
+    positions = [p for p in broker.get_positions(symbol, source.magic_number) if p.ticket == tracked.ticket]
     if not positions:
         return  # disappeared -- execution_bridge.py's own _check_disappeared handles this
     position = positions[0]
@@ -88,7 +89,7 @@ def _manage_one(cfg: Config, sym_cfg: SymbolConfig, tracked, sl_states: SLStateS
             state.manual_override_active = True
             state.override_price_reference = current_price
             sl_states.save()
-            print(f"[stoploss_manager] {symbol}: manual SL change detected ({position.sl}) -- "
+            print(f"{tag} {symbol}: manual SL change detected ({position.sl}) -- "
                   f"pausing trailing until a new {'high' if direction == 'bull' else 'low'}")
 
     if state.manual_override_active:
@@ -100,7 +101,7 @@ def _manage_one(cfg: Config, sym_cfg: SymbolConfig, tracked, sl_states: SLStateS
             return  # still respecting the manual change
         state.manual_override_active = False
         state.override_price_reference = None
-        print(f"[stoploss_manager] {symbol}: new {'high' if direction == 'bull' else 'low'} reached -- "
+        print(f"{tag} {symbol}: new {'high' if direction == 'bull' else 'low'} reached -- "
               f"resuming normal trailing")
 
     state.peak_favor_points = max(state.peak_favor_points, favor)
@@ -115,7 +116,7 @@ def _manage_one(cfg: Config, sym_cfg: SymbolConfig, tracked, sl_states: SLStateS
         return
 
     if not cfg.enable_trading:
-        print(f"[stoploss_manager] {symbol}: WOULD move SL to {desired:.2f} "
+        print(f"{tag} {symbol}: WOULD move SL to {desired:.2f} "
               f"(peak favor {state.peak_favor_points:.1f} points) -- trading disabled")
         return
 
@@ -123,8 +124,8 @@ def _manage_one(cfg: Config, sym_cfg: SymbolConfig, tracked, sl_states: SLStateS
     if result.ok:
         state.last_managed_sl = desired
         sl_states.save()
-        print(f"[stoploss_manager] {symbol}: moved SL to {desired:.2f} "
+        print(f"{tag} {symbol}: moved SL to {desired:.2f} "
               f"(peak favor {state.peak_favor_points:.1f} points)")
     else:
-        print(f"[stoploss_manager] {symbol}: FAILED to move SL to {desired:.2f} -- "
+        print(f"{tag} {symbol}: FAILED to move SL to {desired:.2f} -- "
               f"retcode={result.retcode} {result.comment}")

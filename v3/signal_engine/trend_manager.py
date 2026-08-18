@@ -89,8 +89,8 @@ cancel.
 (c) is detected by v3/execution_bridge/'s own intervention.py (real MT5
 history, not simulated) and relayed here read-only via
 manual_events.py's small event file -- see
-TradeTracker.should_react_to_manual_event and this module's own
-_check_manual_event. Trend Manager never touches MT5 itself; it only
+TradeTracker.should_react_to_close_event and this module's own
+_check_close_event. Trend Manager never touches MT5 itself; it only
 reads that one small file Execution Bridge writes.
 
 Stop-vs-market fallback: if price has already moved into range by the
@@ -296,19 +296,20 @@ def _try_fire_entry(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConf
               f"@ {entry_price:.2f} SL={sl} (not yet wired to MT5 -- signal only)")
 
 
-def _check_manual_event(tracker: TradeTracker, symbol: str, manual_events_file: str) -> bool:
+def _check_close_event(tracker: TradeTracker, symbol: str, manual_events_file: str) -> bool:
     """Reads Execution Bridge's own event file (manual_events.py,
-    read-only from here) -- if it carries a manual-cancel/close
-    timestamp for this symbol that Trend Manager hasn't already reacted
-    to, closes and permanently blocks the current trade, same treatment
-    as a bias flip. Returns True if a close happened this call."""
+    read-only from here) -- if it carries a real-world close timestamp
+    (manual cancel/close, or a genuine SL/TP hit) for this symbol that
+    Trend Manager hasn't already reacted to, closes and permanently
+    blocks the current trade, same treatment as a bias flip. Returns
+    True if a close happened this call."""
     event_time = manual_events.read_event_time(manual_events_file, symbol)
-    if event_time is None or not tracker.should_react_to_manual_event(symbol, event_time):
+    if event_time is None or not tracker.should_react_to_close_event(symbol, event_time):
         return False
     if tracker.active_trade(symbol) is None:
         return False  # nothing currently open/pending to close
     tracker.close_trade(symbol, block=True)
-    print(f"[trend_manager] {symbol}: manual cancel/close detected in MT5 -- closing trade, blocking that OB")
+    print(f"[trend_manager] {symbol}: real close detected in MT5 (manual/SL/TP) -- closing trade, blocking that OB")
     return True
 
 
@@ -324,7 +325,7 @@ def _run_trade_logic(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolCon
     if tracker.close_if_invalidated(symbol, store):
         print(f"[trend_manager] {symbol}: active trade's reference OB was mitigated -- treating as closed")
 
-    _check_manual_event(tracker, symbol, manual_events_file)
+    _check_close_event(tracker, symbol, manual_events_file)
 
     active = tracker.active_trade(symbol)
 

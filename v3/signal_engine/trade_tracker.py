@@ -33,12 +33,16 @@ Three things live here, all persisted to survive a restart:
    stand-in for "stopped out" at this stage, per explicit user sign-off
    ("we can add that too... whatever is convenient").
 
-3. A per-symbol watermark on manual-intervention events (see
-   manual_event_watermark below) -- Execution Bridge (once built,
-   2026-08-17) writes to v3/execution_bridge/manual_events.py's own file
-   the moment it detects a REAL manual cancel/close in MT5; this class
-   only remembers the latest such event timestamp it's already reacted
-   to per symbol, so the same event isn't processed twice across
+3. A per-symbol watermark on real-world close events (see
+   manual_event_watermark below) -- Execution Bridge writes to
+   v3/execution_bridge/manual_events.py's own file the moment it
+   detects a REAL close it didn't itself initiate: a manual cancel/
+   close, OR a genuine SL/TP hit (broadened 2026-08-18 -- Trend
+   Manager had no other way to learn a real SL hit happened, since its
+   only other closure signal is the OB itself getting mitigated on the
+   chart). This class only remembers the latest such event timestamp
+   it's already reacted to per symbol, so the same event isn't
+   processed twice across
    restarts or repeated polls.
 """
 from __future__ import annotations
@@ -98,12 +102,14 @@ class TradeTracker:
         }
         self._path.write_text(json.dumps(out))
 
-    def should_react_to_manual_event(self, symbol: str, event_time: float) -> bool:
+    def should_react_to_close_event(self, symbol: str, event_time: float) -> bool:
         """True (and records event_time as handled) only if this is a
-        manual-intervention event Trend Manager hasn't already reacted
-        to for this symbol -- idempotent across restarts/repeated polls,
-        since Execution Bridge's event file is overwritten in place, not
-        appended, and its own timestamp is the only signal of novelty."""
+        real-world close event (manual cancel/close, or a genuine SL/TP
+        hit -- see manual_events.py's own docstring) Trend Manager
+        hasn't already reacted to for this symbol -- idempotent across
+        restarts/repeated polls, since Execution Bridge's event file is
+        overwritten in place, not appended, and its own timestamp is
+        the only signal of novelty."""
         last = self._manual_event_watermark.get(symbol, 0.0)
         if event_time <= last:
             return False

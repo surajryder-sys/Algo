@@ -75,6 +75,8 @@ alert_manager_alerted_zones.json
 alert_manager_command_offset.json
 trend_manager_trade_state.json
 execution_bridge_orders.json
+execution_bridge_orders_reversal.json
+execution_bridge_sl_state_reversal.json
 execution_bridge_manual_events.json
 execution_bridge_sl_state.json
 reversal_manager_state.json

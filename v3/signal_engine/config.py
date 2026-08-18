@@ -57,7 +57,7 @@ class Config:
     # Execution Bridge writes here (v3/execution_bridge/manual_events.py)
     # the moment it detects a REAL manual cancel/close in MT5 -- read
     # here, never written here (see trade_tracker.py's
-    # should_react_to_manual_event for the consumption side).
+    # should_react_to_close_event for the consumption side).
     manual_events_file: str
 
 
