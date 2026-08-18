@@ -257,11 +257,8 @@ def _try_fire_entry(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConf
         current_price = _read_live_close(sym_cfg.live_state_file, symbol, timeframe)
         if current_price is None:
             continue
-        entry_fn = entries.ENTRY_FUNCS.get(timeframe)
-        if entry_fn is None:
-            continue
         edge = entries.ob_edge(active.direction, zone.top, zone.btm)
-        plan = entry_fn(active.direction, edge, current_price)
+        plan = entries.compute_entry(symbol, timeframe, active.direction, edge, current_price)
         if plan.mode == entries.EntryMode.NONE:
             continue
         distance = 0.0 if plan.mode == entries.EntryMode.MARKET else abs(plan.entry_price - current_price)
@@ -280,7 +277,7 @@ def _try_fire_entry(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConf
 
     # SL is based only on the executed OB itself, not a cross-timeframe
     # search (see entries.initial_sl's own docstring).
-    sl = entries.initial_sl(active.direction, top, btm)
+    sl = entries.initial_sl(symbol, timeframe, active.direction, top, btm)
     tf_label = _TF_LABELS.get(timeframe, timeframe)
     direction_label = _DIRECTION_LABELS[active.direction]
 

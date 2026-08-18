@@ -184,7 +184,7 @@ def _fire_m5_immediate(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symb
         current_price = _read_live_close(sym_cfg.live_state_file, symbol, "5")
         if current_price is None:
             continue
-        sl = entries.initial_sl(direction, zone.top, zone.btm)
+        sl = entries.initial_sl(symbol, "5", direction, zone.top, zone.btm)
         trade = ActiveReversalTrade(direction, "5", zone.start_time, current_price, sl, "MARKET", status="FILLED")
         tracker.open_trade(symbol, trade)
         tracker.mark_retest_processed(symbol, "5", direction, zone.start_time)
@@ -237,11 +237,8 @@ def _check_direction(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symbol
         current_price = _read_live_close(sym_cfg.live_state_file, symbol, timeframe)
         if current_price is None:
             continue
-        entry_fn = entries.REVERSAL_CONFIRM_FUNCS.get(timeframe)
-        if entry_fn is None:
-            continue
         edge = entries.ob_edge(direction, zone.top, zone.btm)
-        plan = entry_fn(direction, edge, current_price)
+        plan = entries.compute_reversal_confirm_entry(symbol, timeframe, direction, edge, current_price)
         if plan.mode == entries.EntryMode.NONE:
             continue
         distance = 0.0 if plan.mode == entries.EntryMode.MARKET else abs(plan.entry_price - current_price)
@@ -253,12 +250,13 @@ def _check_direction(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symbol
         return False
 
     mode, entry_price, timeframe, start_time, _distance, current_price = best
+    sl_buffer = entries.SYMBOL_SL_BUFFER[symbol]
     if direction == "bull":
         sl_zone = min(waiting, key=lambda w: w.btm)
-        sl = sl_zone.btm - entries.SL_BUFFER
+        sl = sl_zone.btm - sl_buffer
     else:
         sl_zone = max(waiting, key=lambda w: w.top)
-        sl = sl_zone.top + entries.SL_BUFFER
+        sl = sl_zone.top + sl_buffer
 
     effective_entry = current_price if mode == entries.EntryMode.MARKET else entry_price
     status = "FILLED" if mode == entries.EntryMode.MARKET else "PENDING"
