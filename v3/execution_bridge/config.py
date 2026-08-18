@@ -108,6 +108,14 @@ def load_config() -> Config:
                                             "execution_bridge_orders_reversal.json"),
                 sl_state_file=os.getenv("EXECUTION_BRIDGE_REVERSAL_SL_STATE_FILE",
                                          "execution_bridge_sl_state_reversal.json"),
+                # Confirmed live 2026-08-18: without this, a real SL hit
+                # on a Reversal Manager position left its own state
+                # showing FILLED forever, so Execution Bridge kept
+                # re-opening a brand new position for it every cycle --
+                # same class of bug already fixed for Trend Manager,
+                # now closed here too.
+                manual_events_file=os.getenv("EXECUTION_BRIDGE_REVERSAL_MANUAL_EVENTS_FILE",
+                                              "execution_bridge_manual_events_reversal.json"),
             ),
         ],
         symbols=[

@@ -34,6 +34,12 @@ class Config:
     poll_seconds: float
     state_file: str
     magic_number: int
+    # Execution Bridge writes here (v3/execution_bridge/manual_events.py)
+    # the moment it detects a REAL manual cancel/close or SL/TP hit for
+    # a Reversal-Manager-sourced position -- read here, never written
+    # here. Added 2026-08-18 after a real SL hit left this Manager's
+    # own state showing FILLED forever with nothing real behind it.
+    manual_events_file: str
 
 
 def load_config() -> Config:
@@ -61,4 +67,6 @@ def load_config() -> Config:
         poll_seconds=float(os.getenv("REVERSAL_MANAGER_POLL_SECONDS", "5.0")),
         state_file=os.getenv("REVERSAL_MANAGER_STATE_FILE", "reversal_manager_state.json"),
         magic_number=int(os.getenv("REVERSAL_MANAGER_MAGIC_NUMBER", "26081801")),
+        manual_events_file=os.getenv("EXECUTION_BRIDGE_REVERSAL_MANUAL_EVENTS_FILE",
+                                      "execution_bridge_manual_events_reversal.json"),
     )

@@ -131,7 +131,10 @@ def _check_disappeared(cfg: Config, source: SourceConfig, tracker: OrderTracker,
         if outcome == "manual":
             if source.manual_events_file:
                 manual_events.write_event(source.manual_events_file, symbol)
-            print(f"{tag} {symbol}: pending order {tracked.ticket} manually cancelled")
+                print(f"{tag} {symbol}: pending order {tracked.ticket} manually cancelled -- notified {source.name}")
+            else:
+                print(f"{tag} {symbol}: pending order {tracked.ticket} manually cancelled -- "
+                      f"{source.name} has no relay configured, WILL NOT be notified")
         elif outcome == "filled":
             print(f"{tag} {symbol}: pending order {tracked.ticket} filled")
         tracker.clear(symbol)  # stale either way -- a fill gets re-discovered as a position below
@@ -155,7 +158,14 @@ def _check_disappeared(cfg: Config, source: SourceConfig, tracker: OrderTracker,
         if outcome in ("manual", "sl", "tp"):
             if source.manual_events_file:
                 manual_events.write_event(source.manual_events_file, symbol)
-            print(f"{tag} {symbol}: position {tracked.ticket} closed ({outcome}) -- notified {source.name}")
+                print(f"{tag} {symbol}: position {tracked.ticket} closed ({outcome}) -- notified {source.name}")
+            else:
+                # Confirmed live 2026-08-18: this used to say "notified"
+                # unconditionally even when there was no file to write
+                # to -- misleading. A source with no manual_events_file
+                # has NO way to learn about this close at all.
+                print(f"{tag} {symbol}: position {tracked.ticket} closed ({outcome}) -- "
+                      f"{source.name} has no relay configured, WILL NOT be notified")
         tracker.clear(symbol)
 
 

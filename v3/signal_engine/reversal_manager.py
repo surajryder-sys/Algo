@@ -53,9 +53,26 @@ rule) -- not one per direction; Reversal Manager itself won't hold
 simultaneous bull+bear reversal positions on the same symbol, even
 though it CAN disagree with Trend Manager's own concurrent position.
 
-Signal-only for now -- logs "REVERSAL TRADE ...", never touches MT5.
-Not yet wired to Execution Bridge (that integration is a separate,
-explicit step -- building this does not make it live).
+Wired to Execution Bridge 2026-08-18 -- its decisions DO place real
+orders once EXECUTION_BRIDGE_ENABLE_TRADING is true, same as Trend
+Manager's. Reads Execution Bridge's own manual_events.py relay
+(read-only) to learn about a real manual cancel/close or SL/TP hit on
+a Reversal-Manager-sourced position -- without this, a stopped-out
+position would leave this Manager's own state showing FILLED forever
+with nothing real behind it, and Execution Bridge would keep
+re-opening a brand new position for it every cycle (confirmed live).
+
+Cold-start safeguard, added 2026-08-18 (per-bucket, see
+reversal_tracker.py's own docstring for why a whole-file version wasn't
+enough): the FIRST time each (symbol, timeframe, direction) bucket is
+ever examined, whatever's currently already retested is seeded into the
+watermark rather than fired on -- only a retest that happens AFTER that
+first look is ever treated as a real signal. Confirmed live, twice: a
+whole-file "first run" flag caught a genuine first-ever start (day-old
+BTCUSD/ETHUSD bull retests firing immediately), but not a bucket that
+simply hadn't been active before (the bear direction, on the very next
+restart, fired on a real but WEEK-old retest) -- the per-bucket version
+in _newest_retested_zone below is what actually closes this.
 
 Run with: python -m v3.signal_engine.reversal_manager
 """
@@ -66,6 +83,7 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
+from v3.execution_bridge import manual_events
 from v3.signal_engine import entries, reversal_config
 from v3.signal_engine.reversal_config import Config, SymbolConfig
 from v3.signal_engine.reversal_tracker import ActiveReversalTrade, ReversalTracker, WaitingRetest
@@ -107,7 +125,30 @@ def _newest_retested_zone(store: ZoneStore, tracker: ReversalTracker, symbol: st
     this, but not every path does, so Reversal Manager distrusts it
     directly rather than assuming the upstream guard always caught it --
     same defensive spirit as formed_time_confirmed elsewhere in this
-    system."""
+    system.
+
+    Per-bucket cold start: the FIRST time this exact bucket is ever
+    examined, seeds the watermark to whatever's currently already
+    retested (if anything) instead of firing on it, then returns None
+    for this cycle -- confirmed live 2026-08-18 (twice): a whole-file
+    "first run" flag isn't enough, since any bucket that simply hadn't
+    fired before (e.g. bear direction, when only bull had ever been
+    active) looks exactly like a fresh signal otherwise, even against
+    an existing state file. This is what actually fixes it, not the
+    whole-file version."""
+    if not tracker.is_bucket_seeded(symbol, timeframe, direction):
+        already_retested = [
+            z for z in store.zones(symbol, timeframe, direction)
+            if z.formed_time_confirmed and not z.virgin and z.retested_at != z.start_time
+        ]
+        seed_start_time = max((z.start_time for z in already_retested), default=0)
+        tracker.seed_bucket(symbol, timeframe, direction, seed_start_time)
+        if seed_start_time:
+            tf_label = _TF_LABELS.get(timeframe, timeframe)
+            print(f"[reversal_manager] {symbol}: first look at {tf_label} {_DIRECTION_LABELS[direction]} -- "
+                  f"skipping pre-existing retest @ {seed_start_time}, only reacting to new ones from here")
+        return None
+
     candidates = [
         z for z in store.zones(symbol, timeframe, direction)
         if z.formed_time_confirmed and not z.virgin
@@ -249,10 +290,28 @@ def _price_crossed(direction: str, entry_price: float, current_price: float) -> 
     return current_price <= entry_price if direction == "bull" else current_price >= entry_price
 
 
-def run_once_symbol(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolConfig) -> None:
+def _check_close_event(tracker: ReversalTracker, symbol: str, manual_events_file: str) -> bool:
+    """Reads Execution Bridge's own event file (manual_events.py,
+    read-only from here) -- if it carries a real-world close timestamp
+    (manual cancel/close, or a genuine SL/TP hit) for this symbol that
+    Reversal Manager hasn't already reacted to, closes the current
+    trade. Returns True if a close happened this call."""
+    event_time = manual_events.read_event_time(manual_events_file, symbol)
+    if event_time is None or not tracker.should_react_to_close_event(symbol, event_time):
+        return False
+    if tracker.active_trade(symbol) is None:
+        return False
+    tracker.close_trade(symbol)
+    print(f"[reversal_manager] {symbol}: real close detected in MT5 (manual/SL/TP) -- closing trade")
+    return True
+
+
+def run_once_symbol(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolConfig, manual_events_file: str) -> None:
     symbol = sym_cfg.symbol
     if _close_if_invalidated(store, tracker, symbol):
         print(f"[reversal_manager] {symbol}: active trade's entry OB was mitigated -- treating as closed")
+
+    _check_close_event(tracker, symbol, manual_events_file)
 
     active = tracker.active_trade(symbol)
     if active is not None:
@@ -278,7 +337,7 @@ def run_once(cfg: Config, tracker: ReversalTracker) -> None:
     for sym_cfg in cfg.symbols:
         store = ZoneStore(sym_cfg.zone_state_file)
         try:
-            run_once_symbol(store, tracker, sym_cfg)
+            run_once_symbol(store, tracker, sym_cfg, cfg.manual_events_file)
         except Exception as exc:
             print(f"[reversal_manager] {sym_cfg.symbol} ERROR: {exc}")
 
