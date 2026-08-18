@@ -72,19 +72,19 @@ def load_config() -> Config:
         sl_state_file=os.getenv("EXECUTION_BRIDGE_SL_STATE_FILE", "execution_bridge_sl_state.json"),
         symbols=[
             SymbolConfig(
-                "XAUUSD", float(os.getenv("EXECUTION_BRIDGE_XAUUSD_LOTS", "0.01")),
+                "XAUUSD", float(os.getenv("EXECUTION_BRIDGE_XAUUSD_LOTS", "0.04")),
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_XAUUSD_BREAKEVEN_POINTS", "7")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_XAUUSD_TRAIL_START_POINTS", "10")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_XAUUSD_TRAIL_STEP_POINTS", "2")),
             ),
             SymbolConfig(
-                "BTCUSD", float(os.getenv("EXECUTION_BRIDGE_BTCUSD_LOTS", "0.01")),
+                "BTCUSD", float(os.getenv("EXECUTION_BRIDGE_BTCUSD_LOTS", "0.05")),
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_BREAKEVEN_POINTS", "7")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_TRAIL_START_POINTS", "10")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_TRAIL_STEP_POINTS", "2")),
             ),
             SymbolConfig(
-                "ETHUSD", float(os.getenv("EXECUTION_BRIDGE_ETHUSD_LOTS", "0.1")),
+                "ETHUSD", float(os.getenv("EXECUTION_BRIDGE_ETHUSD_LOTS", "1.0")),
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_BREAKEVEN_POINTS", "7")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_START_POINTS", "10")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_STEP_POINTS", "2")),
