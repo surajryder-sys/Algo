@@ -18,6 +18,13 @@ M5  - unchanged from algo_v2: identical numbers to M3, kept as separate
       constants since they're free to diverge again later (same
       rationale as algo_v2's own comment).
 
+Reversal Manager (v3/signal_engine/reversal_manager.py) reuses m3_entry
+and m5_entry as-is for its own LTF confirmation, but has its own WIDER
+M1 (reversal_m1_entry: market<=4, pullback 4<d<8, floor 4) -- agreed
+2026-08-18, deliberately different from Trend Manager's M1 since a
+reversal is trying to catch an actual top/bottom and needs more room
+not to miss the entry.
+
 Pullback entry is measured as a % giveback of however far price already
 ran from the OB edge, floored so it never demands an unreasonably small
 giveback just because that run was short -- see compute_entry's own
@@ -61,6 +68,18 @@ M5_MARKET_MAX = 4.0
 M5_PULLBACK_MIN = 4.0
 M5_PULLBACK_MAX = 12.0
 M5_PULLBACK_FLOOR = 4.0
+
+# Reversal Manager's own M1 confirmation thresholds, agreed 2026-08-18 --
+# deliberately WIDER than Trend Manager's M1 (3 / 3-6) per explicit user
+# reasoning: "here we might catch a bottom or top, so we keep some space
+# buffer, making sure not missing the entry." Floor set equal to
+# market_max/pullback_min (4), same internal-consistency pattern as
+# Trend Manager's own M1 -- not explicitly restated by the user, but the
+# natural extension of the established shape.
+REVERSAL_M1_MARKET_MAX = 4.0
+REVERSAL_M1_PULLBACK_MIN = 4.0
+REVERSAL_M1_PULLBACK_MAX = 8.0
+REVERSAL_M1_PULLBACK_FLOOR = 4.0
 
 
 class EntryMode(Enum):
@@ -116,9 +135,20 @@ def m5_entry(direction: str, ob_edge: float, current_price: float) -> EntryPlan:
                           M5_MARKET_MAX, M5_PULLBACK_MIN, M5_PULLBACK_MAX, M5_PULLBACK_FLOOR)
 
 
+def reversal_m1_entry(direction: str, ob_edge: float, current_price: float) -> EntryPlan:
+    return compute_entry(direction, ob_edge, current_price,
+                          REVERSAL_M1_MARKET_MAX, REVERSAL_M1_PULLBACK_MIN,
+                          REVERSAL_M1_PULLBACK_MAX, REVERSAL_M1_PULLBACK_FLOOR)
+
+
 # Timeframe raw code -> the entry function that applies to it. M15/M30
 # never appear here -- they're parent-only, never an execution trigger.
 ENTRY_FUNCS = {"1": m1_entry, "3": m3_entry, "5": m5_entry}
+
+# Reversal Manager's own LTF confirmation functions -- M1 uses wider
+# thresholds (see reversal_m1_entry), M3/M5 reuse Trend Manager's exact
+# same functions ("already prescribed entry logics" -- user's words).
+REVERSAL_CONFIRM_FUNCS = {"1": reversal_m1_entry, "3": m3_entry, "5": m5_entry}
 
 
 def ob_edge(direction: str, top: float, btm: float) -> float:
