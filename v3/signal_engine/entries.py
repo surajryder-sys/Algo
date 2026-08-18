@@ -73,9 +73,12 @@ _XAUUSD_M1 = EntryConfig(sl_buffer=1.0, market_max=3.0, pullback_min=3.0, pullba
 _XAUUSD_M3_M5 = EntryConfig(sl_buffer=1.0, market_max=4.0, pullback_min=4.0, pullback_max=12.0, pullback_floor=4.0)
 _XAUUSD_REVERSAL_M1 = EntryConfig(sl_buffer=1.0, market_max=4.0, pullback_min=4.0, pullback_max=8.0, pullback_floor=4.0)
 
-# Pulled directly from algo_v2_usoil_btc_eth/entries.py's own
-# ENTRY_CONFIGS -- see module docstring for provenance.
-_BTCUSD = EntryConfig(sl_buffer=20.0, market_max=175.0, pullback_min=175.0, pullback_max=800.0, pullback_floor=175.0)
+# Started from algo_v2_usoil_btc_eth/entries.py's own ENTRY_CONFIGS
+# (see module docstring for provenance), then user's explicit
+# 2026-08-18 correction: BTCUSD's pullback_max lowered 800 -> 600
+# ("BTCUSD: SL buffer 20.0, market<=175, pullback 175-600, maintain
+# same" -- everything else confirmed unchanged from the old bot).
+_BTCUSD = EntryConfig(sl_buffer=20.0, market_max=175.0, pullback_min=175.0, pullback_max=600.0, pullback_floor=175.0)
 _ETHUSD = EntryConfig(sl_buffer=2.0, market_max=4.0, pullback_min=4.0, pullback_max=20.0, pullback_floor=4.0)
 
 # (symbol, timeframe) -> EntryConfig, for Trend Manager's own entries.

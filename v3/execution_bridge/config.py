@@ -34,13 +34,12 @@ class SymbolConfig:
     # Stoploss Manager's point-based trailing thresholds, user's rule
     # 2026-08-18: breakeven once favor >= breakeven_points, trailing
     # starts at trail_start_points, moving in trail_step_points
-    # increments from there. NOTE: these numbers (7/10/2) come from
-    # XAUUSD's own price scale (points ~= $1, matching entries.py's
-    # 3-12 distance thresholds) -- BTCUSD/ETHUSD move in a completely
-    # different range and almost certainly need their own values before
-    # trading is ever enabled for them. Defaulted the same as XAUUSD for
-    # now only because no crypto-specific numbers were given; flagged,
-    # not silently assumed correct.
+    # increments from there. XAUUSD: 7/10/2 (two-stage -- a wider
+    # dead zone between breakeven and trail start). BTCUSD/ETHUSD each
+    # got their own explicit values from the user the same day (300/
+    # 300/150 and 15/15/5 respectively) -- single-stage for both
+    # (breakeven_points == trail_start_points), no longer a XAUUSD-
+    # scaled placeholder.
     breakeven_points: float
     trail_start_points: float
     trail_step_points: float
@@ -125,17 +124,27 @@ def load_config() -> Config:
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_XAUUSD_TRAIL_START_POINTS", "10")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_XAUUSD_TRAIL_STEP_POINTS", "2")),
             ),
+            # BTCUSD/ETHUSD trailing -- user's explicit values 2026-08-18
+            # ("SL Trailing for ETHUSD is 15 points up, put at cost, from
+            # there every 5 points up, trail up" / "BTCUSD is 300 points
+            # up, Put at cost, from there every 150 points, trail up") --
+            # breakeven_points == trail_start_points for both (a single
+            # threshold moves SL to cost AND starts stepping immediately,
+            # no separate wider dead-zone the way XAUUSD's 7-then-10
+            # two-stage version has). _desired_sl's existing formula
+            # already handles breakeven==trail_start correctly with no
+            # code change needed -- only the config values differ.
             SymbolConfig(
                 "BTCUSD", float(os.getenv("EXECUTION_BRIDGE_BTCUSD_LOTS", "0.05")),
-                breakeven_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_BREAKEVEN_POINTS", "7")),
-                trail_start_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_TRAIL_START_POINTS", "10")),
-                trail_step_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_TRAIL_STEP_POINTS", "2")),
+                breakeven_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_BREAKEVEN_POINTS", "300")),
+                trail_start_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_TRAIL_START_POINTS", "300")),
+                trail_step_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_TRAIL_STEP_POINTS", "150")),
             ),
             SymbolConfig(
                 "ETHUSD", float(os.getenv("EXECUTION_BRIDGE_ETHUSD_LOTS", "1.0")),
-                breakeven_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_BREAKEVEN_POINTS", "7")),
-                trail_start_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_START_POINTS", "10")),
-                trail_step_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_STEP_POINTS", "2")),
+                breakeven_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_BREAKEVEN_POINTS", "15")),
+                trail_start_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_START_POINTS", "15")),
+                trail_step_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_STEP_POINTS", "5")),
             ),
         ],
     )
