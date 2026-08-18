@@ -28,15 +28,17 @@ reversal_manager, execution_bridge.
 
 **New observation, not urgent**: currently-open ETHUSD position's real
 SL (1921.75) doesn't match what Reversal Manager decided at entry
-(1920.11) -- no log line anywhere shows 1921.75 being set by our code,
-so this is likely broker-side fill/execution mechanics (slippage +
-minimum-stop-distance auto-adjustment), not a bug. Results in a WIDER
-SL than intended (more safety margin, not less), and will self-correct
-the moment Stoploss Manager's own trailing logic first computes a real
-move for this position (it always computes the desired SL fresh from
-entry_price + peak_favor, never from "current SL + delta"). Worth
-keeping an eye on whether this recurs on future fills; not acted on
-yet.
+(1920.11) -- no log line anywhere shows 1921.75 being set by our code.
+**Update, same session**: user confirmed this was their own manual
+change, not broker mechanics. Revealed a real gap -- Stoploss Manager
+had never touched this position's SL itself, so its manual-override
+detection had no baseline to compare against, meaning the change was
+NOT actually protected and would have been silently overwritten the
+moment trailing first crossed the breakeven threshold. Fixed
+(commit 2bc54e0): SymbolSLState now seeds last_managed_sl from
+whatever the real SL already is the first time a position is ever
+examined. Restarted and verified: baseline correctly picked up the
+user's own 1921.75 as the new protected value going forward.
 
 **Bias**: XAUUSD bearish/bearish, BTCUSD bearish/bearish, ETHUSD
 bullish/bearish (Structure/Short-term).
