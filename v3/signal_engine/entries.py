@@ -24,18 +24,25 @@ giveback just because that run was short -- see compute_entry's own
 docstring for the exact mechanism (identical shape to algo_v2's, just
 with a per-caller floor).
 
-SL is always OB-structure-based: whichever candidate timeframe's current
-same-direction OB edge is closest to the entry price (only counting
-edges on the geometrically valid side), minus/plus a fixed buffer (0.5,
-same as algo_v2).
+Initial SL, simplified 2026-08-18 (superseding an earlier, buggier
+cross-timeframe "closest edge" version): based ONLY on the OB the trade
+actually executed off, using its OPPOSITE edge from the entry edge --
+entry sits near a bull OB's TOP (first contact retracing down into it),
+but SL sits below that same OB's BOTTOM (protecting against the whole
+zone failing, not just the entry edge), buffered by SL_BUFFER (1.0,
+user's explicit value). Mirrors algo_v2's own actual convention
+(select_sl's candidate edges were documented there as "OB low
+(bullish)/OB high (bearish)" -- opposite of its own entry edge) which
+this module's own first draft got backwards by reusing ob_edge() for
+both purposes; initial_sl() below is the fix.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Optional
+from typing import Optional
 
-SL_BUFFER = 0.5
+SL_BUFFER = 1.0
 PULLBACK_PCT = 0.45
 
 # M1 -- new thresholds, agreed 2026-08-17.
@@ -122,21 +129,8 @@ def ob_edge(direction: str, top: float, btm: float) -> float:
     return top if direction == "bull" else btm
 
 
-def select_sl(direction: str, entry_price: float, candidate_edges: Dict[str, Optional[float]]) -> Optional[float]:
-    """candidate_edges: {timeframe_label: edge_or_None}, each edge being
-    that timeframe's current same-direction OB edge. Picks whichever is
-    closest to entry_price, but only among edges on the geometrically
-    valid side of entry -- below entry for a buy, above entry for a
-    sell. An edge on the wrong side would produce a backwards SL
-    (broker-rejected as invalid stops) and must never be chosen just for
-    being numerically closest."""
-    valid = {
-        tf: edge for tf, edge in candidate_edges.items()
-        if edge is not None and ((direction == "bull" and edge < entry_price) or
-                                  (direction == "bear" and edge > entry_price))
-    }
-    if not valid:
-        return None
-    closest_tf = min(valid, key=lambda tf: abs(valid[tf] - entry_price))
-    edge = valid[closest_tf]
-    return edge - SL_BUFFER if direction == "bull" else edge + SL_BUFFER
+def initial_sl(direction: str, top: float, btm: float) -> float:
+    """SL based only on the OB the trade actually executed off -- its
+    OPPOSITE edge from the entry edge (see module docstring). Bull:
+    OB's own bottom, minus buffer. Bear: OB's own top, plus buffer."""
+    return (btm - SL_BUFFER) if direction == "bull" else (top + SL_BUFFER)

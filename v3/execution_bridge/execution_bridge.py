@@ -35,9 +35,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from v3.execution_bridge import broker, intervention, manual_events
+from v3.execution_bridge import broker, intervention, manual_events, stoploss_manager
 from v3.execution_bridge.config import Config, SymbolConfig, load_config
 from v3.execution_bridge.order_tracker import OrderTracker, TrackedOrder, make_comment
+from v3.execution_bridge.sl_state import SLStateStore
 
 
 def _read_trend_state(path: str) -> dict:
@@ -199,7 +200,7 @@ def _reconcile(cfg: Config, tracker: OrderTracker, sym_cfg: SymbolConfig, desire
         # tracked.kind == "POSITION" already -- nothing more to do.
 
 
-def run_once(cfg: Config, tracker: OrderTracker) -> None:
+def run_once(cfg: Config, tracker: OrderTracker, sl_states: SLStateStore) -> None:
     trend_state = _read_trend_state(cfg.trend_state_file)
     for sym_cfg in cfg.symbols:
         try:
@@ -207,19 +208,21 @@ def run_once(cfg: Config, tracker: OrderTracker) -> None:
             _reconcile(cfg, tracker, sym_cfg, trend_state.get(sym_cfg.symbol))
         except Exception as exc:
             print(f"[execution_bridge] {sym_cfg.symbol} ERROR: {exc}")
+    stoploss_manager.run_once(cfg, tracker, sl_states)
 
 
 def main() -> None:
     cfg = load_config()
     broker.connect(cfg)
     tracker = OrderTracker(cfg.order_state_file)
+    sl_states = SLStateStore(cfg.sl_state_file)
     mode = "LIVE TRADING" if cfg.enable_trading else "dry run (EXECUTION_BRIDGE_ENABLE_TRADING=false)"
     print(f"[execution_bridge] watching {[s.symbol for s in cfg.symbols]}, polling every "
           f"{cfg.poll_seconds}s -- {mode}")
     try:
         while True:
             try:
-                run_once(cfg, tracker)
+                run_once(cfg, tracker, sl_states)
             except Exception as exc:
                 print(f"[execution_bridge] ERROR: {exc}")
             time.sleep(cfg.poll_seconds)

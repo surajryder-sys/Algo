@@ -70,9 +70,9 @@ currently proposed, cancel-and-replace: NOT blocked, that superseded OB
 stays eligible for later (mirrors algo_v2's own bot-cancel vs
 manual-cancel split in intervention.py's expected_cancellations).
 
-SL = whichever of the parent+trigger timeframes' own current
-same-direction OB edge is closest to entry price, minus/plus a fixed
-buffer (algo_v2's exact rule, see entries.select_sl).
+SL = the executed OB's own opposite edge (bull: its bottom; bear: its
+top), buffered by 1.0 -- simplified 2026-08-18 from an earlier,
+buggier cross-timeframe "closest edge" version (see entries.initial_sl).
 
 --- Blocking (permanent, never releases on mitigation) ---
 An OB only gets permanently blocked (its own bucket's watermark
@@ -235,22 +235,6 @@ def _read_live_close(path: str, symbol: str, timeframe: str) -> Optional[float]:
     return float(close) if close is not None else None
 
 
-def _current_edge(store: ZoneStore, symbol: str, timeframe: str, direction: str) -> Optional[float]:
-    """Current (newest, regardless of watermark eligibility -- SL just
-    wants "what's the nearest real structure right now") same-direction
-    OB edge for this timeframe."""
-    for zone in store.zones(symbol, timeframe, direction):
-        if zone.formed_time_confirmed:
-            return entries.ob_edge(direction, zone.top, zone.btm)
-    return None
-
-
-def _sl_candidate_edges(store: ZoneStore, symbol: str, direction: str,
-                         parent_timeframes: Tuple[str, str], trigger_timeframes: Tuple[str, ...]) -> dict:
-    all_tfs = list(dict.fromkeys(list(parent_timeframes) + list(trigger_timeframes)))
-    return {tf: _current_edge(store, symbol, tf, direction) for tf in all_tfs}
-
-
 def _price_crossed(direction: str, entry_price: float, current_price: float) -> bool:
     """True once price has come back to (or through) a pending
     retracement entry -- bull entries sit below current price at
@@ -265,7 +249,7 @@ def _try_fire_entry(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConf
     fires it (MARKET fills immediately, PENDING gets proposed/replaced).
     Mutates tracker; only ever prints."""
     symbol = sym_cfg.symbol
-    best_plan = None  # (mode, entry_price, timeframe, start_time, distance, current_price)
+    best_plan = None  # (mode, entry_price, timeframe, start_time, distance, current_price, top, btm)
     for timeframe in sym_cfg.trigger_timeframes:
         zone = _newest_post_parent_zone(store, tracker, symbol, timeframe, active.direction, active.parent_start_time)
         if zone is None:
@@ -281,30 +265,30 @@ def _try_fire_entry(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConf
         if plan.mode == entries.EntryMode.NONE:
             continue
         distance = 0.0 if plan.mode == entries.EntryMode.MARKET else abs(plan.entry_price - current_price)
-        candidate = (plan.mode, plan.entry_price, timeframe, zone.start_time, distance, current_price)
+        candidate = (plan.mode, plan.entry_price, timeframe, zone.start_time, distance, current_price, zone.top, zone.btm)
         if best_plan is None or distance < best_plan[4]:
             best_plan = candidate
 
     if best_plan is None:
         return
 
-    mode, entry_price, timeframe, start_time, _distance, current_price = best_plan
+    mode, entry_price, timeframe, start_time, _distance, current_price, top, btm = best_plan
     already_proposed = (active.status != "AWAITING_TRIGGER"
                          and active.exec_timeframe == timeframe and active.exec_start_time == start_time)
     if already_proposed:
         return
 
-    sl_edges = _sl_candidate_edges(store, symbol, active.direction, sym_cfg.parent_timeframes, sym_cfg.trigger_timeframes)
+    # SL is based only on the executed OB itself, not a cross-timeframe
+    # search (see entries.initial_sl's own docstring).
+    sl = entries.initial_sl(active.direction, top, btm)
     tf_label = _TF_LABELS.get(timeframe, timeframe)
     direction_label = _DIRECTION_LABELS[active.direction]
 
     if mode == entries.EntryMode.MARKET:
-        sl = entries.select_sl(active.direction, current_price, sl_edges)
         tracker.fill_market(symbol, timeframe, start_time, current_price, sl)
         print(f"[trend_manager] {symbol}: TRADE SIGNAL {direction_label} FILLED (market) via {tf_label} "
               f"@ {current_price:.2f} SL={sl} (not yet wired to MT5 -- signal only)")
     else:
-        sl = entries.select_sl(active.direction, entry_price, sl_edges)
         was_pending = active.status == "PENDING"
         tracker.propose_pending(symbol, timeframe, start_time, entry_price, sl)
         verb = "replaced with" if was_pending else "proposed"

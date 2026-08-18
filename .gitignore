@@ -76,5 +76,6 @@ alert_manager_command_offset.json
 trend_manager_trade_state.json
 execution_bridge_orders.json
 execution_bridge_manual_events.json
+execution_bridge_sl_state.json
 smc_v2_bot_direction_blocks.json
 smc_v2_bot_zone_cooldown.json

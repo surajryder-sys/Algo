@@ -22,6 +22,19 @@ load_dotenv()
 class SymbolConfig:
     symbol: str
     lots: float
+    # Stoploss Manager's point-based trailing thresholds, user's rule
+    # 2026-08-18: breakeven once favor >= breakeven_points, trailing
+    # starts at trail_start_points, moving in trail_step_points
+    # increments from there. NOTE: these numbers (7/10/2) come from
+    # XAUUSD's own price scale (points ~= $1, matching entries.py's
+    # 3-12 distance thresholds) -- BTCUSD/ETHUSD move in a completely
+    # different range and almost certainly need their own values before
+    # trading is ever enabled for them. Defaulted the same as XAUUSD for
+    # now only because no crypto-specific numbers were given; flagged,
+    # not silently assumed correct.
+    breakeven_points: float
+    trail_start_points: float
+    trail_step_points: float
 
 
 @dataclass(frozen=True)
@@ -36,6 +49,7 @@ class Config:
     enable_trading: bool
     trend_state_file: str
     order_state_file: str
+    sl_state_file: str
     symbols: list  # list[SymbolConfig]
 
 
@@ -55,9 +69,25 @@ def load_config() -> Config:
         enable_trading=os.getenv("EXECUTION_BRIDGE_ENABLE_TRADING", "false").strip().lower() == "true",
         trend_state_file=os.getenv("SIGNAL_ENGINE_TRADE_STATE_FILE", "trend_manager_trade_state.json"),
         order_state_file=os.getenv("EXECUTION_BRIDGE_ORDER_STATE_FILE", "execution_bridge_orders.json"),
+        sl_state_file=os.getenv("EXECUTION_BRIDGE_SL_STATE_FILE", "execution_bridge_sl_state.json"),
         symbols=[
-            SymbolConfig("XAUUSD", float(os.getenv("EXECUTION_BRIDGE_XAUUSD_LOTS", "0.01"))),
-            SymbolConfig("BTCUSD", float(os.getenv("EXECUTION_BRIDGE_BTCUSD_LOTS", "0.01"))),
-            SymbolConfig("ETHUSD", float(os.getenv("EXECUTION_BRIDGE_ETHUSD_LOTS", "0.1"))),
+            SymbolConfig(
+                "XAUUSD", float(os.getenv("EXECUTION_BRIDGE_XAUUSD_LOTS", "0.01")),
+                breakeven_points=float(os.getenv("EXECUTION_BRIDGE_XAUUSD_BREAKEVEN_POINTS", "7")),
+                trail_start_points=float(os.getenv("EXECUTION_BRIDGE_XAUUSD_TRAIL_START_POINTS", "10")),
+                trail_step_points=float(os.getenv("EXECUTION_BRIDGE_XAUUSD_TRAIL_STEP_POINTS", "2")),
+            ),
+            SymbolConfig(
+                "BTCUSD", float(os.getenv("EXECUTION_BRIDGE_BTCUSD_LOTS", "0.01")),
+                breakeven_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_BREAKEVEN_POINTS", "7")),
+                trail_start_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_TRAIL_START_POINTS", "10")),
+                trail_step_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_TRAIL_STEP_POINTS", "2")),
+            ),
+            SymbolConfig(
+                "ETHUSD", float(os.getenv("EXECUTION_BRIDGE_ETHUSD_LOTS", "0.1")),
+                breakeven_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_BREAKEVEN_POINTS", "7")),
+                trail_start_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_START_POINTS", "10")),
+                trail_step_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_STEP_POINTS", "2")),
+            ),
         ],
     )
