@@ -13,6 +13,19 @@ last_managed_sl: what Stoploss Manager itself last set as the real SL,
 used to detect a manual change (the real SL on the position no longer
 matches what we last set -> the user moved it).
 
+baseline_established: whether last_managed_sl has been seeded at least
+once for this position -- added 2026-08-19 after a real gap, confirmed
+live: a manual SL change made BEFORE Stoploss Manager's own first trail
+move went completely undetected, since last_managed_sl started as None
+and the override check only ever fires when it's NOT None. Without a
+prior value of its own to compare against, Stoploss Manager would have
+silently overwritten the user's manual change the moment trailing
+first kicked in, instead of respecting it the way a LATER manual
+change already correctly is. Now seeded from whatever the real SL
+already is the very first time this position is ever examined -- once,
+not every cycle (an every-cycle reseed would just chase the current
+value and could never detect anything).
+
 manual_override_active / override_price_reference: once a manual change
 is detected, Stoploss Manager stops touching this position's SL until
 price makes a genuinely NEW high (buy) / new low (sell) beyond the
@@ -36,6 +49,7 @@ class SymbolSLState:
     last_managed_sl: Optional[float] = None
     manual_override_active: bool = False
     override_price_reference: Optional[float] = None
+    baseline_established: bool = False
 
 
 class SLStateStore:

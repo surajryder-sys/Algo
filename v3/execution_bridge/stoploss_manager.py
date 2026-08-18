@@ -82,6 +82,17 @@ def _manage_one(cfg: Config, source: SourceConfig, sym_cfg: SymbolConfig, tracke
     current_price = _current_price_for_close(symbol, direction)
     favor = _favor_points(direction, entry_price, current_price)
 
+    # Seed the baseline from whatever the real SL already is, the very
+    # first time this position is ever examined -- before this existed,
+    # a manual change made before Stoploss Manager's own first trail
+    # move was invisible to the override check below (see sl_state.py's
+    # own docstring for the live incident that caught this).
+    if not state.baseline_established:
+        state.last_managed_sl = position.sl
+        state.baseline_established = True
+        sl_states.save()
+        print(f"{tag} {symbol}: baseline SL noted ({position.sl}) -- any change from here is treated as manual")
+
     # Manual-override detection: the real SL no longer matches what we
     # last set ourselves.
     if state.last_managed_sl is not None and abs(position.sl - state.last_managed_sl) > 1e-6:
