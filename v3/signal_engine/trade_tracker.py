@@ -1,6 +1,6 @@
-"""Persists Trend Manager's trade-initiation state -- see
-trend_manager.py's own docstring for the full rule this exists to
-enforce. Two things live here, both persisted to survive a restart:
+"""Persists Trend Manager's trade-initiation AND entry-execution state --
+see trend_manager.py's own docstring for the full rule this enforces.
+Three things live here, all persisted to survive a restart:
 
 1. Per (symbol, timeframe, direction) bucket, a "never trade backwards"
    watermark -- the start_time of the newest OB ever traded or blocked
@@ -12,23 +12,36 @@ enforce. Two things live here, both persisted to survive a restart:
    view looking "recent" (the exact same top-4 visibility churn bug
    behind several Alert Manager false positives). Without a permanent
    watermark, that reappeared-but-actually-old OB could fire a second,
-   backwards-in-time trade off the same bucket. With it, it can't --
-   the watermark doesn't care whether the OB currently LOOKS fresh, only
-   whether its own start_time already got passed.
+   backwards-in-time trade off the same bucket. With it, it can't.
+   Applies to BOTH parent timeframes AND trigger (execution) timeframes
+   -- a trigger timeframe's own bucket only ever advances on an actual
+   fill or a manual cancel (see mark_filled/close_trade), never merely
+   for existing, since triggers aren't independently "traded" the way
+   parents are.
 
-2. Per symbol, at most one currently active trade (direction + which
-   OB triggered it). No real MT5 order tracking here -- Execution
-   Bridge doesn't exist yet -- so this is Trend Manager's own
-   signal-level bookkeeping, not a live position. "Closed" is detected
-   via the entry OB's own mitigation (it fully disappears from the Data
-   Bridge's zone store) as the best available stand-in for "stopped
-   out" at this stage, per explicit user sign-off ("we can add that
-   too... whatever is convenient").
+2. Per symbol, at most one currently active trade: its parent OB
+   (decides bias/direction) and, once one is chosen, its execution plan
+   (which trigger timeframe, entry mode/price, SL). No real MT5 order
+   tracking here -- Execution Bridge doesn't exist yet -- so this is
+   Trend Manager's own signal-level bookkeeping, not a live position.
+   Status is "PENDING" (a pending order proposed but not yet filled,
+   still open to being cancelled-and-replaced by a better setup or
+   flipped by an opposite parent OB) or "FILLED" (market-mode fires
+   immediately; pending-mode fills once price crosses entry_price).
+   "Closed" is detected via the entry OB's own mitigation (it fully
+   disappears from the Data Bridge's zone store) as the best available
+   stand-in for "stopped out" at this stage, per explicit user sign-off
+   ("we can add that too... whatever is convenient").
+
+3. Nothing else -- manual-cancel-vs-system-cancel-and-replace is a real
+   distinction (see trend_manager.py) but there's no real order to
+   manually cancel yet; that branch is a documented no-op until
+   Execution Bridge exists.
 """
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -42,8 +55,14 @@ def _bucket_key(symbol: str, timeframe: str, direction: str) -> str:
 @dataclass
 class ActiveTrade:
     direction: str
-    timeframe: str
-    start_time: int
+    parent_timeframe: str
+    parent_start_time: int
+    exec_timeframe: Optional[str] = None
+    exec_start_time: Optional[int] = None
+    mode: Optional[str] = None          # "MARKET" or "PENDING"
+    entry_price: Optional[float] = None
+    sl_price: Optional[float] = None
+    status: str = "AWAITING_TRIGGER"    # AWAITING_TRIGGER -> PENDING -> FILLED
 
 
 class TradeTracker:
@@ -69,19 +88,11 @@ class TradeTracker:
     def _save(self) -> None:
         out = {
             "watermarks": self._watermarks,
-            "active_trades": {
-                symbol: {"direction": t.direction, "timeframe": t.timeframe, "start_time": t.start_time}
-                for symbol, t in self._active.items()
-            },
+            "active_trades": {symbol: asdict(t) for symbol, t in self._active.items()},
         }
         self._path.write_text(json.dumps(out))
 
-    def active_trade(self, symbol: str) -> Optional[ActiveTrade]:
-        return self._active.get(symbol)
-
-    def active_direction(self, symbol: str) -> Optional[str]:
-        trade = self._active.get(symbol)
-        return trade.direction if trade else None
+    # -- watermark ------------------------------------------------------
 
     def is_eligible(self, symbol: str, timeframe: str, direction: str, start_time: int) -> bool:
         """True only if this exact bucket has never traded/blocked
@@ -90,42 +101,108 @@ class TradeTracker:
         key = _bucket_key(symbol, timeframe, direction)
         return start_time > self._watermarks.get(key, 0)
 
-    def open_trade(self, symbol: str, timeframe: str, direction: str, start_time: int) -> None:
-        """Initiates a new trade off this OB -- only call when
-        active_direction(symbol) is None. Also advances the watermark,
-        so this exact OB (or anything older in its bucket) can never
-        fire again even after the trade eventually closes."""
-        self._active[symbol] = ActiveTrade(direction=direction, timeframe=timeframe, start_time=start_time)
-        self._advance_watermark(symbol, timeframe, direction, start_time)
-        self._save()
-
-    def mark_traded_only(self, symbol: str, timeframe: str, direction: str, start_time: int) -> None:
-        """A new same-direction OB appeared while a trade is already
-        open on this symbol -- block it from ever initiating its own
-        trade later, without touching the currently active trade.
-        Explicit user rule: "if we are in a buy trade, and one more ob
-        appears on bullish side, then consider that also traded"."""
-        self._advance_watermark(symbol, timeframe, direction, start_time)
-        self._save()
-
     def _advance_watermark(self, symbol: str, timeframe: str, direction: str, start_time: int) -> None:
         key = _bucket_key(symbol, timeframe, direction)
         if start_time > self._watermarks.get(key, 0):
             self._watermarks[key] = start_time
 
+    def mark_traded_only(self, symbol: str, timeframe: str, direction: str, start_time: int) -> None:
+        """A new same-direction PARENT OB appeared while a trade is
+        already open on this symbol -- block it from ever becoming a
+        future parent later, without touching the currently active
+        trade."""
+        self._advance_watermark(symbol, timeframe, direction, start_time)
+        self._save()
+
+    # -- active trade lifecycle ------------------------------------------
+
+    def active_trade(self, symbol: str) -> Optional[ActiveTrade]:
+        return self._active.get(symbol)
+
+    def set_parent(self, symbol: str, direction: str, parent_timeframe: str, parent_start_time: int) -> None:
+        """Bias decided, no execution plan chosen yet. Does NOT advance
+        any watermark -- a parent only gets permanently blocked once a
+        trade actually fires or is manually cancelled off it (or an
+        opposite parent flips the bias -- see close_trade)."""
+        self._active[symbol] = ActiveTrade(
+            direction=direction, parent_timeframe=parent_timeframe, parent_start_time=parent_start_time,
+        )
+        self._save()
+
+    def propose_pending(self, symbol: str, exec_timeframe: str, exec_start_time: int,
+                         entry_price: float, sl_price: Optional[float]) -> None:
+        """A trigger timeframe's OB produced a PENDING-mode entry plan.
+        Not blocked/watermarked yet -- only on fill or manual cancel."""
+        trade = self._active[symbol]
+        trade.exec_timeframe = exec_timeframe
+        trade.exec_start_time = exec_start_time
+        trade.mode = "PENDING"
+        trade.entry_price = entry_price
+        trade.sl_price = sl_price
+        trade.status = "PENDING"
+        self._save()
+
+    def fill_market(self, symbol: str, exec_timeframe: str, exec_start_time: int,
+                     entry_price: float, sl_price: Optional[float]) -> None:
+        """A trigger timeframe's OB produced a MARKET-mode entry plan --
+        fills immediately (no waiting for price to reach anything).
+        Blocks both the parent's and the exec timeframe's own buckets
+        permanently, right now."""
+        trade = self._active[symbol]
+        trade.exec_timeframe = exec_timeframe
+        trade.exec_start_time = exec_start_time
+        trade.mode = "MARKET"
+        trade.entry_price = entry_price
+        trade.sl_price = sl_price
+        trade.status = "FILLED"
+        self._advance_watermark(symbol, trade.parent_timeframe, trade.direction, trade.parent_start_time)
+        self._advance_watermark(symbol, exec_timeframe, trade.direction, exec_start_time)
+        self._save()
+
+    def fill_pending(self, symbol: str) -> None:
+        """Price has crossed the already-proposed pending entry price --
+        transitions PENDING -> FILLED and blocks both buckets, same as
+        fill_market."""
+        trade = self._active[symbol]
+        trade.status = "FILLED"
+        self._advance_watermark(symbol, trade.parent_timeframe, trade.direction, trade.parent_start_time)
+        self._advance_watermark(symbol, trade.exec_timeframe, trade.direction, trade.exec_start_time)
+        self._save()
+
+    def close_trade(self, symbol: str, block: bool = True) -> None:
+        """Ends the active trade for this symbol -- used for: (a) the
+        parent OB getting mitigated (see close_if_invalidated), (b) an
+        opposite-direction parent OB flipping the bias, (c) eventually a
+        manual cancel, once real orders exist. `block` permanently
+        watermarks the parent (and exec timeframe, if one was ever
+        chosen) so this exact setup can never be revisited -- true for
+        all of the above EXCEPT a plain mitigation-of-a-still-
+        AWAITING_TRIGGER parent (nothing was ever proposed off it, so
+        there's nothing meaningful to permanently block beyond what
+        mitigation itself already means)."""
+        trade = self._active.pop(symbol, None)
+        if trade is None:
+            return
+        if block:
+            self._advance_watermark(symbol, trade.parent_timeframe, trade.direction, trade.parent_start_time)
+            if trade.exec_timeframe is not None:
+                self._advance_watermark(symbol, trade.exec_timeframe, trade.direction, trade.exec_start_time)
+        self._save()
+
     def close_if_invalidated(self, symbol: str, store: ZoneStore) -> bool:
-        """Checks whether the currently active trade's own entry OB has
-        been mitigated (fully removed from the Data Bridge's zone
-        store) -- see module docstring point 2 for why this is the
-        stand-in for "stopped out" at this stage. Clears active_trade
-        and returns True if so; no-op (returns False) otherwise,
-        including when there's no active trade at all for this symbol."""
+        """Checks whether the currently active trade's own reference OB
+        (its exec OB if one's been chosen, else its parent OB) has been
+        mitigated (fully removed from the Data Bridge's zone store) --
+        the stand-in for "stopped out." Blocks on close (mitigation of a
+        real, chosen setup means it played out and is done -- never
+        worth revisiting). Returns True if a close happened."""
         trade = self._active.get(symbol)
         if trade is None:
             return False
-        zone = store.get(symbol, trade.timeframe, trade.direction, trade.start_time)
+        ref_timeframe = trade.exec_timeframe or trade.parent_timeframe
+        ref_start_time = trade.exec_start_time if trade.exec_timeframe else trade.parent_start_time
+        zone = store.get(symbol, ref_timeframe, trade.direction, ref_start_time)
         if zone is not None:
             return False  # still live -- trade stays open
-        del self._active[symbol]
-        self._save()
+        self.close_trade(symbol, block=True)
         return True

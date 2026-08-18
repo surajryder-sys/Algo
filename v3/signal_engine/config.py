@@ -20,6 +20,13 @@ load_dotenv()
 class SymbolConfig:
     symbol: str  # MT5 symbol name (plain, no broker suffix -- XAUUSD/BTCUSD/ETHUSD)
     zone_state_file: str  # tv_scraper's zone store for this symbol
+    # tv_scraper's live per-timeframe snapshot (close price etc) -- used
+    # for entry/distance math. Deliberately TradingView-sourced, not
+    # MT5, per explicit user call 2026-08-17: "through tv scraper is
+    # best, mt5 only for placing orders and getting live price" --
+    # keeps Trend Manager's own decision-making MT5-free, consistent
+    # with Signal Engine's "no MT5 order touched at this layer" rule.
+    live_state_file: str
     # The two "parent" timeframes trend_manager.py compares -- whichever
     # has the newer eligible OB wins and opens the trade. Differs per
     # symbol: XAUUSD (M5/M15) vs BTCUSD/ETHUSD (M15/M30), per explicit
@@ -55,18 +62,21 @@ def load_config() -> Config:
             SymbolConfig(
                 "XAUUSD",
                 os.getenv("SIGNAL_ENGINE_XAUUSD_ZONE_FILE", "tv_scraper_xauusd_zones.json"),
+                live_state_file=os.getenv("SIGNAL_ENGINE_XAUUSD_LIVE_FILE", "tv_scraper_xauusd_live.json"),
                 parent_timeframes=("5", "15"),
                 trigger_timeframes=("5", "3", "1"),
             ),
             SymbolConfig(
                 "BTCUSD",
                 os.getenv("SIGNAL_ENGINE_BTCUSD_ZONE_FILE", "tv_scraper_zones.json"),
+                live_state_file=os.getenv("SIGNAL_ENGINE_BTCUSD_LIVE_FILE", "tv_scraper_live.json"),
                 parent_timeframes=("15", "30"),
                 trigger_timeframes=("15", "5"),
             ),
             SymbolConfig(
                 "ETHUSD",
                 os.getenv("SIGNAL_ENGINE_ETHUSD_ZONE_FILE", "tv_scraper_ethusd_zones.json"),
+                live_state_file=os.getenv("SIGNAL_ENGINE_ETHUSD_LIVE_FILE", "tv_scraper_ethusd_live.json"),
                 parent_timeframes=("15", "30"),
                 trigger_timeframes=("15", "5"),
             ),
