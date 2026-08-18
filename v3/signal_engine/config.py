@@ -54,6 +54,11 @@ class Config:
     # YYMMDDNN magic-number convention (see .env.example's other bots),
     # so it's already decided and collision-free before it's ever live.
     magic_number: int
+    # Execution Bridge writes here (v3/execution_bridge/manual_events.py)
+    # the moment it detects a REAL manual cancel/close in MT5 -- read
+    # here, never written here (see trade_tracker.py's
+    # should_react_to_manual_event for the consumption side).
+    manual_events_file: str
 
 
 def load_config() -> Config:
@@ -84,4 +89,5 @@ def load_config() -> Config:
         poll_seconds=float(os.getenv("SIGNAL_ENGINE_POLL_SECONDS", "5.0")),
         trade_state_file=os.getenv("SIGNAL_ENGINE_TRADE_STATE_FILE", "trend_manager_trade_state.json"),
         magic_number=int(os.getenv("TREND_MANAGER_MAGIC_NUMBER", "26081701")),
+        manual_events_file=os.getenv("EXECUTION_BRIDGE_MANUAL_EVENTS_FILE", "execution_bridge_manual_events.json"),
     )

@@ -78,14 +78,20 @@ buffer (algo_v2's exact rule, see entries.select_sl).
 An OB only gets permanently blocked (its own bucket's watermark
 advanced) when: (a) its order actually FILLS (market fills instantly;
 pending fills when price crosses the fixed entry price), (b) it's
-flip-closed by an opposite parent OB, or (c) eventually, the user
-manually cancels a pending order (not wired yet -- no real order exists
-to cancel; documented no-op until Execution Bridge exists). Getting
+flip-closed by an opposite parent OB, or (c) the user manually cancels
+a pending order or manually closes an open position in MT5. Getting
 cancelled-and-replaced by a BETTER system-chosen setup does NOT block
 it -- that's the real fix over algo_v2's existing behavior, where only
 the one timeframe that got used blocks, letting a different timeframe
 immediately grab the same underlying opportunity right after a manual
 cancel.
+
+(c) is detected by v3/execution_bridge/'s own intervention.py (real MT5
+history, not simulated) and relayed here read-only via
+manual_events.py's small event file -- see
+TradeTracker.should_react_to_manual_event and this module's own
+_check_manual_event. Trend Manager never touches MT5 itself; it only
+reads that one small file Execution Bridge writes.
 
 Stop-vs-market fallback: if price has already moved into range by the
 time a pending order would be placed, fire market instead of a stop
@@ -93,9 +99,10 @@ that would just trigger instantly anyway -- this IS what compute_entry
 already does (distance <= market_max -> MARKET), no separate code path
 needed.
 
-Not yet wired to MT5 -- everything above is signal-only, logged for
-visibility. Execution Bridge will be what actually places/cancels real
-orders off this later.
+Signal-only here -- this module only ever decides and logs.
+v3/execution_bridge/ is what actually places/cancels/closes real MT5
+orders off these decisions (own EXECUTION_BRIDGE_ENABLE_TRADING flag,
+defaults false like every other bot in this repo).
 
 Run with: python -m v3.signal_engine.trend_manager
 """
@@ -107,6 +114,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
+from v3.execution_bridge import manual_events
 from v3.signal_engine import entries
 from v3.signal_engine.config import Config, SymbolConfig, load_config
 from v3.signal_engine.trade_tracker import ActiveTrade, TradeTracker
@@ -304,7 +312,24 @@ def _try_fire_entry(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConf
               f"@ {entry_price:.2f} SL={sl} (not yet wired to MT5 -- signal only)")
 
 
-def _run_trade_logic(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConfig) -> None:
+def _check_manual_event(tracker: TradeTracker, symbol: str, manual_events_file: str) -> bool:
+    """Reads Execution Bridge's own event file (manual_events.py,
+    read-only from here) -- if it carries a manual-cancel/close
+    timestamp for this symbol that Trend Manager hasn't already reacted
+    to, closes and permanently blocks the current trade, same treatment
+    as a bias flip. Returns True if a close happened this call."""
+    event_time = manual_events.read_event_time(manual_events_file, symbol)
+    if event_time is None or not tracker.should_react_to_manual_event(symbol, event_time):
+        return False
+    if tracker.active_trade(symbol) is None:
+        return False  # nothing currently open/pending to close
+    tracker.close_trade(symbol, block=True)
+    print(f"[trend_manager] {symbol}: manual cancel/close detected in MT5 -- closing trade, blocking that OB")
+    return True
+
+
+def _run_trade_logic(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConfig,
+                      manual_events_file: str) -> None:
     """One cycle of the full trade-initiation + entry-execution state
     machine for one symbol -- see this module's own docstring for the
     full rule. Mutates tracker (persists itself); only ever prints,
@@ -314,6 +339,8 @@ def _run_trade_logic(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolCon
 
     if tracker.close_if_invalidated(symbol, store):
         print(f"[trend_manager] {symbol}: active trade's reference OB was mitigated -- treating as closed")
+
+    _check_manual_event(tracker, symbol, manual_events_file)
 
     active = tracker.active_trade(symbol)
 
@@ -371,7 +398,7 @@ def run_once(cfg: Config, tracker: TradeTracker) -> list[TrendReading]:
         reading = compute(store, sym_cfg.symbol)
         readings.append(reading)
         print(f"[trend_manager] {_format_reading(reading)}")
-        _run_trade_logic(store, tracker, sym_cfg)
+        _run_trade_logic(store, tracker, sym_cfg, cfg.manual_events_file)
     return readings
 
 
