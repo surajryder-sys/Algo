@@ -74,6 +74,17 @@ simply hadn't been active before (the bear direction, on the very next
 restart, fired on a real but WEEK-old retest) -- the per-bucket version
 in _newest_retested_zone below is what actually closes this.
 
+Retest recency check, added 2026-08-19 (third instance of the same
+pattern): watermark ordering alone still let a real, otherwise-clean
+retest fire on a zone whose own retested_at was 12 DAYS old -- the zone
+likely wasn't visible in tv_scraper's own top-4 at first-look time (so
+the seed above never captured it), then reappeared later carrying its
+original ancient timestamp, which still looked "newer than anything
+seen" to the watermark. _newest_retested_zone now also requires
+retested_at to be within _RETEST_MAX_AGE_SECONDS (30 min) of wall-clock
+now -- an absolute check the ordering-based watermark can never provide
+by itself.
+
 Run with: python -m v3.signal_engine.reversal_manager
 """
 from __future__ import annotations
@@ -91,6 +102,16 @@ from v3.tradingview_bot.zone_store import TVZone, ZoneStore
 
 _DIRECTION_LABELS = {"bull": "bullish", "bear": "bearish"}
 _TF_LABELS = {"240": "H4", "120": "H2", "60": "H1", "30": "M30", "15": "M15", "5": "M5", "3": "M3", "1": "M1"}
+
+# How old a retest event is allowed to be (wall-clock, retested_at vs
+# now) and still count as a live "just happened" signal -- added
+# 2026-08-19 after a real, otherwise-legitimate retest fired on a zone
+# whose own retested_at was 12 days old (see _newest_retested_zone's
+# own docstring for the full root cause). 30 minutes is generous
+# against tv_scraper's own real refresh cadence (20-60s+ per timeframe,
+# worse with all 3 symbols running) while still firmly rejecting
+# anything hours/days stale.
+_RETEST_MAX_AGE_SECONDS = 1800
 
 
 def _read_live_close(path: str, symbol: str, timeframe: str) -> Optional[float]:
@@ -134,8 +155,24 @@ def _newest_retested_zone(store: ZoneStore, tracker: ReversalTracker, symbol: st
     "first run" flag isn't enough, since any bucket that simply hadn't
     fired before (e.g. bear direction, when only bull had ever been
     active) looks exactly like a fresh signal otherwise, even against
-    an existing state file. This is what actually fixes it, not the
-    whole-file version."""
+    an existing state file.
+
+    Recency check, added 2026-08-19 -- a THIRD instance of the same
+    underlying pattern, confirmed live: a genuinely real, non-suspicious
+    retest (real formation, real retest, correctly newer than the
+    bucket's watermark, having passed both guards above) fired on a
+    zone whose own retested_at was **12 days old**. Root cause: the
+    zone likely wasn't visible in tv_scraper's own top-4 store at the
+    time this bucket was first seeded (crowded out by newer zones), so
+    it never got captured by the seed -- then reappeared later (older
+    zones aging out made room again) carrying its ORIGINAL ancient
+    retested_at, and to the watermark it just looked like "something
+    newer than before," which is all is_new_retest actually checks.
+    Watermark ordering alone can never catch this -- it needs an
+    ABSOLUTE age check on the retest event itself: if retested_at is
+    older than _RETEST_MAX_AGE_SECONDS, it's not trusted as a live
+    "just happened" signal regardless of watermark/seeding state."""
+    now = time.time()
     if not tracker.is_bucket_seeded(symbol, timeframe, direction):
         already_retested = [
             z for z in store.zones(symbol, timeframe, direction)
@@ -153,6 +190,7 @@ def _newest_retested_zone(store: ZoneStore, tracker: ReversalTracker, symbol: st
         z for z in store.zones(symbol, timeframe, direction)
         if z.formed_time_confirmed and not z.virgin
         and z.retested_at != z.start_time
+        and (now - z.retested_at) <= _RETEST_MAX_AGE_SECONDS
         and tracker.is_new_retest(symbol, timeframe, direction, z.start_time)
     ]
     if not candidates:
