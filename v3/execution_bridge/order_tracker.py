@@ -31,24 +31,32 @@ class TrackedOrder:
     exec_start_time: int
 
 
+# Raw tv_scraper timeframe code -> the readable label used in comments.
+_TF_LABELS = {"240": "H4", "120": "H2", "60": "H1", "30": "M30", "15": "M15", "5": "M5", "3": "M3", "1": "M1"}
+_LABEL_TO_TF = {label: code for code, label in _TF_LABELS.items()}
+_DIRECTION_LETTERS = {"bull": "L", "bear": "S"}  # Long / Short
+_LETTER_TO_DIRECTION = {letter: direction for direction, letter in _DIRECTION_LETTERS.items()}
+
+
 def make_comment(prefix: str, exec_timeframe: str, direction: str, exec_start_time: int) -> str:
-    """Well under MT5's ~31-char comment limit even spelled out in full
-    (worst case "TM|240|bear|1787073660" is 22 chars). Prefix
-    distinguishes WHICH source decided this order -- "TM" (Trend
-    Manager) or "RM" (Reversal Manager), each its own magic number too,
-    but this is belt-and-suspenders for reading intent straight off the
-    order in the MT5 terminal, and also how
+    """"V3-TM-M5-L-1786929900" style, user's explicit format 2026-08-18
+    ("to look good... to identify the trades") -- well under MT5's
+    ~31-char limit even at the longest case ("V3-RM-M30-S-1787073660"
+    is 23 chars). Prefix distinguishes WHICH source decided this order
+    -- "TM" (Trend Manager) or "RM" (Reversal Manager), each its own
+    magic number too, but this is belt-and-suspenders for reading
+    intent straight off the order in the MT5 terminal, and also how
     _find_matching_pending/_find_matching_position tell two sources'
     orders on the same symbol apart even if a timeframe/direction/
     start_time combination ever coincided.
 
-    Direction spelled out in full, not truncated to one letter --
-    "bull"[0] and "bear"[0] are BOTH "b", so a single-letter encoding
-    can never actually distinguish them (caught 2026-08-18 before this
-    ever mattered: parse_comment's own decoded direction was unused by
-    every caller so far, but would have silently always decoded as
-    "bull" the moment anything actually read it back)."""
-    return f"{prefix}|{exec_timeframe}|{direction}|{exec_start_time}"
+    Direction as L(ong)/S(hort), not the first letter of "bull"/"bear"
+    -- those are BOTH "b", so a single-letter encoding of the word
+    itself can never actually distinguish them (caught 2026-08-18
+    before this ever mattered in the previous "|"-separated format)."""
+    tf_label = _TF_LABELS.get(exec_timeframe, exec_timeframe)
+    letter = _DIRECTION_LETTERS[direction]
+    return f"V3-{prefix}-{tf_label}-{letter}-{exec_start_time}"
 
 
 def parse_comment(comment: str) -> Optional[tuple]:
@@ -57,10 +65,14 @@ def parse_comment(comment: str) -> Optional[tuple]:
     close's exit deal sometimes doesn't preserve the entry comment --
     caller falls back to the entry deal's own comment instead, see
     intervention.py)."""
-    parts = comment.split("|")
-    if len(parts) != 4 or parts[0] not in ("TM", "RM") or parts[2] not in ("bull", "bear"):
+    parts = comment.split("-")
+    if len(parts) != 5 or parts[0] != "V3" or parts[1] not in ("TM", "RM"):
         return None
-    prefix, timeframe, direction, start_time_str = parts
+    _v3, prefix, tf_label, letter, start_time_str = parts
+    timeframe = _LABEL_TO_TF.get(tf_label)
+    direction = _LETTER_TO_DIRECTION.get(letter)
+    if timeframe is None or direction is None:
+        return None
     try:
         return prefix, timeframe, direction, int(start_time_str)
     except ValueError:

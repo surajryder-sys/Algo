@@ -105,7 +105,7 @@ def _cancel_or_close_tracked(cfg: Config, source: SourceConfig, tracker: OrderTr
         # reason triggered this). Reason stays in the console log line
         # below, never in the comment itself.
         result = broker.close_position(symbol, positions[0], cfg.deviation_points,
-                                        f"{source.comment_prefix} close")
+                                        f"V3-{source.comment_prefix}-close")
         print(f"{tag} {symbol}: closed position {tracked.ticket} ({reason}) -- {result}")
         if not result.ok:
             return  # keep tracking it -- see the PENDING branch's own comment above
