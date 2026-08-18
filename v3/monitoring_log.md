@@ -54,3 +54,27 @@ ETHUSD short). Demo account, no real money.
 
 **Overall**: healthy. No active bugs, no unresolved errors. One
 observation flagged for continued watching (SL discrepancy above).
+
+---
+
+## 2026-08-19 (recurring check)
+
+**Processes**: all 8 confirmed running.
+
+**Errors found**: same two historical entries as last check (BTCUSD
+`Invalid stops` from an already-closed position, Alert Manager's
+already-recovered IPC errors) -- both confirmed still historical, not
+recurring (both logs' most recent lines show clean, successful
+activity, no growth in the error lines since last check).
+
+**Bias**: XAUUSD bearish/bearish, BTCUSD bearish/bearish, ETHUSD
+bullish/bearish.
+
+**Active trades**: Trend Manager -- none. Reversal Manager -- ETHUSD
+short unchanged from last check (SL still correctly holding at the
+user's own manually-set 1921.75, now protected by the baseline fix).
+
+**Real MT5 account**: 1 open position (ETHUSD). Balance $2,044.96,
+equity $2,046.75 (floating +$1.79). Demo account.
+
+**Overall**: healthy, stable, no new issues since last check.
