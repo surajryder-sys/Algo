@@ -77,6 +77,20 @@ class TradeTracker:
         self._path = Path(path)
         self._active: dict[str, ActiveTrade] = {}  # symbol -> ActiveTrade
         self._watermarks: dict[str, int] = {}       # bucket_key -> start_time
+        # Per-bucket cold-start seeding for PARENT timeframes only --
+        # added 2026-08-19 after a real live incident: an M15 bearish OB
+        # over an hour old (never previously watermarked in that bucket)
+        # got treated as "the newest eligible parent" purely because
+        # start_time > 0 (the default watermark), flipping bias off a
+        # stale zone. v3's own copy of reversal_tracker.py's identical
+        # mechanism (same root cause, same fix): the FIRST time a
+        # parent-timeframe bucket is ever examined, whatever's currently
+        # there gets seeded into the watermark rather than fired on --
+        # only a genuinely NEW zone appearing after that first look can
+        # ever set/flip bias from this bucket. See
+        # trend_manager._newest_eligible_start_time for where this is
+        # applied.
+        self._seeded_buckets: set = set()
         self._manual_event_watermark: dict[str, float] = {}  # symbol -> last-reacted-to event time
         self._load()
 
@@ -88,6 +102,16 @@ class TradeTracker:
         except (json.JSONDecodeError, OSError):
             return
         self._watermarks = dict(raw.get("watermarks", {}))
+        self._seeded_buckets = set(raw.get("seeded_buckets", []))
+        # Backfill -- any bucket that already has a real watermark entry
+        # was obviously seen/processed before this fix existed. Without
+        # this, restarting against an existing state file would treat
+        # every already-legitimately-touched bucket as "unseeded" and
+        # re-seed it to the same value -- harmless in that specific
+        # case, but the intent is "only genuinely untouched buckets get
+        # the seed-not-fire treatment." Mirrors reversal_tracker.py's
+        # own identical backfill.
+        self._seeded_buckets |= set(self._watermarks.keys())
         self._active = {
             symbol: ActiveTrade(**trade)
             for symbol, trade in raw.get("active_trades", {}).items()
@@ -97,6 +121,7 @@ class TradeTracker:
     def _save(self) -> None:
         out = {
             "watermarks": self._watermarks,
+            "seeded_buckets": sorted(self._seeded_buckets),
             "active_trades": {symbol: asdict(t) for symbol, t in self._active.items()},
             "manual_event_watermark": self._manual_event_watermark,
         }
@@ -125,6 +150,24 @@ class TradeTracker:
         backwards" guarantee. See module docstring point 1."""
         key = _bucket_key(symbol, timeframe, direction)
         return start_time > self._watermarks.get(key, 0)
+
+    def is_bucket_seeded(self, symbol: str, timeframe: str, direction: str) -> bool:
+        """False only the very first time this exact PARENT-timeframe
+        bucket is ever examined -- v3's own copy of
+        ReversalTracker.is_bucket_seeded's identical reasoning. See
+        __init__'s own docstring for the live incident this fixes."""
+        return _bucket_key(symbol, timeframe, direction) in self._seeded_buckets
+
+    def seed_bucket(self, symbol: str, timeframe: str, direction: str, start_time: int) -> None:
+        """Marks this bucket seeded WITHOUT treating start_time as a
+        fired/processed OB -- used by trend_manager.py's cold-start
+        safeguard the first time a parent-timeframe bucket is ever
+        examined, to skip whatever OB already exists rather than
+        setting/flipping bias off it."""
+        key = _bucket_key(symbol, timeframe, direction)
+        if start_time > self._watermarks.get(key, 0):
+            self._watermarks[key] = start_time
+        self._seeded_buckets.add(key)
 
     def _advance_watermark(self, symbol: str, timeframe: str, direction: str, start_time: int) -> None:
         key = _bucket_key(symbol, timeframe, direction)

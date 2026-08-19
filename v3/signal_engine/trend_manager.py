@@ -197,11 +197,31 @@ def _format_reading(reading: TrendReading) -> str:
 def _newest_eligible_start_time(store: ZoneStore, tracker: TradeTracker, symbol: str,
                                  timeframe: str, direction: str) -> Optional[int]:
     """The newest formed_time_confirmed OB's start_time for this exact
-    bucket, but only if it's still eligible (newer than the bucket's own
-    permanent watermark) -- None otherwise. zones() is newest-first, and
-    a watermark only ever moves forward, so the first CONFIRMED zone
-    found is authoritative: if it fails eligibility, every older zone in
-    this bucket does too."""
+    PARENT-timeframe bucket, but only if it's still eligible (newer than
+    the bucket's own permanent watermark) -- None otherwise. zones() is
+    newest-first, and a watermark only ever moves forward, so the first
+    CONFIRMED zone found is authoritative: if it fails eligibility,
+    every older zone in this bucket does too.
+
+    Cold-start seeded, added 2026-08-19 after a real live incident: an
+    M15 bearish OB over an hour old, never previously watermarked in
+    that bucket, got treated as "the newest eligible parent" purely
+    because start_time > 0 (the default watermark) -- flipping bias off
+    a genuinely stale zone. v3's own copy of reversal_manager.py's
+    identical fix: the FIRST time this exact bucket is ever examined,
+    whatever's currently there gets seeded into the watermark instead of
+    being treated as a fresh signal -- only a zone that appears AFTER
+    that first look can ever set or flip bias from this bucket."""
+    if not tracker.is_bucket_seeded(symbol, timeframe, direction):
+        trusted = [z for z in store.zones(symbol, timeframe, direction) if _formation_trusted(z)]
+        seed_start_time = max((z.start_time for z in trusted), default=0)
+        tracker.seed_bucket(symbol, timeframe, direction, seed_start_time)
+        if seed_start_time:
+            tf_label = _TF_LABELS.get(timeframe, timeframe)
+            print(f"[trend_manager] {symbol}: first look at {tf_label} {_DIRECTION_LABELS[direction]} parent -- "
+                  f"skipping pre-existing OB @ {seed_start_time}, only reacting to new ones from here")
+        return None
+
     for zone in store.zones(symbol, timeframe, direction):
         if not _formation_trusted(zone):
             continue
