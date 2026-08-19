@@ -10,6 +10,86 @@ log noise.
 
 ---
 
+## 2026-08-19 (part 2 -- deeper fixes, new XAUUSD reversal rules, two more real bugs found)
+
+Continuation of the same night as the entry below -- the "fixed" duplicate-
+order/manual-close-undo bug from part 1 turned out to only be partially
+fixed (the one-cycle reconcile-skip wasn't long enough), and diagnosing
+that surfaced two more real, independently-confirmed bugs. Full list,
+commits in order:
+
+1. **Duplicate-fill root cause, actually fixed this time.** The one-cycle
+   skip from part 1 bought 2 seconds; Trend Manager's own PENDING->FILLED
+   transition sometimes took longer, so XAUUSD duplicated a filled
+   pending order 4x again (`c68cecf`). Real fix: `_reconcile`'s PENDING
+   branch now also checks for an already-filled matching POSITION before
+   placing a new pending order, independent of either source's timing.
+2. **Manual-close-undo, actually fixed this time.** Same commit -- an
+   explicit 8s cooldown per (source, symbol, exec_timeframe,
+   exec_start_time): after a manual close/cancel or SL/TP hit, that EXACT
+   trade won't be re-placed until the cooldown expires. Confirmed live
+   both ways: an ETHUSD manual close got reopened once before the fix,
+   held after.
+3. **`formed_time_confirmed` made sticky** (`21cd8a2`) -- a XAUUSD M5
+   zone at Pine's ~35-day lookback ceiling read `confirmed=True` on
+   exactly one poll (ordinary scrape flakiness), enough to fire a real
+   trade off a zone whose price range had nothing to do with current
+   price. New `formed_time_ever_unconfirmed`: once tainted, permanently
+   distrusted regardless of later polls. **Deployment gap found and
+   closed the same night**: the fix lives in `zone_store.py`, shared
+   between tv_scraper (writer) and Trend/Reversal Manager (readers) as
+   separate OS processes -- restarting only the readers left tv_scraper
+   running old code that never persisted the new field at all, silently
+   no-op'ing the fix until all 3 tv_scraper processes were also
+   restarted.
+4. **New XAUUSD-only Reversal Manager rules** (`6861e20`, `048f620`),
+   user's explicit spec: M5-immediate fire now gated on agreeing with at
+   least one of XAUUSD's two parent timeframes (M5/M15) -- disagreeing
+   with both no longer fires OR drops the signal, it waits for M1/M3/M5
+   LTF confirmation instead, reusing the existing HTF-wait machinery. SL
+   now capped at 20 points. Mitigation no longer auto-closes a filled
+   XAUUSD reversal trade -- only a fresh opposite OB on M1/M3 does,
+   gated on the trade's REAL fill time (`opened_at`), not its entry OB's
+   own formation time (user's own catch: "it should be after the trade
+   opened, time recording is very much important").
+5. **Stoploss Manager manual-override flapping, real bug, fixed**
+   (`30092d8`). `last_managed_sl` only got refreshed on an actual SL
+   move, so a manual change made while still below breakeven (or
+   matching the trailing formula already) looked like a FRESH manual
+   change every cycle -- each false re-detection reset the "wait for a
+   new high/low" reference to whatever price was right then, so in any
+   moving market the pause never lasted more than a cycle or two. User
+   reported manually setting SL on sell trades repeatedly and it kept
+   reverting almost immediately every time -- this was why. Fixed by
+   syncing `last_managed_sl` on every path that decides not to move the
+   SL, not just the one that does. Verified by simulation before
+   deploying.
+6. **Trend Manager parent-OB cold-start gap, real bug, fixed**
+   (`c56fa12`). An M15 bearish OB ~71 minutes old (never previously
+   watermarked in that bucket) got treated as "the newest eligible
+   parent" purely because `start_time > 0` (the default watermark) --
+   flipped bias off a genuinely stale zone away from a bullish M5 OB
+   that was only ~13 minutes old. Same root cause, same fix already
+   proven for Reversal Manager: per-bucket cold-start seeding
+   (`TradeTracker.seeded_buckets`) -- a bucket's first-ever examination
+   seeds the watermark instead of firing on whatever's already there.
+   Scoped to parent timeframes only; can't cause a missed trade, since
+   it only ever blocks a zone that predates the bucket's first look, not
+   anything that forms afterward.
+
+**Also found and cleaned up during this window**: two duplicate XAUUSD
+tv_scraper processes racing for the same browser tabs since Aug 17
+(down to one); BTCUSD tv_scraper genuinely dead for ~3 days despite the
+process count looking normal (was actually 2x XAUUSD + 1x ETHUSD, no
+BTCUSD at all) -- restarted, confirmed reading real live prices again.
+
+**Net effect**: 8 real bugs found and fixed in one extended session, all
+via live incidents the user caught in real time, not proactive testing
+-- consistent with the standing lesson that going live surfaces bugs
+dry-run/code-review alone don't.
+
+---
+
 ## 2026-08-19 (major incident + fixes -- duplicate orders, BTCUSD data outage)
 
 **Execution Bridge race condition -- CONFIRMED, FIXED, DEPLOYED.**
