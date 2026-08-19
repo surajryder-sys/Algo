@@ -20,6 +20,19 @@ idea -- explicitly no OB-based trailing at all anymore):
   stops touching it until price makes a genuinely NEW high (buy) / new
   low (sell) beyond the price level at the moment of that change, then
   resumes normal management from there.
+
+Real bug fixed 2026-08-19: last_managed_sl only ever got refreshed
+inside the branch that actually called broker.modify_position_sl, so a
+manual change made while still below breakeven (or one that happened
+to already match the trailing formula) was invisible to that update --
+it kept looking like a FRESH manual change every single cycle, which
+reset override_price_reference to whatever price happened to be right
+then. In any moving market "a new high/low beyond the reference"
+became trivially true within a poll or two, so the pause never
+actually lasted -- confirmed live: repeatedly setting SL manually kept
+getting overwritten almost immediately every time. Fixed by syncing
+last_managed_sl to the real SL on every path that decides NOT to move
+it this cycle, not just the one that does.
 """
 from __future__ import annotations
 
@@ -120,10 +133,30 @@ def _manage_one(cfg: Config, source: SourceConfig, sym_cfg: SymbolConfig, tracke
 
     desired = _desired_sl(direction, entry_price, state.peak_favor_points, sym_cfg)
     if desired is None:
-        return  # still below breakeven -- leave the initial SL alone
+        # Still below breakeven -- leave the initial SL alone. Syncing
+        # last_managed_sl here (added 2026-08-19, real confirmed bug):
+        # without this, a genuine manual change made while still below
+        # breakeven never gets accepted as "the new normal" -- it keeps
+        # looking like a FRESH manual change every single cycle (since
+        # last_managed_sl never moved off the old value), which resets
+        # override_price_reference to whatever price is right now each
+        # time. In any moving market that makes "a new high/low beyond
+        # the reference" trivially true almost immediately, so the
+        # pause never lasts -- confirmed live: the user reported
+        # setting SL manually repeatedly and it kept reverting within a
+        # cycle or two every time.
+        state.last_managed_sl = position.sl
+        sl_states.save()
+        return
 
     already_there = abs((position.sl or 0.0) - desired) < 1e-6
     if already_there:
+        # Same reasoning as above -- the real SL already matches what
+        # we'd want, but if it got there via a manual change that
+        # happens to coincide with our own formula, last_managed_sl
+        # must still be synced or the next cycle re-flags it as new.
+        state.last_managed_sl = desired
+        sl_states.save()
         return
 
     if not cfg.enable_trading:
