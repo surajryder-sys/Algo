@@ -128,6 +128,46 @@ def _formation_trusted(zone: TVZone) -> bool:
     return zone.formed_time_confirmed and not zone.formed_time_ever_unconfirmed
 
 
+def _parent_direction(store: ZoneStore, symbol: str, timeframe: str) -> Optional[str]:
+    """Newest trusted OB's direction (bull/bear) on this timeframe --
+    v3's signal_engine-wide copy of trend_manager._most_recent_direction,
+    kept local per this module's own "separate component" design (see
+    module docstring). Used only for the parent-alignment gate below,
+    added 2026-08-19."""
+    best_start_time: Optional[int] = None
+    best_direction: Optional[str] = None
+    for direction in ("bull", "bear"):
+        for zone in store.zones(symbol, timeframe, direction):  # newest first
+            if not _formation_trusted(zone):
+                continue
+            if best_start_time is None or zone.start_time > best_start_time:
+                best_start_time = zone.start_time
+                best_direction = direction
+            break
+    return best_direction
+
+
+def _parent_aligned(store: ZoneStore, symbol: str, parent_timeframes: Tuple[str, str], direction: str) -> bool:
+    """True if AT LEAST ONE of the two parent timeframes' own newest OB
+    currently agrees with direction -- user's rule 2026-08-19: "if
+    parents agree direct fire, if any one of them agree also direct
+    fire, IF BOTH disagree then wait mode." """
+    return any(_parent_direction(store, symbol, tf) == direction for tf in parent_timeframes)
+
+
+def _apply_sl_cap(sym_cfg: SymbolConfig, direction: str, entry_price: float, sl: float) -> float:
+    """Clamps SL to sym_cfg.max_sl_points from entry if it would
+    otherwise be wider -- user's rule 2026-08-19: "sl shouldn't be more
+    than 20 points by default." No-op (returns sl unchanged) when
+    max_sl_points is None (BTCUSD/ETHUSD, unaffected)."""
+    if sym_cfg.max_sl_points is None:
+        return sl
+    distance = (entry_price - sl) if direction == "bull" else (sl - entry_price)
+    if distance <= sym_cfg.max_sl_points:
+        return sl
+    return entry_price - sym_cfg.max_sl_points if direction == "bull" else entry_price + sym_cfg.max_sl_points
+
+
 def _read_live_close(path: str, symbol: str, timeframe: str) -> Optional[float]:
     p = Path(path)
     if not p.exists():
@@ -233,10 +273,34 @@ def _fire_m5_immediate(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symb
         zone = _newest_retested_zone(store, tracker, symbol, "5", direction)
         if zone is None:
             continue
+
+        # Parent-alignment gate -- XAUUSD only (sym_cfg.parent_timeframes
+        # is None for BTCUSD/ETHUSD, keeping their original always-fire
+        # behavior unchanged). Added 2026-08-19, user's explicit rule:
+        # agreeing with at least one of Trend Manager's own two parent
+        # timeframes still fires immediately below; agreeing with
+        # NEITHER doesn't fire and doesn't drop the signal either -- it
+        # becomes a waiting retest, resolved by the exact same M1/M3/M5
+        # LTF confirmation/invalidation machinery _check_direction
+        # already runs for the HTF (H4/H2/H1/M30/M15) zones. That reuse
+        # also means SL for a later LTF-confirmed fire naturally comes
+        # from THIS M5 zone's own edge (the multi-waiting-zone SL logic
+        # in _check_direction already does that), not the confirming
+        # LTF zone's -- no separate code path needed.
+        if sym_cfg.parent_timeframes is not None and not _parent_aligned(store, symbol, sym_cfg.parent_timeframes, direction):
+            retest_time = float(zone.retested_at) if zone.retested_at is not None else time.time()
+            tracker.add_waiting(symbol, direction, WaitingRetest("5", zone.start_time, zone.top, zone.btm, retest_time))
+            tracker.mark_retest_processed(symbol, "5", direction, zone.start_time)
+            label = _DIRECTION_LABELS[direction]
+            print(f"[reversal_manager] {symbol}: M5 {label} zone retested but neither parent agrees -- "
+                  f"waiting for LTF confirmation instead of firing immediately")
+            continue
+
         current_price = _read_live_close(sym_cfg.live_state_file, symbol, "5")
         if current_price is None:
             continue
         sl = entries.initial_sl(symbol, "5", direction, zone.top, zone.btm)
+        sl = _apply_sl_cap(sym_cfg, direction, current_price, sl)
         trade = ActiveReversalTrade(direction, "5", zone.start_time, current_price, sl, "MARKET", status="FILLED")
         tracker.open_trade(symbol, trade)
         tracker.mark_retest_processed(symbol, "5", direction, zone.start_time)
@@ -311,6 +375,7 @@ def _check_direction(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symbol
         sl = sl_zone.top + sl_buffer
 
     effective_entry = current_price if mode == entries.EntryMode.MARKET else entry_price
+    sl = _apply_sl_cap(sym_cfg, direction, effective_entry, sl)
     status = "FILLED" if mode == entries.EntryMode.MARKET else "PENDING"
     trade = ActiveReversalTrade(direction, timeframe, start_time, effective_entry, sl, mode.value, status=status)
     tracker.open_trade(symbol, trade)
@@ -331,6 +396,31 @@ def _close_if_invalidated(store: ZoneStore, tracker: ReversalTracker, symbol: st
         return False
     tracker.close_trade(symbol)
     return True
+
+
+def _close_if_opposite_ltf_ob(store: ZoneStore, tracker: ReversalTracker, symbol: str) -> bool:
+    """XAUUSD-only replacement for _close_if_invalidated above -- user's
+    rule 2026-08-19: "lower time ob invalidation doesn't close the
+    trade, but making an opposite side ob on m1 and m3 will surely
+    close the trade." Only ever called for a symbol whose
+    parent_timeframes is set (see run_once_symbol), so mitigation of the
+    entry OB no longer closes the trade at all for that symbol -- this
+    is the ONLY automatic (non-SL/TP, non-manual) close left. Checks
+    M1/M3 specifically, not M5 -- deliberately narrower than the M1/M3/M5
+    used for wait confirmation/invalidation elsewhere in this module."""
+    trade = tracker.active_trade(symbol)
+    if trade is None:
+        return False
+    opposite = "bear" if trade.direction == "bull" else "bull"
+    for timeframe in ("1", "3"):
+        zone = _newest_post_time_zone(store, symbol, timeframe, opposite, trade.entry_start_time)
+        if zone is not None:
+            tracker.close_trade(symbol)
+            tf_label = _TF_LABELS.get(timeframe, timeframe)
+            print(f"[reversal_manager] {symbol}: opposite {_DIRECTION_LABELS[opposite]} OB formed on {tf_label} "
+                  f"-- closing {_DIRECTION_LABELS[trade.direction]} trade")
+            return True
+    return False
 
 
 def _price_crossed(direction: str, entry_price: float, current_price: float) -> bool:
@@ -358,7 +448,13 @@ def _check_close_event(tracker: ReversalTracker, symbol: str, manual_events_file
 
 def run_once_symbol(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolConfig, manual_events_file: str) -> None:
     symbol = sym_cfg.symbol
-    if _close_if_invalidated(store, tracker, symbol):
+    # XAUUSD (parent_timeframes set) uses the opposite-M1/M3-OB close
+    # rule instead of mitigation-close -- see _close_if_opposite_ltf_ob's
+    # own docstring. BTCUSD/ETHUSD (parent_timeframes None) keep the
+    # original mitigation-close behavior, unchanged.
+    if sym_cfg.parent_timeframes is not None:
+        _close_if_opposite_ltf_ob(store, tracker, symbol)
+    elif _close_if_invalidated(store, tracker, symbol):
         print(f"[reversal_manager] {symbol}: active trade's entry OB was mitigated -- treating as closed")
 
     _check_close_event(tracker, symbol, manual_events_file)
