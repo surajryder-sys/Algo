@@ -105,7 +105,25 @@ REVERSAL_CONFIRM_CONFIGS[("XAUUSD", "1")] = _XAUUSD_REVERSAL_M1
 # Reversal Manager's multi-zone waiting-SL case (SL is based on an HTF
 # waiting zone's own timeframe, e.g. H1/M30, which has no EntryConfig
 # of its own since HTF timeframes are never a trigger).
-SYMBOL_SL_BUFFER = {"XAUUSD": _XAUUSD_M3_M5.sl_buffer, "BTCUSD": _BTCUSD.sl_buffer, "ETHUSD": _ETHUSD.sl_buffer}
+#
+# USOIL/USTEC (added 2026-08-20, values from the user) don't have an
+# ENTRY_CONFIGS entry at all -- their own Trend/Reversal Manager firing
+# path (_try_fire_entry_atr_or_ob / _check_direction_atr_or_ob) is
+# always a market order, never the pullback/distance math ENTRY_CONFIGS
+# exists for, so only this buffer lookup is ever needed for them.
+# USOIL's 0.100 was pulled from algo_v2_usoil_btc_eth/entries.py's own
+# tuned value (itself carried over unchanged from the original
+# standalone algo_v2_usoil bot, "given directly by the user, not copied
+# from XAUUSD") -- confirmed by the user as still correct for v3's own
+# TradingView-sourced zones. USTEC's 20.0 has no prior bot to pull from
+# (never traded before this repo) -- given fresh by the user.
+SYMBOL_SL_BUFFER = {
+    "XAUUSD": _XAUUSD_M3_M5.sl_buffer,
+    "BTCUSD": _BTCUSD.sl_buffer,
+    "ETHUSD": _ETHUSD.sl_buffer,
+    "USOIL": 0.100,
+    "USTEC": 20.0,
+}
 
 
 class EntryMode(Enum):
