@@ -34,14 +34,32 @@ Each cycle, per (source, symbol):
      should have already filled it into on its own.
 
    Step 2 is SKIPPED entirely for a symbol on any cycle where step 1
-   just found and cleared a disappearance -- added 2026-08-19 after two
-   real, live incidents (see _check_disappeared's own docstring): acting
-   on the same desired_state snapshot in the same breath step 1 proved
-   it stale caused a filled pending order to get duplicated (up to 4x,
-   3 left permanently untracked) and, separately, a user's manual close
-   to be silently undone a second later. The source Manager gets one
-   full cycle to react to whatever step 1 just relayed before step 2
-   trusts its state again.
+   just found and cleared a disappearance (added 2026-08-19) -- gives
+   the source Manager at least one cycle to react before step 2 trusts
+   its state again. On its own this was NOT sufficient (see below), but
+   still prevents acting on a snapshot step 1 already proved stale in
+   the exact same breath.
+
+Two further real, live incidents (2026-08-19, see _check_disappeared's
+own docstring for the full detail) needed dedicated fixes beyond the
+skip above, since the skip only ever buys one cycle (2s) and neither
+source's own reaction is guaranteed that fast:
+1. A filled pending order got duplicated up to 4x in ~30s -- Trend
+   Manager's own PENDING->FILLED transition took longer than one
+   skipped cycle, so each subsequent cycle still saw "PENDING desired,
+   nothing tracked" and placed another one. Fixed at the root: the
+   PENDING branch now also checks for an already-filled matching
+   POSITION (not just a matching pending order) before placing
+   anything new, and adopts it if found -- this doesn't depend on
+   either source's state-transition speed at all.
+2. A user's manual position close was reopened 5s later -- Reversal
+   Manager's own 5s poll interval hadn't caught up by the very next
+   Execution Bridge cycle. Fixed with an explicit cooldown
+   (_MANUAL_CLOSE_COOLDOWN_SECONDS, 8s): after a manual close/cancel or
+   a genuine SL/TP hit is relayed, Execution Bridge refuses to
+   re-place THAT EXACT (exec_timeframe, exec_start_time) trade again
+   until the cooldown expires -- a genuinely different/newer setup the
+   source proposes in the meantime is NOT blocked.
 
 Run with: python -m v3.execution_bridge.execution_bridge
 """
@@ -56,6 +74,36 @@ from v3.execution_bridge import broker, intervention, manual_events, stoploss_ma
 from v3.execution_bridge.config import Config, SourceConfig, SymbolConfig, load_config
 from v3.execution_bridge.order_tracker import OrderTracker, TrackedOrder, make_comment
 from v3.execution_bridge.sl_state import SLStateStore
+
+# How long, after a manual close/cancel (or a genuine SL/TP hit) is
+# relayed to a source, Execution Bridge refuses to re-place THAT EXACT
+# (exec_timeframe, exec_start_time) trade again -- even past the
+# one-cycle reconcile-skip below. Added 2026-08-19 after the skip alone
+# proved insufficient: confirmed live, a manual ETHUSD close was
+# reopened 5 seconds later anyway, because Reversal Manager's own state
+# (polls every 5s) hadn't caught up by the very next Execution Bridge
+# cycle (polls every 2s) -- one skipped cycle bought 2 seconds, not
+# enough. 8s comfortably covers either source's 5s poll interval plus
+# processing/write time. Keyed by (source_name, symbol); does NOT block
+# a genuinely different/newer setup the source proposes during the
+# window -- only a re-proposal of the SAME trade just closed.
+_MANUAL_CLOSE_COOLDOWN_SECONDS = 8.0
+_cooldowns: dict[tuple[str, str], tuple[str, int, float]] = {}
+
+
+def _start_cooldown(source: SourceConfig, symbol: str, exec_timeframe: str, exec_start_time: int) -> None:
+    _cooldowns[(source.name, symbol)] = (exec_timeframe, exec_start_time, time.time() + _MANUAL_CLOSE_COOLDOWN_SECONDS)
+
+
+def _cooldown_blocks(source: SourceConfig, symbol: str, exec_timeframe: str, exec_start_time: int) -> bool:
+    entry = _cooldowns.get((source.name, symbol))
+    if entry is None:
+        return False
+    cd_timeframe, cd_start_time, expires_at = entry
+    if time.time() >= expires_at:
+        del _cooldowns[(source.name, symbol)]
+        return False
+    return (cd_timeframe, cd_start_time) == (exec_timeframe, exec_start_time)
 
 
 def _read_desired_state(path: str) -> dict:
@@ -163,6 +211,7 @@ def _check_disappeared(cfg: Config, source: SourceConfig, tracker: OrderTracker,
             return False
         outcome = intervention.check_pending_disappeared(tracked.ticket, tracker)
         if outcome == "manual":
+            _start_cooldown(source, symbol, tracked.exec_timeframe, tracked.exec_start_time)
             if source.manual_events_file:
                 manual_events.write_event(source.manual_events_file, symbol)
                 print(f"{tag} {symbol}: pending order {tracked.ticket} manually cancelled -- notified {source.name}")
@@ -191,6 +240,7 @@ def _check_disappeared(cfg: Config, source: SourceConfig, tracker: OrderTracker,
         # does NOT relay -- the source already knows about that one,
         # it asked for it.
         if outcome in ("manual", "sl", "tp"):
+            _start_cooldown(source, symbol, tracked.exec_timeframe, tracked.exec_start_time)
             if source.manual_events_file:
                 manual_events.write_event(source.manual_events_file, symbol)
                 print(f"{tag} {symbol}: position {tracked.ticket} closed ({outcome}) -- notified {source.name}")
@@ -234,6 +284,25 @@ def _reconcile(cfg: Config, source: SourceConfig, tracker: OrderTracker, sym_cfg
                 tracker.set(symbol, TrackedOrder("PENDING", existing.ticket, direction, exec_timeframe, exec_start_time))
                 print(f"{tag} {symbol}: reconciled existing pending order {existing.ticket}")
                 return
+            # The pending order this same comment describes may already
+            # have FILLED into a real position -- the source's own state
+            # can lag the real fill by more than one Execution Bridge
+            # cycle (confirmed live 2026-08-19: XAUUSD duplicated 4x in
+            # ~30s because Trend Manager's PENDING->FILLED transition
+            # took longer than the one-cycle reconcile-skip covers).
+            # Checking for a matching POSITION here, not just a matching
+            # pending order, fixes this at the root regardless of how
+            # slow either source is to update its own state.
+            existing_position = _find_matching_position(symbol, magic, comment)
+            if existing_position is not None:
+                tracker.set(symbol, TrackedOrder("POSITION", existing_position.ticket, direction,
+                                                  exec_timeframe, exec_start_time))
+                print(f"{tag} {symbol}: reconciled already-filled position {existing_position.ticket} "
+                      f"(source still says PENDING)")
+                return
+            if _cooldown_blocks(source, symbol, exec_timeframe, exec_start_time):
+                print(f"{tag} {symbol}: still in post-manual-close cooldown -- not re-placing yet")
+                return
             if not cfg.enable_trading:
                 print(f"{tag} {symbol}: WOULD place {direction} LIMIT @ {desired['entry_price']} "
                       f"SL={desired['sl_price']} -- trading disabled")
@@ -250,6 +319,9 @@ def _reconcile(cfg: Config, source: SourceConfig, tracker: OrderTracker, sym_cfg
     elif status == "FILLED":
         if tracked is None:
             if desired.get("mode") == "MARKET":
+                if _cooldown_blocks(source, symbol, exec_timeframe, exec_start_time):
+                    print(f"{tag} {symbol}: still in post-manual-close cooldown -- not re-placing yet")
+                    return
                 if not cfg.enable_trading:
                     print(f"{tag} {symbol}: WOULD place {direction} MARKET SL={desired['sl_price']} -- trading disabled")
                     return
