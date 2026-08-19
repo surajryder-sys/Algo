@@ -114,6 +114,20 @@ _TF_LABELS = {"240": "H4", "120": "H2", "60": "H1", "30": "M30", "15": "M15", "5
 _RETEST_MAX_AGE_SECONDS = 1800
 
 
+def _formation_trusted(zone: TVZone) -> bool:
+    """Whether this zone's own start_time can be trusted as a real
+    formation time -- both currently confirmed AND never once seen
+    unconfirmed. Added 2026-08-19 after a real live incident: a zone at
+    Pine's ~35-day lookback ceiling read formed_time_confirmed=True on
+    exactly the one poll Reversal Manager happened to check, despite
+    being unconfirmed every other time -- a scrape-flakiness flicker,
+    not a genuine correction, but enough to fire a real trade off a
+    zone whose price range had nothing to do with current price. See
+    TVZone.formed_time_ever_unconfirmed's own docstring. Replaces every
+    bare `zone.formed_time_confirmed` check in this module."""
+    return zone.formed_time_confirmed and not zone.formed_time_ever_unconfirmed
+
+
 def _read_live_close(path: str, symbol: str, timeframe: str) -> Optional[float]:
     p = Path(path)
     if not p.exists():
@@ -176,7 +190,7 @@ def _newest_retested_zone(store: ZoneStore, tracker: ReversalTracker, symbol: st
     if not tracker.is_bucket_seeded(symbol, timeframe, direction):
         already_retested = [
             z for z in store.zones(symbol, timeframe, direction)
-            if z.formed_time_confirmed and not z.virgin and z.retested_at != z.start_time
+            if _formation_trusted(z) and not z.virgin and z.retested_at != z.start_time
         ]
         seed_start_time = max((z.start_time for z in already_retested), default=0)
         tracker.seed_bucket(symbol, timeframe, direction, seed_start_time)
@@ -188,7 +202,7 @@ def _newest_retested_zone(store: ZoneStore, tracker: ReversalTracker, symbol: st
 
     candidates = [
         z for z in store.zones(symbol, timeframe, direction)
-        if z.formed_time_confirmed and not z.virgin
+        if _formation_trusted(z) and not z.virgin
         and z.retested_at != z.start_time
         and (now - z.retested_at) <= _RETEST_MAX_AGE_SECONDS
         and tracker.is_new_retest(symbol, timeframe, direction, z.start_time)
@@ -205,7 +219,7 @@ def _newest_post_time_zone(store: ZoneStore, symbol: str, timeframe: str,
     of its own retest status (forming is the confirmation signal here,
     not being retested)."""
     for zone in store.zones(symbol, timeframe, direction):
-        if not zone.formed_time_confirmed:
+        if not _formation_trusted(zone):
             continue
         if zone.start_time > after_time:
             return zone

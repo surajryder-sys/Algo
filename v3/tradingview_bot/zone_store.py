@@ -44,6 +44,25 @@ class TVZone:
     # still-visible zone's record on its very next poll anyway, so the
     # default only ever matters for a single split-second.
     formed_time_confirmed: bool = True
+    # STICKY version of the above -- once True, stays True forever for
+    # this zone's own record, even once a LATER poll's formed_hint comes
+    # back available again. Added 2026-08-19 after a real, confirmed
+    # live incident: a zone right at Pine's ~35-day lookback ceiling had
+    # its formed_hint read AVAILABLE on one single poll (an ordinary
+    # scrape-flakiness flicker, not a genuine correction), which was
+    # enough for that one poll's formed_time_confirmed=True to slip past
+    # Reversal Manager's own guard and fire a real trade off a zone
+    # whose price range (4480s) had nothing to do with current price
+    # (~4416) -- the zone was genuinely old, the "confirmed" reading was
+    # a one-poll fluke. A single un-confirmed sighting is far likelier to
+    # mean "this zone's real age is fundamentally unknowable" than a
+    # later confirmed sighting is to mean "we can trust it after all" --
+    # so once tainted, this zone is never trusted again, regardless of
+    # what any later poll's formed_time_confirmed says. Callers that
+    # need the trustworthy reading should check
+    # `formed_time_confirmed and not formed_time_ever_unconfirmed`
+    # together, not formed_time_confirmed alone.
+    formed_time_ever_unconfirmed: bool = False
 
 
 class ZoneStore:
@@ -88,6 +107,16 @@ class ZoneStore:
         # webhook fires (carrying the exact retest bar time); tv_scraper sets
         # it directly here instead, from its own live-Close approximation.
         retested_at = data.get("retested_at")
+        formed_time_confirmed = bool(data.get("formed_time_confirmed", True))
+        # Sticky: carries forward from the existing record (if any) OR
+        # sets True the moment an unconfirmed reading is EVER seen for
+        # this start_time -- see TVZone.formed_time_ever_unconfirmed's
+        # own docstring for the live incident this prevents. Never
+        # resets back to False once set, regardless of what this or any
+        # later poll's own formed_time_confirmed says.
+        existing = zones.get(start_time)
+        ever_unconfirmed = (existing.formed_time_ever_unconfirmed if existing is not None else False) \
+            or not formed_time_confirmed
         zones[start_time] = TVZone(
             start_time=start_time,
             top=float(data["top"]),
@@ -97,7 +126,8 @@ class ZoneStore:
             detected_price=float(data["detected_price"]),
             virgin=bool(data.get("virgin", True)),
             retested_at=int(retested_at) if retested_at is not None else None,
-            formed_time_confirmed=bool(data.get("formed_time_confirmed", True)),
+            formed_time_confirmed=formed_time_confirmed,
+            formed_time_ever_unconfirmed=ever_unconfirmed,
         )
         self._save()
 

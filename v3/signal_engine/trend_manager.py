@@ -141,6 +141,21 @@ class TrendReading:
     short_term: Optional[str]   # "bullish" / "bearish" / None (no M5 data yet)
 
 
+def _formation_trusted(zone: TVZone) -> bool:
+    """Whether this zone's own start_time can be trusted as a real
+    formation time -- both currently confirmed AND never once seen
+    unconfirmed. Added 2026-08-19, v3's signal_engine-wide copy of
+    Reversal Manager's own helper of the same name (see that module's
+    docstring for the live incident: formed_time_confirmed can flicker
+    True on a single poll for a genuinely old zone due to ordinary
+    scrape flakiness, which is enough to slip past a bare
+    `zone.formed_time_confirmed` check). Replaces every such bare check
+    in this module too, for the same reason -- Trend Manager's bias and
+    trigger-OB selection are exactly as exposed to this as Reversal
+    Manager's retest selection was."""
+    return zone.formed_time_confirmed and not zone.formed_time_ever_unconfirmed
+
+
 def _most_recent_direction(store: ZoneStore, symbol: str, timeframe: str) -> Optional[str]:
     """Most recent OB (bull or bear, whichever is younger) for this
     symbol/timeframe, by real Pine-confirmed start_time. None if there's
@@ -150,7 +165,7 @@ def _most_recent_direction(store: ZoneStore, symbol: str, timeframe: str) -> Opt
     for direction in ("bull", "bear"):
         zones = store.zones(symbol, timeframe, direction)  # newest first
         for zone in zones:
-            if not zone.formed_time_confirmed:
+            if not _formation_trusted(zone):
                 continue
             if best_start_time is None or zone.start_time > best_start_time:
                 best_start_time = zone.start_time
@@ -188,7 +203,7 @@ def _newest_eligible_start_time(store: ZoneStore, tracker: TradeTracker, symbol:
     found is authoritative: if it fails eligibility, every older zone in
     this bucket does too."""
     for zone in store.zones(symbol, timeframe, direction):
-        if not zone.formed_time_confirmed:
+        if not _formation_trusted(zone):
             continue
         if tracker.is_eligible(symbol, timeframe, direction, zone.start_time):
             return zone.start_time
@@ -217,7 +232,7 @@ def _newest_post_parent_zone(store: ZoneStore, tracker: TradeTracker, symbol: st
     such OB exists. Same newest-first short-circuit logic as
     _newest_eligible_start_time."""
     for zone in store.zones(symbol, timeframe, direction):
-        if not zone.formed_time_confirmed:
+        if not _formation_trusted(zone):
             continue
         if zone.start_time <= parent_start_time:
             return None  # newest confirmed zone isn't even post-parent -> nothing older is either
