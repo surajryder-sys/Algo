@@ -70,9 +70,16 @@ currently proposed, cancel-and-replace: NOT blocked, that superseded OB
 stays eligible for later (mirrors algo_v2's own bot-cancel vs
 manual-cancel split in intervention.py's expected_cancellations).
 
-SL = the executed OB's own opposite edge (bull: its bottom; bear: its
-top), buffered by 1.0 -- simplified 2026-08-18 from an earlier,
-buggier cross-timeframe "closest edge" version (see entries.initial_sl).
+SL = the PARENT OB's own opposite edge (bull: its bottom; bear: its
+top), buffered by that symbol's own sl_buffer -- NOT whichever trigger
+timeframe (M1/M3/M5) actually executed the entry. Changed 2026-08-19,
+user's explicit correction ("whoever opens the trade, they should
+follow parent ob sl") -- the trigger OB only ever decided entry price/
+timing, never SL, going forward. Previously (2026-08-18) this used the
+executed trigger OB's own opposite edge instead; before that, an even
+earlier "closest edge" cross-timeframe search (see
+entries.initial_sl_from_parent vs the still-present entries.initial_sl,
+which Reversal Manager's own M5-immediate case continues to use).
 
 --- Blocking (permanent, never releases on mitigation) ---
 An OB only gets permanently blocked (its own bucket's watermark
@@ -275,9 +282,23 @@ def _try_fire_entry(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConf
     if already_proposed:
         return
 
-    # SL is based only on the executed OB itself, not a cross-timeframe
-    # search (see entries.initial_sl's own docstring).
-    sl = entries.initial_sl(symbol, timeframe, active.direction, top, btm)
+    # SL is based on the PARENT OB's own edge, not whichever trigger
+    # timeframe (M1/M3/M5) actually fired the entry -- user's explicit
+    # correction 2026-08-19 (see entries.initial_sl_from_parent's own
+    # docstring). The parent zone is re-fetched fresh here rather than
+    # cached on ActiveTrade since its top/btm never change once formed,
+    # but re-fetching costs nothing and avoids a second source of truth.
+    # A parent zone this trade's own bias depends on being missing from
+    # the store would mean something upstream is already badly wrong
+    # (bias-flip/mitigation logic should have reacted first) -- skip
+    # firing rather than fall back to a DIFFERENT SL basis than what was
+    # decided, silently.
+    parent_zone = store.get(symbol, active.parent_timeframe, active.direction, active.parent_start_time)
+    if parent_zone is None:
+        print(f"[trend_manager] {symbol}: parent OB ({active.parent_timeframe}, "
+              f"{active.parent_start_time}) missing from the store -- skipping this cycle's entry")
+        return
+    sl = entries.initial_sl_from_parent(symbol, active.direction, parent_zone.top, parent_zone.btm)
     tf_label = _TF_LABELS.get(timeframe, timeframe)
     direction_label = _DIRECTION_LABELS[active.direction]
 

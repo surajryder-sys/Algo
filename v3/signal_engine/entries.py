@@ -177,8 +177,32 @@ def initial_sl(symbol: str, timeframe: str, direction: str, top: float, btm: flo
     OB's own bottom, minus that symbol's own sl_buffer. Bear: OB's own
     top, plus it. None if (symbol, timeframe) has no configured buffer
     (shouldn't happen in practice -- entry and SL share the same config
-    lookup, so if entry fired, SL always resolves too)."""
+    lookup, so if entry fired, SL always resolves too).
+
+    Superseded for Trend Manager's own trades by initial_sl_from_parent
+    below (2026-08-19, user's explicit correction) -- kept here as-is
+    since Reversal Manager's M5-immediate case still wants SL from the
+    OB it actually fired off, not a parent."""
     cfg = ENTRY_CONFIGS.get((symbol, timeframe))
     if cfg is None:
         return None
     return (btm - cfg.sl_buffer) if direction == "bull" else (top + cfg.sl_buffer)
+
+
+def initial_sl_from_parent(symbol: str, direction: str, top: float, btm: float) -> float:
+    """SL based on the PARENT OB's own edge -- not whichever trigger
+    timeframe (M1/M3/M5 for XAUUSD, M5/M15 for BTC/ETH) actually fired
+    the entry. Added 2026-08-19, user's explicit correction: "sl is
+    being set as per own time frame ob, not as per parent ob... whoever
+    opens the trade, they should follow parent ob sl" -- confirmed
+    scoped to Trend Manager only (Reversal Manager's M5-immediate case
+    correctly bases SL on its own M5 reversal zone, not a parent, and
+    stays on initial_sl above).
+
+    Uses SYMBOL_SL_BUFFER rather than ENTRY_CONFIGS -- a parent
+    timeframe (M5/M15 for XAUUSD, M15/M30 for BTC/ETH) is never a
+    trigger timeframe, so it has no EntryConfig of its own to look up
+    (same reasoning SYMBOL_SL_BUFFER already exists for: Reversal
+    Manager's HTF-waiting-zone SL case)."""
+    buffer = SYMBOL_SL_BUFFER[symbol]
+    return (btm - buffer) if direction == "bull" else (top + buffer)
