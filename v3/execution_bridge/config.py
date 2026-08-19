@@ -146,5 +146,26 @@ def load_config() -> Config:
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_START_POINTS", "15")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_STEP_POINTS", "5")),
             ),
+            # USOIL/USTEC (added 2026-08-20) -- user's explicit values:
+            # "initial sl as per parent ob, then as per point trailing
+            # as of now, ob trailing will see later" -- so trailing is
+            # plain point-based (same _desired_sl formula, no code
+            # change), same single-stage shape as BTCUSD/ETHUSD
+            # (breakeven_points == trail_start_points). USOIL's own
+            # 0.600 up/0.600 trail and USTEC's 150 up/100 trail are
+            # explicitly interim -- "will modify later according to
+            # market movements".
+            SymbolConfig(
+                "USOIL", float(os.getenv("EXECUTION_BRIDGE_USOIL_LOTS", "0.02")),
+                breakeven_points=float(os.getenv("EXECUTION_BRIDGE_USOIL_BREAKEVEN_POINTS", "0.600")),
+                trail_start_points=float(os.getenv("EXECUTION_BRIDGE_USOIL_TRAIL_START_POINTS", "0.600")),
+                trail_step_points=float(os.getenv("EXECUTION_BRIDGE_USOIL_TRAIL_STEP_POINTS", "0.600")),
+            ),
+            SymbolConfig(
+                "USTEC", float(os.getenv("EXECUTION_BRIDGE_USTEC_LOTS", "0.20")),
+                breakeven_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_BREAKEVEN_POINTS", "150")),
+                trail_start_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_TRAIL_START_POINTS", "150")),
+                trail_step_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_TRAIL_STEP_POINTS", "100")),
+            ),
         ],
     )
