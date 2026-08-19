@@ -301,7 +301,8 @@ def _fire_m5_immediate(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symb
             continue
         sl = entries.initial_sl(symbol, "5", direction, zone.top, zone.btm)
         sl = _apply_sl_cap(sym_cfg, direction, current_price, sl)
-        trade = ActiveReversalTrade(direction, "5", zone.start_time, current_price, sl, "MARKET", status="FILLED")
+        trade = ActiveReversalTrade(direction, "5", zone.start_time, current_price, sl, "MARKET",
+                                     status="FILLED", opened_at=time.time())
         tracker.open_trade(symbol, trade)
         tracker.mark_retest_processed(symbol, "5", direction, zone.start_time)
         label = _DIRECTION_LABELS[direction]
@@ -377,7 +378,12 @@ def _check_direction(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symbol
     effective_entry = current_price if mode == entries.EntryMode.MARKET else entry_price
     sl = _apply_sl_cap(sym_cfg, direction, effective_entry, sl)
     status = "FILLED" if mode == entries.EntryMode.MARKET else "PENDING"
-    trade = ActiveReversalTrade(direction, timeframe, start_time, effective_entry, sl, mode.value, status=status)
+    # PENDING leaves opened_at at its default (0.0) -- not really open
+    # yet, ReversalTracker.mark_filled() sets the real value once price
+    # actually crosses and it fills (see run_once_symbol).
+    opened_at = time.time() if mode == entries.EntryMode.MARKET else 0.0
+    trade = ActiveReversalTrade(direction, timeframe, start_time, effective_entry, sl, mode.value,
+                                 status=status, opened_at=opened_at)
     tracker.open_trade(symbol, trade)
     tracker.clear_waiting(symbol, direction)
     tf_label = _TF_LABELS.get(timeframe, timeframe)
@@ -407,13 +413,22 @@ def _close_if_opposite_ltf_ob(store: ZoneStore, tracker: ReversalTracker, symbol
     entry OB no longer closes the trade at all for that symbol -- this
     is the ONLY automatic (non-SL/TP, non-manual) close left. Checks
     M1/M3 specifically, not M5 -- deliberately narrower than the M1/M3/M5
-    used for wait confirmation/invalidation elsewhere in this module."""
+    used for wait confirmation/invalidation elsewhere in this module.
+
+    Gated on trade.opened_at (the trade's own REAL fill time), not
+    entry_start_time (the entry OB's own formation time) -- user's
+    explicit correction 2026-08-19: "it should be after the trade
+    opened, time recording is very much important." Using
+    entry_start_time here would let an opposite OB that already formed
+    BEFORE the trade actually filled (just after the entry zone's own
+    formation, but still before the real open) count as a fresh
+    post-open signal."""
     trade = tracker.active_trade(symbol)
-    if trade is None:
-        return False
+    if trade is None or trade.status != "FILLED":
+        return False  # not actually open yet -- nothing to close
     opposite = "bear" if trade.direction == "bull" else "bull"
     for timeframe in ("1", "3"):
-        zone = _newest_post_time_zone(store, symbol, timeframe, opposite, trade.entry_start_time)
+        zone = _newest_post_time_zone(store, symbol, timeframe, opposite, int(trade.opened_at))
         if zone is not None:
             tracker.close_trade(symbol)
             tf_label = _TF_LABELS.get(timeframe, timeframe)

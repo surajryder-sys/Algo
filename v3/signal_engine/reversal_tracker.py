@@ -37,6 +37,7 @@ docstring for the full rule. Three things live here:
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -71,6 +72,23 @@ class ActiveReversalTrade:
     # already-filled position. MARKET starts FILLED immediately (fires
     # the instant it's decided, nothing to wait for).
     status: str = "PENDING"
+    # Real wall-clock time this trade actually became a FILLED position
+    # -- NOT entry_start_time above, which is the entry OB's own
+    # FORMATION time and can predate the actual fill by any amount.
+    # Added 2026-08-19 after the user's explicit correction: the
+    # opposite-LTF-OB exit rule (see reversal_manager._close_if_
+    # opposite_ltf_ob) must only react to an opposite OB that formed
+    # AFTER the trade truly opened, not merely after its entry zone
+    # formed -- using entry_start_time there could treat an OB that
+    # already existed before the trade even filled as a fresh signal.
+    # Set at construction for a MARKET fill (immediate), refreshed by
+    # ReversalTracker.mark_filled() for a PENDING order's real fill.
+    # Defaults 0.0 so a trade persisted before this field existed
+    # doesn't break on load -- effectively means "any OB counts" for
+    # such a trade, a one-time harmless gap on the very next restart
+    # only (mark_filled/open_trade always set a real value from here
+    # on).
+    opened_at: float = 0.0
 
 
 class ReversalTracker:
@@ -221,6 +239,11 @@ class ReversalTracker:
         trade = self._active.get(symbol)
         if trade is not None:
             trade.status = "FILLED"
+            # Real fill moment for a PENDING order -- see
+            # ActiveReversalTrade.opened_at's own docstring for why this
+            # must be the actual fill time, not the entry zone's own
+            # formation time (entry_start_time).
+            trade.opened_at = time.time()
             self._save()
 
     def close_trade(self, symbol: str) -> None:
