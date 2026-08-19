@@ -64,6 +64,17 @@ class SymbolConfig:
     # zone-store-shaped file convention as the other per-symbol state
     # files.
     atr_state_file: Optional[str] = None
+    # Hard cap on initial SL distance from entry (price units, symbol's
+    # own scale) -- None means no cap (every symbol except XAUUSD,
+    # unchanged). Added 2026-08-20: SL follows the PARENT OB's own edge
+    # (see entries.initial_sl_from_parent), which can end up arbitrarily
+    # wide if price runs a long way between the parent forming and the
+    # trigger actually firing -- confirmed live, a real (not stale/
+    # tainted) parent OB produced a genuine ~33-point SL after XAUUSD
+    # rallied hard in the gap between the two. Same mechanism already
+    # built for Reversal Manager's own XAUUSD rules
+    # (reversal_config.SymbolConfig.max_sl_points), same 20-point value.
+    max_sl_points: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +104,7 @@ def load_config() -> Config:
                 live_state_file=os.getenv("SIGNAL_ENGINE_XAUUSD_LIVE_FILE", "tv_scraper_xauusd_live.json"),
                 parent_timeframes=("5", "15"),
                 trigger_timeframes=("5", "3", "1"),
+                max_sl_points=20.0,
             ),
             SymbolConfig(
                 "BTCUSD",

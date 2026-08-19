@@ -286,6 +286,22 @@ def _price_crossed(direction: str, entry_price: float, current_price: float) -> 
     return current_price <= entry_price if direction == "bull" else current_price >= entry_price
 
 
+def _apply_sl_cap(sym_cfg: SymbolConfig, direction: str, entry_price: float, sl: float) -> float:
+    """Clamps SL to sym_cfg.max_sl_points from entry if it would
+    otherwise be wider -- v3's own copy of
+    reversal_manager._apply_sl_cap's identical logic. Added 2026-08-20
+    after a real (non-stale) parent OB produced a genuine ~33-point SL
+    when XAUUSD rallied hard between the parent forming and the trigger
+    firing. No-op (returns sl unchanged) when max_sl_points is None
+    (every symbol except XAUUSD, for now)."""
+    if sym_cfg.max_sl_points is None:
+        return sl
+    distance = (entry_price - sl) if direction == "bull" else (sl - entry_price)
+    if distance <= sym_cfg.max_sl_points:
+        return sl
+    return entry_price - sym_cfg.max_sl_points if direction == "bull" else entry_price + sym_cfg.max_sl_points
+
+
 def _atr_confirms(atr_store: AtrStore, symbol: str, timeframe: str, direction: str, after_time: int) -> bool:
     """True if this timeframe's own ATR trend currently agrees with
     direction AND last flipped to it strictly after after_time (the
@@ -344,6 +360,7 @@ def _try_fire_entry_atr_or_ob(store: ZoneStore, tracker: TradeTracker, sym_cfg: 
               f"{active.parent_start_time}) missing from the store -- skipping this cycle's entry")
         return
     sl = entries.initial_sl_from_parent(symbol, direction, parent_zone.top, parent_zone.btm)
+    sl = _apply_sl_cap(sym_cfg, direction, current_price, sl)
 
     # exec_start_time needs a stable identity either way -- the OB's own
     # start_time when that's what confirmed, else the ATR flip's own
@@ -407,6 +424,8 @@ def _try_fire_entry(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConf
               f"{active.parent_start_time}) missing from the store -- skipping this cycle's entry")
         return
     sl = entries.initial_sl_from_parent(symbol, active.direction, parent_zone.top, parent_zone.btm)
+    effective_entry = current_price if mode == entries.EntryMode.MARKET else entry_price
+    sl = _apply_sl_cap(sym_cfg, active.direction, effective_entry, sl)
     tf_label = _TF_LABELS.get(timeframe, timeframe)
     direction_label = _DIRECTION_LABELS[active.direction]
 
