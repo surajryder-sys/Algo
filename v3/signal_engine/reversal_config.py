@@ -48,6 +48,20 @@ class SymbolConfig:
     # -- None means uncomputed/no cap (BTCUSD/ETHUSD, unchanged). Added
     # same day as parent_timeframes above, same XAUUSD-only scope.
     max_sl_points: Optional[float] = None
+    # USOIL/USTEC only (2026-08-19) -- when set, _check_direction's
+    # LTF confirmation/invalidation ALSO accepts an ATR trend flip on
+    # this timeframe as a peer to a fresh LTF OB (either one confirms or
+    # invalidates a waiting retest), and a confirmed fire is always
+    # MARKET, skipping the pullback/distance math entirely -- same
+    # "m3 is the only execution timeframe... market entry, as its lower
+    # time frame" reasoning as Trend Manager's own atr_confirm_timeframe
+    # (see that module's SymbolConfig docstring for the full user quote).
+    # These two symbols have no M5-immediate tier at all -- harmless
+    # by construction, not a separate flag: their tv_scraper grid has no
+    # M5 pane, so _fire_m5_immediate's own zone lookup simply never
+    # finds anything and no-ops every cycle.
+    atr_confirm_timeframe: Optional[str] = None
+    atr_state_file: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +100,32 @@ def load_config() -> Config:
                 os.getenv("SIGNAL_ENGINE_ETHUSD_ZONE_FILE", "tv_scraper_ethusd_zones.json"),
                 os.getenv("SIGNAL_ENGINE_ETHUSD_LIVE_FILE", "tv_scraper_ethusd_live.json"),
                 ltf_timeframes=("5",),
+            ),
+            # USOIL/USTEC (added 2026-08-19) -- see trend_manager's own
+            # config.py for the shared-tv_scraper-process rationale.
+            # HTF_TIMEFRAMES above still gets used unchanged for these
+            # two (_register_htf_retests iterates it for every symbol) --
+            # harmless: their tv_scraper grid has no H4/H2 panes, so
+            # those two entries simply never find zone data and no-op,
+            # leaving H1/M30/M15 (their real 3 parents) as the only ones
+            # that ever actually register a wait. NOT yet wired into
+            # Execution Bridge or entries.py's SYMBOL_SL_BUFFER -- same
+            # "SL buffers pending" gap as Trend Manager's own entries.
+            SymbolConfig(
+                "USOIL",
+                os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ZONE_FILE", "tv_scraper_usoil_ustec_zones.json"),
+                os.getenv("SIGNAL_ENGINE_USOIL_USTEC_LIVE_FILE", "tv_scraper_usoil_ustec_live.json"),
+                ltf_timeframes=("3",),
+                atr_confirm_timeframe="3",
+                atr_state_file=os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ATR_FILE", "tv_scraper_usoil_ustec_atr.json"),
+            ),
+            SymbolConfig(
+                "USTEC",
+                os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ZONE_FILE", "tv_scraper_usoil_ustec_zones.json"),
+                os.getenv("SIGNAL_ENGINE_USOIL_USTEC_LIVE_FILE", "tv_scraper_usoil_ustec_live.json"),
+                ltf_timeframes=("3",),
+                atr_confirm_timeframe="3",
+                atr_state_file=os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ATR_FILE", "tv_scraper_usoil_ustec_atr.json"),
             ),
         ],
         poll_seconds=float(os.getenv("REVERSAL_MANAGER_POLL_SECONDS", "5.0")),

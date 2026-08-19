@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -34,13 +34,36 @@ class SymbolConfig:
     # H4/H2/H1/M30/M15/M5 (no M1/M3 at all, see
     # project_tv_scraper_multi_symbol_setup memory), so XAUUSD's M5/M3/M1
     # scheme simply doesn't apply there; everything shifts one tier up.
-    parent_timeframes: Tuple[str, str]
+    # Was a fixed 2-tuple until USOIL/USTEC (2026-08-19), whose own
+    # parent scheme is three-wide (1h/30m/15m) rather than two --
+    # _best_parent_candidate/_newest_eligible_start_time already just
+    # iterate this, so widening the type is the only change needed.
+    parent_timeframes: Tuple[str, ...]
     # Pure execution triggers -- never get their own watermark, just
     # need ANY confirmed OB in the parent's direction to fire. XAUUSD:
     # M5/M3/M1 ("whichever forms first"). BTCUSD/ETHUSD: M15/M5 (same
     # "whichever gets the early entry" idea, shifted for the TFs crypto
-    # actually has).
+    # actually has). USOIL/USTEC: M3 only.
     trigger_timeframes: Tuple[str, ...]
+    # Set only for USOIL/USTEC (2026-08-19, user's explicit rule) --
+    # when present, _try_fire_entry uses a DIFFERENT firing mechanism
+    # entirely: instead of the pullback/market distance math every other
+    # symbol uses, it fires a MARKET order the instant EITHER a fresh OB
+    # forms on this timeframe (matching bias direction) OR this
+    # timeframe's own ATR trend flips to match bias direction --
+    # whichever happens first ("m3 is the only execution timeframe...
+    # fresh ob's trend manager will trade, based on the confirmation of
+    # atr in m3... also ATR flip or a fresh ob on m3, whichever confirms
+    # first... fresh ob on m3 also market entry, as its lower time
+    # frame... or ATR flip also market entry"). None (default) keeps
+    # every existing symbol on the original pullback-distance mechanism,
+    # untouched.
+    atr_confirm_timeframe: Optional[str] = None
+    # Where to read this symbol's ATR trend/event_time from (AtrStore) --
+    # only needed when atr_confirm_timeframe is set. Shares the SAME
+    # zone-store-shaped file convention as the other per-symbol state
+    # files.
+    atr_state_file: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +107,36 @@ def load_config() -> Config:
                 live_state_file=os.getenv("SIGNAL_ENGINE_ETHUSD_LIVE_FILE", "tv_scraper_ethusd_live.json"),
                 parent_timeframes=("15", "30"),
                 trigger_timeframes=("15", "5"),
+            ),
+            # USOIL/USTEC (added 2026-08-19) -- one shared tv_scraper
+            # process/window serves both (same "Scrpr_USOIL/USTEC" 2x4
+            # layout, one browser tab), so both symbols share the same
+            # zone/live/atr state files -- harmless, ZoneStore/AtrStore
+            # key everything by (symbol, ...) internally regardless of
+            # which files are shared. NOT yet wired into Execution
+            # Bridge (v3/execution_bridge/config.py) or entries.py's
+            # SYMBOL_SL_BUFFER -- SL buffers/lots are still pending from
+            # the user, so these two can compute bias/signals but can't
+            # actually fire a real order yet (trend_manager.py's
+            # ATR-confirm path explicitly checks for this and skips
+            # rather than raising -- see its own comment).
+            SymbolConfig(
+                "USOIL",
+                os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ZONE_FILE", "tv_scraper_usoil_ustec_zones.json"),
+                live_state_file=os.getenv("SIGNAL_ENGINE_USOIL_USTEC_LIVE_FILE", "tv_scraper_usoil_ustec_live.json"),
+                parent_timeframes=("60", "30", "15"),
+                trigger_timeframes=("3",),
+                atr_confirm_timeframe="3",
+                atr_state_file=os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ATR_FILE", "tv_scraper_usoil_ustec_atr.json"),
+            ),
+            SymbolConfig(
+                "USTEC",
+                os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ZONE_FILE", "tv_scraper_usoil_ustec_zones.json"),
+                live_state_file=os.getenv("SIGNAL_ENGINE_USOIL_USTEC_LIVE_FILE", "tv_scraper_usoil_ustec_live.json"),
+                parent_timeframes=("60", "30", "15"),
+                trigger_timeframes=("3",),
+                atr_confirm_timeframe="3",
+                atr_state_file=os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ATR_FILE", "tv_scraper_usoil_ustec_atr.json"),
             ),
         ],
         poll_seconds=float(os.getenv("SIGNAL_ENGINE_POLL_SECONDS", "5.0")),

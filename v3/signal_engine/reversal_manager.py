@@ -98,6 +98,7 @@ from v3.execution_bridge import manual_events
 from v3.signal_engine import entries, reversal_config
 from v3.signal_engine.reversal_config import Config, SymbolConfig
 from v3.signal_engine.reversal_tracker import ActiveReversalTrade, ReversalTracker, WaitingRetest
+from v3.tradingview_bot.atr_store import AtrStore
 from v3.tradingview_bot.zone_store import TVZone, ZoneStore
 
 _DIRECTION_LABELS = {"bull": "bullish", "bear": "bearish"}
@@ -327,6 +328,89 @@ def _register_htf_retests(store: ZoneStore, tracker: ReversalTracker, sym_cfg: S
             print(f"[reversal_manager] {symbol}: {tf_label} {label} zone retested -- waiting for LTF confirmation")
 
 
+def _atr_confirms(atr_store: AtrStore, symbol: str, timeframe: str, direction: str, after_time: float) -> bool:
+    """v3's own copy of trend_manager._atr_confirms's identical logic --
+    True if this timeframe's own ATR trend currently agrees with
+    direction AND last flipped to it strictly after after_time."""
+    state = atr_store.get(symbol, timeframe)
+    if state is None:
+        return False
+    wants_trend = 1 if direction == "bull" else -1
+    return state.trend == wants_trend and state.event_time is not None and state.event_time > after_time
+
+
+def _check_direction_atr_or_ob(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolConfig,
+                                direction: str) -> bool:
+    """USOIL/USTEC's own LTF resolution -- user's explicit rule
+    2026-08-19: M3 confirms (or invalidates) via EITHER a fresh OB or an
+    ATR flip, whichever comes first, and a confirmed fire is always
+    MARKET (no pullback/distance math -- "as its lower time frame").
+    See reversal_config.SymbolConfig.atr_confirm_timeframe's own
+    docstring. Structurally mirrors _check_direction above; kept as its
+    own function rather than branching that one, since the confirmation
+    half's shape (no distance/mode comparison, single timeframe) is
+    different enough that interleaving would hurt more than it'd share."""
+    symbol = sym_cfg.symbol
+    timeframe = sym_cfg.atr_confirm_timeframe
+    waiting = tracker.get_waiting(symbol, direction)
+    if not waiting:
+        return False
+    gate_time = min(w.retest_time for w in waiting)
+    opposite = "bear" if direction == "bull" else "bull"
+    atr_store = AtrStore(sym_cfg.atr_state_file)
+
+    # Invalidation: a fresh opposite OB OR an opposite ATR flip on M3
+    # scraps the wait -- symmetric with the confirmation side below,
+    # same reasoning _check_direction already applies to its own
+    # OB-only invalidation.
+    opposite_zone = _newest_post_time_zone(store, symbol, timeframe, opposite, int(gate_time))
+    opposite_atr = _atr_confirms(atr_store, symbol, timeframe, opposite, gate_time)
+    if opposite_zone is not None or opposite_atr:
+        tracker.clear_waiting(symbol, direction)
+        tf_label = _TF_LABELS.get(timeframe, timeframe)
+        reason = "OB" if opposite_zone is not None else "ATR flip"
+        print(f"[reversal_manager] {symbol}: opposite {_DIRECTION_LABELS[opposite]} {reason} on {tf_label} "
+              f"while waiting -- {_DIRECTION_LABELS[direction]} setup invalidated, blocked until next retest")
+        return False
+
+    # Confirmation: fresh same-direction OB OR ATR flip, whichever first.
+    zone = _newest_post_time_zone(store, symbol, timeframe, direction, int(gate_time))
+    ob_confirms = zone is not None
+    atr_confirms = _atr_confirms(atr_store, symbol, timeframe, direction, gate_time)
+    if not ob_confirms and not atr_confirms:
+        return False
+
+    if symbol not in entries.SYMBOL_SL_BUFFER:
+        print(f"[reversal_manager] {symbol}: {_DIRECTION_LABELS[direction]} confirmation ready "
+              f"({'OB' if ob_confirms else 'ATR'}) but SL buffer not configured yet -- skipping")
+        return False
+
+    current_price = _read_live_close(sym_cfg.live_state_file, symbol, timeframe)
+    if current_price is None:
+        return False
+
+    sl_buffer = entries.SYMBOL_SL_BUFFER[symbol]
+    if direction == "bull":
+        sl_zone = min(waiting, key=lambda w: w.btm)
+        sl = sl_zone.btm - sl_buffer
+    else:
+        sl_zone = max(waiting, key=lambda w: w.top)
+        sl = sl_zone.top + sl_buffer
+    sl = _apply_sl_cap(sym_cfg, direction, current_price, sl)
+
+    start_time = zone.start_time if ob_confirms else int(atr_store.get(symbol, timeframe).event_time)
+    reason = "fresh OB" if ob_confirms else "ATR flip"
+    trade = ActiveReversalTrade(direction, timeframe, start_time, current_price, sl, "MARKET",
+                                 status="FILLED", opened_at=time.time())
+    tracker.open_trade(symbol, trade)
+    tracker.clear_waiting(symbol, direction)
+    tf_label = _TF_LABELS.get(timeframe, timeframe)
+    label = _DIRECTION_LABELS[direction]
+    print(f"[reversal_manager] {symbol}: LTF confirmation via {tf_label} ({reason}) -- REVERSAL TRADE MARKET "
+          f"{label} @ {current_price:.2f} SL={sl:.2f} (not yet wired to MT5 -- signal only)")
+    return True
+
+
 def _check_direction(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolConfig, direction: str) -> bool:
     symbol = sym_cfg.symbol
     waiting = tracker.get_waiting(symbol, direction)
@@ -489,8 +573,9 @@ def run_once_symbol(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolC
 
     _register_htf_retests(store, tracker, sym_cfg)
 
+    check_fn = _check_direction_atr_or_ob if sym_cfg.atr_confirm_timeframe is not None else _check_direction
     for direction in ("bull", "bear"):
-        if _check_direction(store, tracker, sym_cfg, direction):
+        if check_fn(store, tracker, sym_cfg, direction):
             return
 
 

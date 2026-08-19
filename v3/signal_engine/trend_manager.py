@@ -125,6 +125,7 @@ from v3.execution_bridge import manual_events
 from v3.signal_engine import entries
 from v3.signal_engine.config import Config, SymbolConfig, load_config
 from v3.signal_engine.trade_tracker import ActiveTrade, TradeTracker
+from v3.tradingview_bot.atr_store import AtrStore
 from v3.tradingview_bot.zone_store import TVZone, ZoneStore
 
 _M15 = "15"
@@ -285,6 +286,78 @@ def _price_crossed(direction: str, entry_price: float, current_price: float) -> 
     return current_price <= entry_price if direction == "bull" else current_price >= entry_price
 
 
+def _atr_confirms(atr_store: AtrStore, symbol: str, timeframe: str, direction: str, after_time: int) -> bool:
+    """True if this timeframe's own ATR trend currently agrees with
+    direction AND last flipped to it strictly after after_time (the
+    parent OB's own formation time) -- mirrors the "post-parent-
+    formation, freshest-only" requirement _newest_post_parent_zone
+    already applies to OB-based triggers, just for the ATR signal
+    instead. AtrStore's own event_time is already debounced against
+    intrabar noise by AtrTrendTracker (2 consecutive polls to commit a
+    flip) -- see that module's own docstring."""
+    state = atr_store.get(symbol, timeframe)
+    if state is None:
+        return False
+    wants_trend = 1 if direction == "bull" else -1
+    return state.trend == wants_trend and state.event_time is not None and state.event_time > after_time
+
+
+def _try_fire_entry_atr_or_ob(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConfig,
+                               active: ActiveTrade) -> None:
+    """USOIL/USTEC's own firing mechanism -- user's explicit rule
+    2026-08-19, see SymbolConfig.atr_confirm_timeframe's own docstring
+    for the full quote. Only ever called while active.status is
+    AWAITING_TRIGGER (the caller already returns early on FILLED, and
+    this mechanism never produces a PENDING state to revisit -- always
+    an immediate market fire, never a pullback proposal)."""
+    symbol = sym_cfg.symbol
+    timeframe = sym_cfg.atr_confirm_timeframe
+    direction = active.direction
+
+    zone = _newest_post_parent_zone(store, tracker, symbol, timeframe, direction, active.parent_start_time)
+    ob_confirms = zone is not None
+
+    atr_store = AtrStore(sym_cfg.atr_state_file)
+    atr_confirms = _atr_confirms(atr_store, symbol, timeframe, direction, active.parent_start_time)
+
+    if not ob_confirms and not atr_confirms:
+        return
+
+    # SL buffer not configured yet (user said "pending, I'll give
+    # later") -- skip cleanly rather than let entries.SYMBOL_SL_BUFFER's
+    # unguarded dict lookup raise. Trend Manager's own run_once has no
+    # per-symbol try/except (unlike Reversal Manager's), so an
+    # unhandled KeyError here would skip the ENTIRE cycle for every
+    # OTHER symbol too, not just this one -- must not let that happen.
+    if symbol not in entries.SYMBOL_SL_BUFFER:
+        print(f"[trend_manager] {symbol}: {_DIRECTION_LABELS[direction]} entry ready "
+              f"({'OB' if ob_confirms else 'ATR'} confirmed) but SL buffer not configured yet -- skipping")
+        return
+
+    current_price = _read_live_close(sym_cfg.live_state_file, symbol, timeframe)
+    if current_price is None:
+        return
+
+    parent_zone = store.get(symbol, active.parent_timeframe, active.direction, active.parent_start_time)
+    if parent_zone is None:
+        print(f"[trend_manager] {symbol}: parent OB ({active.parent_timeframe}, "
+              f"{active.parent_start_time}) missing from the store -- skipping this cycle's entry")
+        return
+    sl = entries.initial_sl_from_parent(symbol, direction, parent_zone.top, parent_zone.btm)
+
+    # exec_start_time needs a stable identity either way -- the OB's own
+    # start_time when that's what confirmed, else the ATR flip's own
+    # event_time (both are real, distinct epoch timestamps).
+    start_time = zone.start_time if ob_confirms else int(atr_store.get(symbol, timeframe).event_time)
+    reason = "fresh OB" if ob_confirms else "ATR flip"
+
+    tracker.fill_market(symbol, timeframe, start_time, current_price, sl)
+    tf_label = _TF_LABELS.get(timeframe, timeframe)
+    direction_label = _DIRECTION_LABELS[direction]
+    print(f"[trend_manager] {symbol}: TRADE SIGNAL {direction_label} FILLED (market) via {tf_label} "
+          f"({reason} confirmation) @ {current_price:.2f} SL={sl} (not yet wired to MT5 -- signal only)")
+
+
 def _try_fire_entry(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConfig, active: ActiveTrade) -> None:
     """Scans trigger timeframes for the best current entry-plan
     candidate and, if it's new/better than whatever's already proposed,
@@ -416,7 +489,10 @@ def _run_trade_logic(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolCon
     if active.status == "FILLED":
         return  # nothing more to do until closure (mitigation) or a bias flip
 
-    _try_fire_entry(store, tracker, sym_cfg, active)
+    if sym_cfg.atr_confirm_timeframe is not None:
+        _try_fire_entry_atr_or_ob(store, tracker, sym_cfg, active)
+    else:
+        _try_fire_entry(store, tracker, sym_cfg, active)
 
     active = tracker.active_trade(symbol)  # re-fetch -- _try_fire_entry may have mutated it
     if active is not None and active.status == "PENDING":
