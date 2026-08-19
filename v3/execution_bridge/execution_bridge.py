@@ -16,8 +16,11 @@ Each cycle, per (source, symbol):
    SL/TP hit, or Execution Bridge's own expected cancellation) via
    intervention.py, relay a manual event to the SOURCE'S OWN manual-
    events consumer if that's what happened, then drop the stale
-   tracking. (Only Trend Manager currently reads a manual-events file;
-   Reversal Manager doesn't have that feedback loop yet.)
+   tracking. (Both sources read their own manual-events file as of
+   2026-08-18 -- stale note here previously said only Trend Manager
+   did; Reversal Manager's own relay was added the same day a real SL
+   hit left its state stuck FILLED forever, see SourceConfig's own
+   comment in config.py.)
 2. Compare the source's desired state against what's now tracked --
    same shape for both sources (direction/status/exec_timeframe/
    exec_start_time/mode/entry_price/sl_price), Reversal Manager's own
@@ -29,6 +32,16 @@ Each cycle, per (source, symbol):
    - FILLED/MARKET desired, nothing tracked -> place a market order now.
    - FILLED/PENDING desired -> look for the real position the broker
      should have already filled it into on its own.
+
+   Step 2 is SKIPPED entirely for a symbol on any cycle where step 1
+   just found and cleared a disappearance -- added 2026-08-19 after two
+   real, live incidents (see _check_disappeared's own docstring): acting
+   on the same desired_state snapshot in the same breath step 1 proved
+   it stale caused a filled pending order to get duplicated (up to 4x,
+   3 left permanently untracked) and, separately, a user's manual close
+   to be silently undone a second later. The source Manager gets one
+   full cycle to react to whatever step 1 just relayed before step 2
+   trusts its state again.
 
 Run with: python -m v3.execution_bridge.execution_bridge
 """
@@ -112,21 +125,42 @@ def _cancel_or_close_tracked(cfg: Config, source: SourceConfig, tracker: OrderTr
     tracker.clear(symbol)
 
 
-def _check_disappeared(cfg: Config, source: SourceConfig, tracker: OrderTracker, symbol: str) -> None:
+def _check_disappeared(cfg: Config, source: SourceConfig, tracker: OrderTracker, symbol: str) -> bool:
     """If Execution Bridge is tracking a ticket that's no longer open in
     MT5, works out why and clears the stale tracking. Relays a manual
     event to Trend Manager's own consumer if this source is "trend"
     (Reversal Manager doesn't have that feedback loop yet). Mutates
-    tracker; does not place anything new (that's _reconcile's job)."""
+    tracker; does not place anything new (that's _reconcile's job).
+
+    Returns True if a disappearance was found and tracking cleared --
+    run_once uses this to SKIP _reconcile for this symbol for the rest
+    of this cycle. Without that, _reconcile would immediately act on the
+    same desired_state snapshot this cycle already read at the top of
+    run_once, before the source Manager had any chance to react to what
+    was JUST discovered here -- confirmed live 2026-08-19, twice, both
+    against real filled orders:
+    1. A pending order filled, cleared here, then _reconcile (same
+       cycle, desired_state still said PENDING) placed a brand new
+       pending order at the same price -- which also filled instantly,
+       repeating up to 4x in a row until the source's own state file
+       finally caught up. Left 3 duplicate, completely untracked real
+       positions open (order_tracker only ever holds one ticket).
+    2. The user manually closed a real position; detected and relayed
+       here correctly, but _reconcile (same cycle, desired_state still
+       said FILLED) immediately reopened the exact same trade one
+       second later -- undoing the manual close entirely. It only
+       self-corrected because Trend Manager happened to invalidate the
+       setup on its own very next poll; nothing guaranteed that.
+    """
     tag = f"[execution_bridge:{source.name}]"
     tracked = tracker.get(symbol)
     if tracked is None:
-        return
+        return False
 
     if tracked.kind == "PENDING":
         still_there = any(o.ticket == tracked.ticket for o in broker.get_pending_orders(symbol, source.magic_number))
         if still_there:
-            return
+            return False
         outcome = intervention.check_pending_disappeared(tracked.ticket, tracker)
         if outcome == "manual":
             if source.manual_events_file:
@@ -137,11 +171,12 @@ def _check_disappeared(cfg: Config, source: SourceConfig, tracker: OrderTracker,
                       f"{source.name} has no relay configured, WILL NOT be notified")
         elif outcome == "filled":
             print(f"{tag} {symbol}: pending order {tracked.ticket} filled")
-        tracker.clear(symbol)  # stale either way -- a fill gets re-discovered as a position below
+        tracker.clear(symbol)  # stale either way -- a fill gets re-discovered as a position next cycle
+        return True
     else:
         still_there = any(p.ticket == tracked.ticket for p in broker.get_positions(symbol, source.magic_number))
         if still_there:
-            return
+            return False
         outcome = intervention.check_position_disappeared(tracked.ticket)
         # Manual close AND a genuine SL/TP hit all mean the same thing
         # from the source Manager's own point of view: this trade is
@@ -167,6 +202,7 @@ def _check_disappeared(cfg: Config, source: SourceConfig, tracker: OrderTracker,
                 print(f"{tag} {symbol}: position {tracked.ticket} closed ({outcome}) -- "
                       f"{source.name} has no relay configured, WILL NOT be notified")
         tracker.clear(symbol)
+        return True
 
 
 def _reconcile(cfg: Config, source: SourceConfig, tracker: OrderTracker, sym_cfg: SymbolConfig,
@@ -260,7 +296,20 @@ def run_once(cfg: Config, runtimes: list) -> None:
         desired_state = _read_desired_state(source.decision_state_file)
         for sym_cfg in cfg.symbols:
             try:
-                _check_disappeared(cfg, source, runtime.tracker, sym_cfg.symbol)
+                just_cleared = _check_disappeared(cfg, source, runtime.tracker, sym_cfg.symbol)
+                if just_cleared:
+                    # desired_state (read once, at the top of this loop)
+                    # predates what _check_disappeared just found -- the
+                    # source Manager hasn't had a chance to react yet.
+                    # Skip reconciling this symbol for the rest of THIS
+                    # cycle; the next cycle re-reads desired_state fresh,
+                    # by which point it's caught up. See
+                    # _check_disappeared's own docstring for the two real
+                    # incidents (duplicate fills, an undone manual close)
+                    # this prevents.
+                    print(f"[execution_bridge:{source.name}] {sym_cfg.symbol}: skipping reconcile this cycle -- "
+                          f"letting {source.name}'s own state catch up first")
+                    continue
                 _reconcile(cfg, source, runtime.tracker, sym_cfg, desired_state.get(sym_cfg.symbol))
             except Exception as exc:
                 print(f"[execution_bridge:{source.name}] {sym_cfg.symbol} ERROR: {exc}")

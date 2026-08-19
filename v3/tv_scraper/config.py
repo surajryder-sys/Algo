@@ -28,6 +28,7 @@ class Config:
     trend_state_file: str
     live_snapshot_file: str
     mitigation_track_file: str
+    zone_history_log_file: str
     browser_executable_path: Optional[str]
     grid_rows: int
     grid_cols: int
@@ -67,6 +68,14 @@ def load_config() -> Config:
         # this needs to survive a restart now that ZoneStore.apply_mitigated
         # deletes zones instead of just flagging them.
         mitigation_track_file=os.getenv("TV_SCRAPER_MITIGATION_TRACK_FILE", "tv_scraper_mitigation_track.json"),
+        # Append-only record of every zone ever seen newly formed --
+        # separate from zone_state_file, which only holds CURRENTLY LIVE
+        # zones (deleted on mitigation). See zone_history_log.py's own
+        # docstring for why this exists: 2026-08-19, after "where did
+        # that OB come from" couldn't be answered because the zone
+        # involved had already been mitigated and dropped from the live
+        # state file by the time the question came up.
+        zone_history_log_file=os.getenv("TV_SCRAPER_ZONE_HISTORY_LOG_FILE", "tv_scraper_zone_history.jsonl"),
         browser_executable_path=os.getenv("TV_SCRAPER_BROWSER_PATH") or None,
         # Pane grid on the chart layout at chart_url -- e.g. 2x2 for a
         # 4-pane grid (M1/M3/M5/M15, one per pane), each pane self-detecting

@@ -30,6 +30,7 @@ from v3.tv_scraper.live_snapshot_store import LiveSnapshotStore
 from v3.tv_scraper.mitigation_track_store import MitigationTrackStore
 from v3.tv_scraper.parser import parse_data_window
 from v3.tv_scraper.retest_tracker import RetestTracker
+from v3.tv_scraper import zone_history_log
 
 _DATA_WINDOW_TAB = "Data window"
 
@@ -313,7 +314,7 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
                       symbol: str, timeframe: str, direction: str, current: list[dict],
                       previously_seen: dict[int, int], missing_streak: dict[int, int],
                       pending_retest: dict[int, int], pending_formed: dict[int, int],
-                      close_price: Optional[float]
+                      close_price: Optional[float], zone_history_log_path: Optional[str] = None
                       ) -> tuple[dict[int, int], dict[int, int], dict[int, int], dict[int, int]]:
     """Applies formed zones for one direction and marks any zone that has
     dropped out of view for _MITIGATION_DEBOUNCE_POLLS consecutive polls as
@@ -569,6 +570,19 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
             retested_at = retested.mark(symbol, timeframe, direction, price_key,
                                          hint=confirmed_retest_hint)
 
+        # Log to the permanent zone-history record the FIRST time this
+        # exact start_time is ever written to ZoneStore -- not every
+        # poll's re-confirmation of an already-known zone. ZoneStore
+        # itself deletes on mitigation, so this is the only place this
+        # zone's range/times survive past that. See zone_history_log.py's
+        # own docstring for why this exists.
+        if zone_history_log_path is not None and zones.get(symbol, timeframe, direction, start_time) is None:
+            zone_history_log.append(
+                zone_history_log_path, symbol=symbol, timeframe=timeframe, direction=direction,
+                start_time=start_time, top=zone["top"], btm=zone["btm"], detected_time=now,
+                formed_time_confirmed=formed_hint is not None,
+            )
+
         zones.apply_formed(symbol, timeframe, direction, {
             "start_time": start_time,
             "top": zone["top"],
@@ -625,7 +639,7 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
                    retested: RetestTracker, trend_tracker: AtrTrendTracker, live: LiveSnapshotStore,
                    mitigation_track: MitigationTrackStore,
                    pane_label: str, x_fraction: float, y_fraction: float, configured_symbol: str,
-                   configured_timeframe: str) -> None:
+                   configured_timeframe: str, zone_history_log_path: Optional[str] = None) -> None:
     _focus_pane(page, x_fraction, y_fraction)
     # The Data Window sidebar doesn't repaint for the newly-focused pane
     # instantly -- reading it right after the click (as this used to do)
@@ -707,7 +721,8 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
             mitigation_track.get_last_seen(symbol, timeframe, direction),
             mitigation_track.get_missing_streak(symbol, timeframe, direction),
             mitigation_track.get_pending_retest(symbol, timeframe, direction),
-            mitigation_track.get_pending_formed(symbol, timeframe, direction), parsed.close)
+            mitigation_track.get_pending_formed(symbol, timeframe, direction), parsed.close,
+            zone_history_log_path)
         mitigation_track.update(symbol, timeframe, direction, seen, streak, pending_retest, pending_formed)
 
     # Raw mirror -- exactly this poll's parsed Bull1-4/Bear1-4 (top/btm/
@@ -723,10 +738,11 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
 def run_once(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: FirstSeenStore,
              retested: RetestTracker, trend_tracker: AtrTrendTracker, live: LiveSnapshotStore,
              mitigation_track: MitigationTrackStore,
-             symbol: str, timeframe: str, panes: list[tuple[str, float, float]]) -> None:
+             symbol: str, timeframe: str, panes: list[tuple[str, float, float]],
+             zone_history_log_path: Optional[str] = None) -> None:
     for pane_label, x_fraction, y_fraction in panes:
         run_once_pane(page, zones, atr, first_seen, retested, trend_tracker, live, mitigation_track,
-                      pane_label, x_fraction, y_fraction, symbol, timeframe)
+                      pane_label, x_fraction, y_fraction, symbol, timeframe, zone_history_log_path)
 
 
 # Anti-throttling flags shared by both the CDP-launch path (below) and the
@@ -895,7 +911,7 @@ def main() -> None:
             while True:
                 try:
                     run_once(page, zones, atr, first_seen, retested, trend_tracker, live, mitigation_track,
-                             cfg.symbol, cfg.timeframe, panes)
+                             cfg.symbol, cfg.timeframe, panes, cfg.zone_history_log_file)
                 except Exception as exc:
                     print(f"[tv_scraper] ERROR: {exc}")
                 time.sleep(cfg.poll_seconds)

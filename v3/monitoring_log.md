@@ -4,8 +4,61 @@ Recurring check (every ~30 min) of: process health, log errors, current
 bias/active trades, and real MT5 account state. Each entry below is one
 check. Newest entries at the top.
 
-Not committed to git (state/log file, see .gitignore) -- purely a
-running record for the user to review.
+Deliberately trackable in git (not gitignored like the raw `*.log`
+files) -- this is a curated summary worth keeping history on, not raw
+log noise.
+
+---
+
+## 2026-08-19 (major incident + fixes -- duplicate orders, BTCUSD data outage)
+
+**Execution Bridge race condition -- CONFIRMED, FIXED, DEPLOYED.**
+`_reconcile` acted on the same `desired_state` snapshot `_check_disappeared`
+had just proven stale within the same cycle, causing two distinct real
+incidents: (1) a filled XAUUSD pending order got duplicated up to 4x in
+~11 seconds (128050095/100/111/117), 3 left permanently untracked --
+confirmed a SECOND, smaller-scale prior occurrence the same day (06:30,
+self-corrected, previously unnoticed); (2) the user's own manual close
+of a live position was silently undone/reopened within 1-4 seconds,
+twice, before the fix was deployed. Fixed in `execution_bridge.py`:
+`_check_disappeared` now returns whether it found+cleared a
+disappearance, and `run_once` skips `_reconcile` for that symbol for
+the rest of that cycle when it did -- the source Manager gets one full
+cycle to react before Execution Bridge trusts its state again. User
+manually closed all 3 orphaned XAUUSD duplicates + confirmed the
+account is flat. Deployed live (new process, verified via fresh PID).
+
+**BTCUSD tv_scraper was dead for ~3 days -- CONFIRMED, FIXED.** Process
+count still looked normal (3 alive) but was actually 2 duplicate XAUUSD
+instances (racing for the same browser tabs since Aug 17) + 1 ETHUSD --
+no BTCUSD-configured process existed. `tv_scraper_run.log` (BTCUSD's
+own log) last wrote Aug 16 21:35, using an outdated 1x2 grid layout
+that predates the current 6x1 config -- meaning it had already fallen
+behind before dying. Every BTCUSD Trend/Reversal Manager decision since
+then ran on frozen zone data; no clean way to retroactively separate
+which trades that actually affected. Restarted BTCUSD (attached to the
+already-open browser window, no data loss to the window itself, just
+nothing had been reading/writing it), removed the duplicate XAUUSD
+instance, restarted ETHUSD too for the code fix below. All 3 confirmed
+independently reading correct, distinct real prices post-restart.
+**User asked to watch BTCUSD's next trades more closely than usual
+given this.**
+
+**Zone-history logging added.** New persistent, append-only
+`tv_scraper_<symbol>_zone_history.jsonl` per symbol -- ZoneStore itself
+deletes a zone on mitigation, so a trade's origin zone was often
+already gone by the time a "where did that OB come from" question came
+up. Now every newly-formed zone (range, timeframe, direction, times) is
+durably logged the first time it's seen, independent of the live
+top-4-style store's own churn.
+
+**Also investigated, not a bug:** a XAUUSD sell fired off a real,
+formed_time_confirmed M5 bearish parent OB (08:25 IST) the user
+couldn't spot on the live chart -- data-side looked legitimate
+(non-fallback timestamp, sane range), but couldn't be independently
+re-verified since the zone had already aged out of the live store by
+the time it was checked; the new zone-history log above closes that gap
+for next time.
 
 ---
 
