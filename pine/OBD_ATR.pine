@@ -1,0 +1,119 @@
+//@version=4
+study(title="OBD_ATR v1.0", overlay = true)
+//CREDITS to HPotter for the orginal ATR-trailing-stop code. The guy trying
+//to sell this as his own is a scammer lol.
+//
+//Consolidated 2026-08-20 (v1.0, renamed from atr_trail_webhook.pine) --
+//was two separate copies of this indicator on the same chart (Key
+//Value/ATR Period pairs (2,2) and (2,300)), one per ATR period, so
+//whichever period's trend flips FIRST could be used as the entry
+//confirmation trigger. Consolidated into ONE indicator computing BOTH
+//trail lines internally instead of running two full copies -- same
+//"headless where it doesn't need to draw" philosophy as OBD_Reversal:
+//buy/sell shape labels and bar coloring dropped entirely (were only ever
+//visual sugar tied to a single trail line, meaningless with two), each
+//line still plots its own trailing-stop for visual reference, and each
+//fires its own atr_trail webhook per bar close, tagged with which ATR
+//period it came from (see the "atr_period" payload field below) so the
+//Python side (v3/tradingview_bot/atr_store.py's AtrStore) can track both
+//readings independently instead of one overwriting the other.
+//
+//Every statement below is deliberately kept to ONE line (no wrapped/
+//hanging-indent expressions) even where that makes lines long -- Pine's
+//block parsing is indentation-sensitive, and a wrapped multi-line
+//expression typed through TradingView's Pine Editor let auto-indent
+//stack on top of this file's own indentation, corrupting it (confirmed
+//live 2026-08-20). One statement per line sidesteps that entirely: every
+//line inside a block sits at the exact same single indent level, so
+//auto-indent (which just repeats the previous line's level) can't drift.
+src = close
+
+webhook_secret = input("", title="Webhook Secret")
+
+// --- Line 1 (fast, by default) ---
+keyvalue_1 = input(2, title = "Line 1 Key Value", step = .5, group = "Line 1")
+atrperiod_1 = input(2, title = "Line 1 ATR Period", group = "Line 1")
+
+// --- Line 2 (slow, by default) ---
+keyvalue_2 = input(2, title = "Line 2 Key Value", step = .5, group = "Line 2")
+atrperiod_2 = input(300, title = "Line 2 ATR Period", group = "Line 2")
+
+bar_time_sec = round(time / 1000)
+
+//Function to compute the ATR trailing stop + trend (1/-1) for one
+//(keyvalue, atrperiod) pair -- same logic the original single-line
+//script used (ratcheted trailing stop, trend flips on a cross), just
+//written as flat ternary chains instead of nested multi-line iff() calls
+//so every line stays at one indent level (see module header).
+compute_trail(keyvalue, atrperiod) =>
+    xATR = atr(atrperiod)
+    nLoss = keyvalue * xATR
+    var float trail = 0.0
+    above_prev = src > nz(trail[1], 0) and src[1] > nz(trail[1], 0)
+    below_prev = src < nz(trail[1], 0) and src[1] < nz(trail[1], 0)
+    still_above = src > nz(trail[1], 0)
+    trail := above_prev ? max(nz(trail[1]), src - nLoss) : below_prev ? min(nz(trail[1]), src + nLoss) : (still_above ? src - nLoss : src + nLoss)
+    var int trend = 0
+    crossed_up = src[1] < nz(trail[1], 0) and src > nz(trail[1], 0)
+    crossed_dn = src[1] > nz(trail[1], 0) and src < nz(trail[1], 0)
+    trend := crossed_up ? 1 : crossed_dn ? -1 : nz(trend[1], 0)
+    [trail, trend]
+
+[trail_1, trend_1] = compute_trail(keyvalue_1, atrperiod_1)
+[trail_2, trend_2] = compute_trail(keyvalue_2, atrperiod_2)
+
+color_1 = trend_1 == -1 ? color.red : trend_1 == 1 ? color.green : color.blue
+color_2 = trend_2 == -1 ? color.red : trend_2 == 1 ? color.green : color.blue
+
+plot(trail_1, color = color_1, title = "Line 1 Trailing Stop")
+plot(trail_2, color = color_2, title = "Line 2 Trailing Stop", style = plot.style_circles)
+
+//-----------------------------------------------------------------------------}
+//Webhook: fires once per closed bar, per line, with that line's own
+//trail/trend state -- mirrors atr_bridge.ATRSnapshot's own shape
+//(trail_stop/trend/event_time), plus a new "atr_period" field (this
+//line's own ATR Period input, stringified) identifying WHICH period this
+//particular reading came from -- AtrStore keys on
+//symbol|timeframe|atr_period now, not just symbol|timeframe, specifically
+//so two periods for the same symbol+timeframe don't overwrite each
+//other. event_time_N only updates on an actual trend flip (matching the
+//original script's own buy-or-sell gate, computed here directly from
+//trend != trend[1] instead of separate buy/sell variables since those
+//got dropped along with the shape labels).
+//-----------------------------------------------------------------------------{
+var float event_time_1_ms = na
+if trend_1 != nz(trend_1[1], 0)
+    event_time_1_ms := time
+event_time_1_sec = na(event_time_1_ms) ? 0 : round(event_time_1_ms / 1000)
+
+atr_payload_1 = '{"secret":"' + webhook_secret + '","type":"atr_trail","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","atr_period":"' + tostring(atrperiod_1, '#') + '","trail_stop":' + tostring(trail_1) + ',"trend":' + tostring(trend_1, '#') + ',"event_time":' + tostring(event_time_1_sec, '#') + ',"bar_time":' + tostring(bar_time_sec, '#') + '}'
+alert(atr_payload_1, alert.freq_once_per_bar_close)
+
+var float event_time_2_ms = na
+if trend_2 != nz(trend_2[1], 0)
+    event_time_2_ms := time
+event_time_2_sec = na(event_time_2_ms) ? 0 : round(event_time_2_ms / 1000)
+
+atr_payload_2 = '{"secret":"' + webhook_secret + '","type":"atr_trail","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","atr_period":"' + tostring(atrperiod_2, '#') + '","trail_stop":' + tostring(trail_2) + ',"trend":' + tostring(trend_2, '#') + ',"event_time":' + tostring(event_time_2_sec, '#') + ',"bar_time":' + tostring(bar_time_sec, '#') + '}'
+alert(atr_payload_2, alert.freq_once_per_bar_close)
+
+//-----------------------------------------------------------------------------}
+//NOT plotting trend_1/trend_2 (deliberately, 2026-08-20) -- the original
+//script's own comment claimed a transparent -1/0/1 plot is "negligible
+//against price scale," but that's wrong: autoscale fits the WHOLE
+//visible history's min/max across every plot on the price scale
+//regardless of that plot's own color/transparency, so a -1..1 range
+//sitting next to real price (thousands) forces the y-axis to span from
+//-1 up to full price -- confirmed live as the actual cause of "chart
+//gets squeezed on reset/load." Also confirmed unnecessary: tv_scraper's
+//own atr_trend_tracker.py derives trend from trail_stop + live Close
+//directly, specifically INSTEAD OF needing this plot (a separate, older
+//fix for missed-flip polling gaps) -- nothing downstream reads it.
+//-----------------------------------------------------------------------------{
+alertcondition(trend_1 != nz(trend_1[1], 0), 'Line 1 Trend Flip', 'OBD_ATR Line 1 trend flipped')
+alertcondition(trend_2 != nz(trend_2[1], 0), 'Line 2 Trend Flip', 'OBD_ATR Line 2 trend flipped')
+
+// NOTE: as with OBD_Reversal, these alertcondition() entries are for the
+// alert dialog's dropdown discoverability only -- the actual TradingView
+// alert must use "Any alert() function call" as its condition, or neither
+// atr_payload_1 nor atr_payload_2's JSON ever gets sent.

@@ -132,7 +132,7 @@ from v3.execution_bridge import manual_events
 from v3.signal_engine import entries, reversal_config
 from v3.signal_engine.reversal_config import Config, SymbolConfig
 from v3.signal_engine.reversal_tracker import ActiveReversalTrade, ReversalTracker, WaitingRetest
-from v3.tradingview_bot.atr_store import AtrStore
+from v3.tradingview_bot.atr_store import AtrStore, TVAtrState
 from v3.tradingview_bot.zone_store import TVZone, ZoneStore
 
 _DIRECTION_LABELS = {"bull": "bullish", "bear": "bearish"}
@@ -526,15 +526,28 @@ def _prune_mitigated_waiting(store: ZoneStore, tracker: ReversalTracker, symbol:
     return still_valid
 
 
-def _atr_confirms(atr_store: AtrStore, symbol: str, timeframe: str, direction: str, after_time: float) -> bool:
-    """v3's own copy of trend_manager._atr_confirms's identical logic --
-    True if this timeframe's own ATR trend currently agrees with
-    direction AND last flipped to it strictly after after_time."""
-    state = atr_store.get(symbol, timeframe)
-    if state is None:
-        return False
+def _atr_confirms(atr_store: AtrStore, symbol: str, timeframe: str, direction: str, after_time: float) -> Optional[TVAtrState]:
+    """Was v3's own copy of trend_manager._atr_confirms's identical bool
+    logic; widened 2026-08-20 to check EVERY ATR period reading for this
+    symbol+timeframe (OBD_ATR.pine can run more than one period on the
+    same symbol+timeframe now, tagged by atr_period -- see
+    AtrStore.get_all_for's own docstring), not just a single unlabeled
+    one. Returns whichever period's reading both agrees with direction
+    AND flipped to it strictly after after_time -- the EARLIEST such flip
+    if more than one period currently qualifies, matching the user's own
+    explicit reason for running two periods: "whichever gives early
+    confirmation, we enter based on that." Returns None (falsy, same as
+    the old bool False) if no period currently confirms; callers that
+    need the confirming reading's own event_time (not just a yes/no) now
+    get it directly from the returned object instead of a second lookup."""
     wants_trend = 1 if direction == "bull" else -1
-    return state.trend == wants_trend and state.event_time is not None and state.event_time > after_time
+    candidates = [
+        s for s in atr_store.get_all_for(symbol, timeframe)
+        if s.trend == wants_trend and s.event_time is not None and s.event_time > after_time
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda s: s.event_time)
 
 
 def _check_direction_atr_or_ob(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolConfig,
@@ -563,7 +576,7 @@ def _check_direction_atr_or_ob(store: ZoneStore, tracker: ReversalTracker, sym_c
     # OB-only invalidation.
     opposite_zone = _newest_post_time_zone(store, symbol, timeframe, opposite, int(gate_time))
     opposite_atr = _atr_confirms(atr_store, symbol, timeframe, opposite, gate_time)
-    if opposite_zone is not None or opposite_atr:
+    if opposite_zone is not None or opposite_atr is not None:
         tracker.clear_waiting(symbol, direction)
         tf_label = _TF_LABELS.get(timeframe, timeframe)
         reason = "OB" if opposite_zone is not None else "ATR flip"
@@ -575,7 +588,7 @@ def _check_direction_atr_or_ob(store: ZoneStore, tracker: ReversalTracker, sym_c
     zone = _newest_post_time_zone(store, symbol, timeframe, direction, int(gate_time))
     ob_confirms = zone is not None
     atr_confirms = _atr_confirms(atr_store, symbol, timeframe, direction, gate_time)
-    if not ob_confirms and not atr_confirms:
+    if not ob_confirms and atr_confirms is None:
         return False
 
     if symbol not in entries.SYMBOL_SL_BUFFER:
@@ -596,7 +609,7 @@ def _check_direction_atr_or_ob(store: ZoneStore, tracker: ReversalTracker, sym_c
         sl = sl_zone.top + sl_buffer
     sl = _apply_sl_cap(sym_cfg, direction, current_price, sl)
 
-    start_time = zone.start_time if ob_confirms else int(atr_store.get(symbol, timeframe).event_time)
+    start_time = zone.start_time if ob_confirms else int(atr_confirms.event_time)
     reason = "fresh OB" if ob_confirms else "ATR flip"
     trade = ActiveReversalTrade(direction, timeframe, start_time, current_price, sl, "MARKET",
                                  status="FILLED", opened_at=time.time(), exec_via_atr=not ob_confirms,

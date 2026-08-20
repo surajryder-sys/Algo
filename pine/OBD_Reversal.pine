@@ -252,7 +252,7 @@ if not na(bull_ob)
     // bar, not once per real formation). The condition itself is already
     // gated on barstate.isconfirmed so it's only ever true for one bar;
     // once_per_bar_close makes the ALERT match that too, matching
-    // atr_trail_webhook.pine's own (already-correct) frequency.
+    // OBD_ATR.pine's own (already-correct) frequency.
     alert(bull_form_payload, alert.freq_once_per_bar_close)
 
 [bear_top
