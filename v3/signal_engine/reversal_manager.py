@@ -303,7 +303,7 @@ def _fire_m5_immediate(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symb
         sl = entries.initial_sl(symbol, "5", direction, zone.top, zone.btm)
         sl = _apply_sl_cap(sym_cfg, direction, current_price, sl)
         trade = ActiveReversalTrade(direction, "5", zone.start_time, current_price, sl, "MARKET",
-                                     status="FILLED", opened_at=time.time())
+                                     status="FILLED", opened_at=time.time(), parent_timeframe="5")
         tracker.open_trade(symbol, trade)
         tracker.mark_retest_processed(symbol, "5", direction, zone.start_time)
         label = _DIRECTION_LABELS[direction]
@@ -401,7 +401,8 @@ def _check_direction_atr_or_ob(store: ZoneStore, tracker: ReversalTracker, sym_c
     start_time = zone.start_time if ob_confirms else int(atr_store.get(symbol, timeframe).event_time)
     reason = "fresh OB" if ob_confirms else "ATR flip"
     trade = ActiveReversalTrade(direction, timeframe, start_time, current_price, sl, "MARKET",
-                                 status="FILLED", opened_at=time.time(), exec_via_atr=not ob_confirms)
+                                 status="FILLED", opened_at=time.time(), exec_via_atr=not ob_confirms,
+                                 parent_timeframe=sl_zone.timeframe)
     tracker.open_trade(symbol, trade)
     tracker.clear_waiting(symbol, direction)
     tf_label = _TF_LABELS.get(timeframe, timeframe)
@@ -467,7 +468,7 @@ def _check_direction(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symbol
     # actually crosses and it fills (see run_once_symbol).
     opened_at = time.time() if mode == entries.EntryMode.MARKET else 0.0
     trade = ActiveReversalTrade(direction, timeframe, start_time, effective_entry, sl, mode.value,
-                                 status=status, opened_at=opened_at)
+                                 status=status, opened_at=opened_at, parent_timeframe=sl_zone.timeframe)
     tracker.open_trade(symbol, trade)
     tracker.clear_waiting(symbol, direction)
     tf_label = _TF_LABELS.get(timeframe, timeframe)

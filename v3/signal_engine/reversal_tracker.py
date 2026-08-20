@@ -97,6 +97,18 @@ class ActiveReversalTrade:
     # reading as "mitigated" and closing the trade almost immediately.
     # _close_if_invalidated skips entirely when this is True.
     exec_via_atr: bool = False
+    # The "parent" (bias-setting) timeframe for the order comment --
+    # added 2026-08-20 for the new parent-exec comment pattern (see
+    # order_tracker.make_comment). Reversal Manager has no separate
+    # "parent" concept the way Trend Manager does, so this is set to
+    # whichever zone's own timeframe actually decided the SL: the M5
+    # zone itself for an immediate fire (parent == exec, there's no
+    # real distinction), or the SL-determining waiting zone's timeframe
+    # for an LTF-confirmed fire (same zone _check_direction/
+    # _check_direction_atr_or_ob already pick for the multi-waiting-zone
+    # SL calculation). None only for a trade persisted before this field
+    # existed -- execution_bridge.py falls back to exec_timeframe then.
+    parent_timeframe: Optional[str] = None
 
 
 class ReversalTracker:

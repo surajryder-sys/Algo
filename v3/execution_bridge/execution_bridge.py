@@ -271,7 +271,15 @@ def _reconcile(cfg: Config, source: SourceConfig, tracker: OrderTracker, sym_cfg
     status = desired["status"]
     exec_timeframe = desired.get("exec_timeframe") or desired.get("entry_timeframe")
     exec_start_time = desired.get("exec_start_time") or desired.get("entry_start_time")
-    comment = make_comment(source.comment_prefix, exec_timeframe, direction, exec_start_time) if exec_timeframe else None
+    # parent_timeframe: Trend Manager's ActiveTrade always has one.
+    # Reversal Manager's ActiveReversalTrade only got the field added
+    # 2026-08-20 (see reversal_tracker.py) -- falls back to exec_timeframe
+    # for the rare case it's still missing (M5-immediate fires, where
+    # parent and exec are genuinely the same zone anyway) rather than
+    # leaving the comment malformed.
+    parent_timeframe = desired.get("parent_timeframe") or exec_timeframe
+    comment = (make_comment(source.comment_prefix, parent_timeframe, exec_timeframe, direction, exec_start_time)
+               if exec_timeframe else None)
 
     if status == "PENDING":
         if tracked is not None and (tracked.exec_timeframe, tracked.exec_start_time) != (exec_timeframe, exec_start_time):
