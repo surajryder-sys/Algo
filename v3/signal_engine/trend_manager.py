@@ -111,6 +111,19 @@ v3/execution_bridge/ is what actually places/cancels/closes real MT5
 orders off these decisions (own EXECUTION_BRIDGE_ENABLE_TRADING flag,
 defaults false like every other bot in this repo).
 
+--- M1 exit exception (XAUUSD only, added 2026-08-20) ---
+An M5- or M3-triggered trade still closes on mitigation of its own
+reference OB, as above. An M1-triggered trade does NOT -- M1's own OB
+invalidation carries too much noise, per the user's explicit rule.
+Instead it closes on whichever comes first: a fresh opposite-direction
+OB forming on M1, a fresh opposite-direction OB forming on M3, or the
+M3 OB that was "in play" (newest eligible, post-parent, same
+direction) at the moment the M1 trade fired getting mitigated. See
+_close_if_m1_noise_exit's own docstring. The parent-level opposite-OB
+bias-flip close above still applies on top of this, unchanged -- an
+opposite M5 (or M15) parent OB always closes the trade regardless of
+which trigger timeframe opened it.
+
 Run with: python -m v3.signal_engine.trend_manager
 """
 from __future__ import annotations
@@ -261,6 +274,55 @@ def _newest_post_parent_zone(store: ZoneStore, tracker: TradeTracker, symbol: st
             return None  # newest confirmed+post-parent zone already blocked -> nothing newer/eligible exists
         return zone
     return None
+
+
+def _newest_post_time_zone(store: ZoneStore, symbol: str, timeframe: str,
+                            direction: str, after_time: int) -> Optional[TVZone]:
+    """Newest confirmed OB formed strictly after after_time, no
+    eligibility/watermark check -- v3's signal_engine-wide copy of
+    reversal_manager's own identical helper. Used by
+    _close_if_m1_noise_exit's opposite-OB checks below, where "is this
+    trigger-eligible" doesn't matter -- any fresh OB in the right
+    direction is a valid exit signal regardless of watermark state."""
+    for zone in store.zones(symbol, timeframe, direction):
+        if not _formation_trusted(zone):
+            continue
+        if zone.start_time > after_time:
+            return zone
+        return None
+    return None
+
+
+def _close_if_m1_noise_exit(store: ZoneStore, tracker: TradeTracker, symbol: str, trade: ActiveTrade) -> bool:
+    """XAUUSD-only M1 exit rule -- user's explicit correction 2026-08-20:
+    M1's own OB invalidation carries too much noise to close on, so
+    this REPLACES close_if_invalidated's normal same-OB-mitigation
+    check for an M1-triggered trade specifically (M5/M3-triggered
+    trades are untouched, still use close_if_invalidated as before).
+    Closes instead on whichever comes first:
+    - a fresh opposite-direction OB forming on M1, OR
+    - a fresh opposite-direction OB forming on M3, OR
+    - the M3 OB that was "in play" (newest eligible, post-parent, same
+      direction) at the moment this M1 trade fired getting mitigated
+      (trade.m3_watch_start_time, set once at fire time -- see
+      _try_fire_entry).
+    The existing parent-level opposite-OB bias-flip check in
+    _run_trade_logic still applies on top of this, unchanged -- "if m5
+    forms an opposite side ob, definitely it will close the trade, as
+    opposite bias becomes active" is already exactly what that does."""
+    opposite = "bear" if trade.direction == "bull" else "bull"
+    if _newest_post_time_zone(store, symbol, "1", opposite, trade.exec_start_time) is not None:
+        tracker.close_trade(symbol, block=True)
+        return True
+    if _newest_post_time_zone(store, symbol, "3", opposite, trade.exec_start_time) is not None:
+        tracker.close_trade(symbol, block=True)
+        return True
+    if trade.m3_watch_start_time is not None:
+        zone = store.get(symbol, "3", trade.direction, trade.m3_watch_start_time)
+        if zone is None:
+            tracker.close_trade(symbol, block=True)
+            return True
+    return False
 
 
 def _read_live_close(path: str, symbol: str, timeframe: str) -> Optional[float]:
@@ -429,13 +491,23 @@ def _try_fire_entry(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConf
     tf_label = _TF_LABELS.get(timeframe, timeframe)
     direction_label = _DIRECTION_LABELS[active.direction]
 
+    # XAUUSD only, M1 trigger only -- capture whichever M3 OB is "in
+    # play" (same selection an M3-triggered entry would itself use)
+    # right now, so _close_if_m1_noise_exit has a specific zone to
+    # watch for mitigation later. None if no such M3 OB exists yet --
+    # only the two opposite-OB conditions apply for this trade then.
+    m3_watch_start_time = None
+    if timeframe == "1":
+        m3_zone = _newest_post_parent_zone(store, tracker, symbol, "3", active.direction, active.parent_start_time)
+        m3_watch_start_time = m3_zone.start_time if m3_zone is not None else None
+
     if mode == entries.EntryMode.MARKET:
-        tracker.fill_market(symbol, timeframe, start_time, current_price, sl)
+        tracker.fill_market(symbol, timeframe, start_time, current_price, sl, m3_watch_start_time=m3_watch_start_time)
         print(f"[trend_manager] {symbol}: TRADE SIGNAL {direction_label} FILLED (market) via {tf_label} "
               f"@ {current_price:.2f} SL={sl} (not yet wired to MT5 -- signal only)")
     else:
         was_pending = active.status == "PENDING"
-        tracker.propose_pending(symbol, timeframe, start_time, entry_price, sl)
+        tracker.propose_pending(symbol, timeframe, start_time, entry_price, sl, m3_watch_start_time=m3_watch_start_time)
         verb = "replaced with" if was_pending else "proposed"
         print(f"[trend_manager] {symbol}: TRADE SIGNAL {direction_label} PENDING {verb} via {tf_label} "
               f"@ {entry_price:.2f} SL={sl} (not yet wired to MT5 -- signal only)")
@@ -467,7 +539,14 @@ def _run_trade_logic(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolCon
     symbol = sym_cfg.symbol
     parent_timeframes = sym_cfg.parent_timeframes
 
-    if tracker.close_if_invalidated(symbol, store):
+    # M1-triggered trades (XAUUSD only) use a dedicated, noise-tolerant
+    # exit instead of the normal same-OB-mitigation check -- see
+    # _close_if_m1_noise_exit's own docstring for the full rule.
+    existing = tracker.active_trade(symbol)
+    if existing is not None and existing.exec_timeframe == "1":
+        if _close_if_m1_noise_exit(store, tracker, symbol, existing):
+            print(f"[trend_manager] {symbol}: M1 noise-tolerant exit condition met -- closing trade")
+    elif tracker.close_if_invalidated(symbol, store):
         print(f"[trend_manager] {symbol}: active trade's reference OB was mitigated -- treating as closed")
 
     _check_close_event(tracker, symbol, manual_events_file)

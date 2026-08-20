@@ -80,6 +80,16 @@ class ActiveTrade:
     # seconds after it opened. close_if_invalidated skips its check
     # entirely when this is True.
     exec_via_atr: bool = False
+    # XAUUSD only -- the M3 OB "in play" (newest confirmed, post-parent,
+    # same direction) at the moment an M1-triggered trade fired, if one
+    # existed. None for every M5/M3-triggered trade (unused) and for an
+    # M1-triggered trade where no such M3 OB existed at fire time.
+    # Added 2026-08-20, user's explicit rule: M1's own OB invalidation
+    # is too noisy to close on (trend_manager.close_if_invalidated skips
+    # entirely for an M1-triggered trade) -- instead the trade closes on
+    # an opposite OB forming on M1 or M3, OR this specific M3 zone
+    # getting mitigated (see trend_manager._close_if_m1_noise_exit).
+    m3_watch_start_time: Optional[int] = None
 
 
 class TradeTracker:
@@ -208,7 +218,8 @@ class TradeTracker:
         self._save()
 
     def propose_pending(self, symbol: str, exec_timeframe: str, exec_start_time: int,
-                         entry_price: float, sl_price: Optional[float]) -> None:
+                         entry_price: float, sl_price: Optional[float],
+                         m3_watch_start_time: Optional[int] = None) -> None:
         """A trigger timeframe's OB produced a PENDING-mode entry plan.
         Not blocked/watermarked yet -- only on fill or manual cancel."""
         trade = self._active[symbol]
@@ -218,10 +229,12 @@ class TradeTracker:
         trade.entry_price = entry_price
         trade.sl_price = sl_price
         trade.status = "PENDING"
+        trade.m3_watch_start_time = m3_watch_start_time
         self._save()
 
     def fill_market(self, symbol: str, exec_timeframe: str, exec_start_time: int,
-                     entry_price: float, sl_price: Optional[float], via_atr: bool = False) -> None:
+                     entry_price: float, sl_price: Optional[float], via_atr: bool = False,
+                     m3_watch_start_time: Optional[int] = None) -> None:
         """A trigger timeframe's OB (or, for USOIL/USTEC, an ATR flip --
         see via_atr) produced a MARKET-mode entry plan -- fills
         immediately (no waiting for price to reach anything). Blocks
@@ -234,6 +247,7 @@ class TradeTracker:
         trade.entry_price = entry_price
         trade.sl_price = sl_price
         trade.status = "FILLED"
+        trade.m3_watch_start_time = m3_watch_start_time
         trade.exec_via_atr = via_atr
         self._advance_watermark(symbol, trade.parent_timeframe, trade.direction, trade.parent_start_time)
         self._advance_watermark(symbol, exec_timeframe, trade.direction, exec_start_time)
@@ -283,11 +297,21 @@ class TradeTracker:
         all; treating it as "not found -> mitigated" closed a real
         USTEC trade 4 seconds after it opened (confirmed live
         2026-08-20). Such a trade relies on SL/trailing, a bias flip, or
-        a real manual/SL/TP close instead -- no reference-OB exit."""
+        a real manual/SL/TP close instead -- no reference-OB exit.
+
+        Also skips for an M1-triggered trade (XAUUSD only) -- user's
+        explicit rule 2026-08-20: M1's own OB invalidation is too noisy
+        to close on; trend_manager._close_if_m1_noise_exit handles that
+        trade's exit instead (opposite OB on M1/M3, or the M3 zone
+        tracked at fire time getting mitigated). This defensive skip
+        matters if close_if_invalidated is ever called directly for
+        such a trade instead of through that dispatch."""
         trade = self._active.get(symbol)
         if trade is None:
             return False
         if trade.exec_via_atr:
+            return False
+        if trade.exec_timeframe == "1":
             return False
         ref_timeframe = trade.exec_timeframe or trade.parent_timeframe
         ref_start_time = trade.exec_start_time if trade.exec_timeframe else trade.parent_start_time
