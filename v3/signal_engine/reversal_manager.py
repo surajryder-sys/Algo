@@ -328,6 +328,28 @@ def _register_htf_retests(store: ZoneStore, tracker: ReversalTracker, sym_cfg: S
             print(f"[reversal_manager] {symbol}: {tf_label} {label} zone retested -- waiting for LTF confirmation")
 
 
+def _prune_mitigated_waiting(store: ZoneStore, tracker: ReversalTracker, symbol: str, direction: str) -> list:
+    """Drops any waiting zone that's no longer in the store (ZoneStore
+    deletes on confirmed mitigation, see its own docstring) before doing
+    anything else with the waiting list -- added 2026-08-20 after a real
+    live incident: an M30 zone got mitigated sometime after it started a
+    wait, but nothing ever re-checked it, so it sat there until an
+    unrelated LTF OB happened to match direction and "confirmed" a
+    setup that was already gone from the real chart. Called at the top
+    of both _check_direction and _check_direction_atr_or_ob, replacing
+    the bare tracker.get_waiting(...) they used to start with."""
+    waiting = tracker.get_waiting(symbol, direction)
+    still_valid = [w for w in waiting if store.get(symbol, w.timeframe, direction, w.start_time) is not None]
+    if len(still_valid) != len(waiting):
+        tracker.set_waiting(symbol, direction, still_valid)
+        removed = len(waiting) - len(still_valid)
+        tf_labels = ", ".join(_TF_LABELS.get(w.timeframe, w.timeframe)
+                               for w in waiting if w not in still_valid)
+        print(f"[reversal_manager] {symbol}: {removed} waiting {_DIRECTION_LABELS[direction]} zone(s) "
+              f"({tf_labels}) mitigated while waiting -- dropped, no longer eligible to confirm")
+    return still_valid
+
+
 def _atr_confirms(atr_store: AtrStore, symbol: str, timeframe: str, direction: str, after_time: float) -> bool:
     """v3's own copy of trend_manager._atr_confirms's identical logic --
     True if this timeframe's own ATR trend currently agrees with
@@ -352,7 +374,7 @@ def _check_direction_atr_or_ob(store: ZoneStore, tracker: ReversalTracker, sym_c
     different enough that interleaving would hurt more than it'd share."""
     symbol = sym_cfg.symbol
     timeframe = sym_cfg.atr_confirm_timeframe
-    waiting = tracker.get_waiting(symbol, direction)
+    waiting = _prune_mitigated_waiting(store, tracker, symbol, direction)
     if not waiting:
         return False
     gate_time = min(w.retest_time for w in waiting)
@@ -414,7 +436,7 @@ def _check_direction_atr_or_ob(store: ZoneStore, tracker: ReversalTracker, sym_c
 
 def _check_direction(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolConfig, direction: str) -> bool:
     symbol = sym_cfg.symbol
-    waiting = tracker.get_waiting(symbol, direction)
+    waiting = _prune_mitigated_waiting(store, tracker, symbol, direction)
     if not waiting:
         return False
     gate_time = min(w.retest_time for w in waiting)

@@ -246,6 +246,19 @@ class ReversalTracker:
             self._waiting[symbol][direction] = []
             self._save()
 
+    def set_waiting(self, symbol: str, direction: str, entries: "List[WaitingRetest]") -> None:
+        """Replaces the waiting list for this (symbol, direction) with
+        exactly `entries` -- used by reversal_manager._prune_mitigated_
+        waiting to drop zones that have since been mitigated on the real
+        chart while still sitting in the waiting list. Added 2026-08-20
+        after a real live incident: a waiting M30 zone got mitigated
+        (no longer visible on the chart at all) sometime after it
+        registered, but nothing ever re-checked it -- it just sat there
+        until an unrelated M1 OB happened to match direction and
+        "confirmed" it, firing a trade off a zone that was already gone."""
+        self._waiting.setdefault(symbol, {})[direction] = list(entries)
+        self._save()
+
     # -- active trade -------------------------------------------------------
 
     def active_trade(self, symbol: str) -> Optional[ActiveReversalTrade]:
