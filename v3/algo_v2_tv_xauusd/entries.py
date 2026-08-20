@@ -46,7 +46,7 @@ def m3_or_m5_entry(direction: int, ob_edge: float, detected_price: float,
 
     detected_price must be a genuine live price at/after confirmation, not
     the zone's own opposite edge -- see the fix applied to
-    pine/ob_detector_webhook.pine (detected_price = close, not z_btm/zb_top)
+    pine/OBD_Reversal.pine (detected_price = close, not z_btm/zb_top)
     for why this matters: a static zone-edge value makes distance always
     negative, which would make this always return NONE."""
     if direction == 1:

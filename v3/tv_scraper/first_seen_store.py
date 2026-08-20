@@ -2,7 +2,7 @@
 it's seen, persisted so later polls reuse the same value instead of minting
 a new one -- this is what scraper.py writes into ZoneStore as a zone's
 `start_time`, since the Data Window never exposes a zone's true origin
-candle time (see ob_detector_webhook.pine's comment on why start_time was
+candle time (see OBD_Reversal.pine's comment on why start_time was
 deliberately left out of its Data Window plots).
 
 Without this, scraper.py's own price-derived zone identity (see

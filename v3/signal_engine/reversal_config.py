@@ -1,6 +1,24 @@
 """Configuration for Reversal Manager. Own config, separate from Trend
-Manager's (see CLAUDE.md -- each Manager owns its own), even though it
-reads the exact same tv_scraper zone/live files.
+Manager's (see CLAUDE.md -- each Manager owns its own).
+
+Zone/ATR data source switched 2026-08-20 from tv_scraper's per-symbol
+polled files to the TradingView webhook path instead (tv_bridge.receiver
+-> tradingview_bot.main -> ZoneStore/AtrStore) -- user's explicit rule:
+this Manager's whole mechanism is retest-driven, and only the webhook
+path can carry ob_zone_retested's exact retest time; tv_scraper only ever
+approximated a retest from its own next-poll Close reading. Unlike
+tv_scraper's per-symbol zone files, tradingview_bot.main writes ONE
+shared file for every symbol (ZoneStore/AtrStore are internally keyed by
+"symbol|timeframe|direction"/"symbol|timeframe"), so all five
+SymbolConfig entries below point at the SAME zone_state_file/
+atr_state_file rather than each having their own.
+
+live_state_file is intentionally UNCHANGED -- still tv_scraper's own
+per-symbol live Close polling. The webhook schema has no live-price-tick
+event at all (only sparse zone/ATR events), so Reversal Manager's
+_read_live_close() still needs tv_scraper running alongside the webhook
+pipeline, just for price -- see the module docstring on why this split
+is intentional, not a leftover.
 """
 from __future__ import annotations
 
@@ -79,11 +97,18 @@ class Config:
 
 
 def load_config() -> Config:
+    # Shared webhook-sourced zone/ATR files -- ONE file each for every
+    # symbol (see module docstring). Same env var names tradingview_bot's
+    # own config.py uses (TV_ZONE_STATE_FILE/TV_ATR_STATE_FILE), so
+    # pointing both processes at the same .env values keeps them in sync
+    # by construction rather than by two separately-maintained defaults.
+    tv_zone_file = os.getenv("TV_ZONE_STATE_FILE", "tradingview_bot_zones.json")
+    tv_atr_file = os.getenv("TV_ATR_STATE_FILE", "tradingview_bot_atr.json")
     return Config(
         symbols=[
             SymbolConfig(
                 "XAUUSD",
-                os.getenv("SIGNAL_ENGINE_XAUUSD_ZONE_FILE", "tv_scraper_xauusd_zones.json"),
+                tv_zone_file,
                 os.getenv("SIGNAL_ENGINE_XAUUSD_LIVE_FILE", "tv_scraper_xauusd_live.json"),
                 ltf_timeframes=("1", "3", "5"),
                 parent_timeframes=("5", "15"),
@@ -91,13 +116,13 @@ def load_config() -> Config:
             ),
             SymbolConfig(
                 "BTCUSD",
-                os.getenv("SIGNAL_ENGINE_BTCUSD_ZONE_FILE", "tv_scraper_zones.json"),
+                tv_zone_file,
                 os.getenv("SIGNAL_ENGINE_BTCUSD_LIVE_FILE", "tv_scraper_live.json"),
                 ltf_timeframes=("5",),
             ),
             SymbolConfig(
                 "ETHUSD",
-                os.getenv("SIGNAL_ENGINE_ETHUSD_ZONE_FILE", "tv_scraper_ethusd_zones.json"),
+                tv_zone_file,
                 os.getenv("SIGNAL_ENGINE_ETHUSD_LIVE_FILE", "tv_scraper_ethusd_live.json"),
                 ltf_timeframes=("5",),
             ),
@@ -105,27 +130,27 @@ def load_config() -> Config:
             # config.py for the shared-tv_scraper-process rationale.
             # HTF_TIMEFRAMES above still gets used unchanged for these
             # two (_register_htf_retests iterates it for every symbol) --
-            # harmless: their tv_scraper grid has no H4/H2 panes, so
-            # those two entries simply never find zone data and no-op,
-            # leaving H1/M30/M15 (their real 3 parents) as the only ones
-            # that ever actually register a wait. NOT yet wired into
-            # Execution Bridge or entries.py's SYMBOL_SL_BUFFER -- same
-            # "SL buffers pending" gap as Trend Manager's own entries.
+            # harmless: no H4/H2 alerts are expected to be configured for
+            # these two, so those two entries simply never find zone data
+            # and no-op, leaving H1/M30/M15 (their real 3 parents) as the
+            # only ones that ever actually register a wait. NOT yet wired
+            # into Execution Bridge or entries.py's SYMBOL_SL_BUFFER --
+            # same "SL buffers pending" gap as Trend Manager's own entries.
             SymbolConfig(
                 "USOIL",
-                os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ZONE_FILE", "tv_scraper_usoil_ustec_zones.json"),
+                tv_zone_file,
                 os.getenv("SIGNAL_ENGINE_USOIL_USTEC_LIVE_FILE", "tv_scraper_usoil_ustec_live.json"),
                 ltf_timeframes=("3",),
                 atr_confirm_timeframe="3",
-                atr_state_file=os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ATR_FILE", "tv_scraper_usoil_ustec_atr.json"),
+                atr_state_file=tv_atr_file,
             ),
             SymbolConfig(
                 "USTEC",
-                os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ZONE_FILE", "tv_scraper_usoil_ustec_zones.json"),
+                tv_zone_file,
                 os.getenv("SIGNAL_ENGINE_USOIL_USTEC_LIVE_FILE", "tv_scraper_usoil_ustec_live.json"),
                 ltf_timeframes=("3",),
                 atr_confirm_timeframe="3",
-                atr_state_file=os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ATR_FILE", "tv_scraper_usoil_ustec_atr.json"),
+                atr_state_file=tv_atr_file,
             ),
         ],
         poll_seconds=float(os.getenv("REVERSAL_MANAGER_POLL_SECONDS", "5.0")),

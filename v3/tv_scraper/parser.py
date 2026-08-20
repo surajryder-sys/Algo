@@ -43,7 +43,7 @@ def _normalize_timeframe(raw: str) -> str:
 _ATR_LABELS = {"Trailing Stop": "trail_stop", "Trend": "trend"}
 # The symbol's own live Close, from the Data Window's own O/H/L/C block (not
 # an indicator plot) -- used as a stand-in for "price at detection", the
-# same live-price role ob_detector_webhook.pine's `close` plays in the
+# same live-price role OBD_Reversal.pine's `close` plays in the
 # alert payload (see that script's detected_price fix). Without this,
 # _apply_direction had no live price to use and fell back to a zone's own
 # edge -- same structural bug as the pre-fix Pine script (distance always
@@ -82,7 +82,7 @@ _ZONE_LABELS = {
         ("FormedMinutesRef", "formed_minutes_ref"),
         ("RetestedMinutesRef", "retested_minutes_ref"),
     )
-    # no Start -- see ob_detector_webhook.pine.
+    # no Start -- see OBD_Reversal.pine.
 }
 
 
@@ -97,7 +97,7 @@ def _to_number(raw: str) -> Optional[float]:
 class ParsedState:
     atr: Optional[dict]  # {"trail_stop": float, "trend": int} or None
     bull_zones: list[dict]  # [{"top", "btm"}, ...] newest first -- no
-    bear_zones: list[dict]  # start_time (see ob_detector_webhook.pine)
+    bear_zones: list[dict]  # start_time (see OBD_Reversal.pine)
     symbol: Optional[str]  # actual ticker read off the chart, e.g. "XAUUSD"
     timeframe: Optional[str]  # actual timeframe read off the chart, e.g. "5"
     close: Optional[float]  # live Close from the Data Window's O/H/L/C block

@@ -1,50 +1,28 @@
-// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
-// © LuxAlgo
-// Modified to fire full zone-state webhooks via alert() -- see the
-// "Webhook" section near the bottom. Original detection logic is untouched.
+// OBD_Reversal v1.02 -- order block detection + retest/mitigation webhooks
+// feeding v3's Reversal Manager (see v3/signal_engine/reversal_manager.py).
+// Base order-block detection/mitigation logic originally from LuxAlgo's
+// "Order Block Detector" (CC BY-NC-SA 4.0), substantially modified since:
+// retest tracking (mark_retests), the ob_zone_formed/mitigated/retested
+// webhook payloads, and the remove_mitigated index-safety fixes are all
+// new. Original license terms: https://creativecommons.org/licenses/by-nc-sa/4.0/
+//
+// HEADLESS by design (v1.02, 2026-08-20) -- draws NOTHING on the chart
+// (no boxes, no lines, no dots, no Data Window plots). This script's only
+// job is computing zones internally and firing alert() webhooks; nothing
+// downstream (tv_bridge.receiver) reads anything visual, only the JSON
+// payloads. It's meant to run stacked on the SAME pane as
+// v3/pine/OBD_SecretTrader.pine (which already draws the real reference
+// view tv_scraper reads) -- drawing its own boxes/lines/dots here would
+// just be a duplicate of what that script already shows on the same
+// pane, confirmed as visual clutter once both were added together.
 
 //@version=5
-indicator("Order Block Detector [LuxAlgo]"
-  , overlay = true
-  , max_boxes_count = 500
-  , max_labels_count = 500
-  , max_lines_count = 500)
+indicator("OBD_Reversal v1.02"
+  , overlay = true)
 //------------------------------------------------------------------------------
 //Settings
 //-----------------------------------------------------------------------------{
 length = input.int(5, 'Volume Pivot Length'
-  , minval = 1)
-
-bull_ext_last = input.int(3, 'Bullish OB '
-  , minval = 1
-  , inline = 'bull')
-
-bg_bull_css = input.color(color.new(#169400, 80), ''
-  , inline = 'bull')
-
-bull_css = input.color(#169400, ''
-  , inline = 'bull')
-
-bull_avg_css = input.color(color.new(#9598a1, 37), ''
-  , inline = 'bull')
-
-bear_ext_last = input.int(3, 'Bearish OB'
-  , minval = 1
-  , inline = 'bear')
-
-bg_bear_css = input.color(color.new(#ff1100, 80), ''
-  , inline = 'bear')
-
-bear_css = input.color(#ff1100, ''
-  , inline = 'bear')
-
-bear_avg_css = input.color(color.new(#9598a1, 37), ''
-  , inline = 'bear')
-
-line_style = input.string('⎯⎯⎯', 'Average Line Style'
-  , options = ['⎯⎯⎯', '----', '····'])
-
-line_width = input.int(1, 'Average Line Width'
   , minval = 1)
 
 mitigation = input.string('Wick', 'Mitigation Methods'
@@ -55,19 +33,26 @@ webhook_secret = input.string('', 'Webhook Secret', group = 'Webhook')
 //-----------------------------------------------------------------------------}
 //Functions
 //-----------------------------------------------------------------------------{
-//Line Style function
-get_line_style(style) =>
-    out = switch style
-        '⎯⎯⎯'  => line.style_solid
-        '----' => line.style_dashed
-        '····' => line.style_dotted
-
 //Function to get order block coordinates
 get_coordinates(condition, top, btm, ob_val)=>
     var ob_top  = array.new_float(0)
     var ob_btm  = array.new_float(0)
     var ob_avg  = array.new_float(0)
     var ob_left = array.new_int(0)
+    // Parallel arrays for retest tracking -- ported from
+    // v3/pine/OBD_SecretTrader.pine's own (already-proven) versions of
+    // get_coordinates/mark_retests/remove_mitigated, added 2026-08-20 so
+    // this webhook-push script can finally fire ob_zone_retested (it
+    // previously only ever fired formed/mitigated -- see mark_retests()'s
+    // own docstring below for why that's a real gap, not cosmetic, for
+    // anything consuming these webhooks). Same meaning as the sibling
+    // script: formation bar_index (a retest check skips the zone's own
+    // formation bar), whether it's been retested yet, and the bar_index
+    // it was retested on (na until then). No dot/label array here --
+    // this script is headless (see module header), nothing gets drawn.
+    var ob_formed_bar   = array.new_int(0)
+    var ob_retested      = array.new_bool(0)
+    var ob_retested_bar = array.new_int(0)
 
     float ob = na
 
@@ -79,24 +64,98 @@ get_coordinates(condition, top, btm, ob_val)=>
         array.unshift(ob_btm, btm)
         array.unshift(ob_avg, avg)
         array.unshift(ob_left, time[length])
+        array.unshift(ob_formed_bar, bar_index)
+        array.unshift(ob_retested, false)
+        array.unshift(ob_retested_bar, na)
 
         ob := ob_val
 
-    [ob_top, ob_btm, ob_avg, ob_left, ob]
+    [ob_top, ob_btm, ob_avg, ob_left, ob_formed_bar, ob_retested, ob_retested_bar, ob]
+
+//Function to fire the ob_zone_retested webhook the first time a zone's
+//range is actually touched by a later bar's wick (high/low overlap with
+//[btm, top]) -- ported (logic unchanged, dot-drawing removed -- see
+//module header) from v3/pine/OBD_SecretTrader.pine's own mark_retests(),
+//2026-08-20. Runs on EVERY tick, not gated on barstate.isconfirmed: safe/
+//non-repainting because a forming bar's high/low only ever EXPANDS as the
+//bar progresses, never contracts, so once an intrabar tick satisfies the
+//overlap check that fact can't un-happen no matter how the bar's eventual
+//close lands (unlike mitigation below, which reads close/high/low as a
+//genuinely moving target). The alert() call itself still uses
+//freq_once_per_bar_close (not freq_all) -- same reasoning as the
+//formation/mitigation alerts above: the retested_time in the payload is
+//bar-scoped (`time`), so delaying delivery to this bar's close loses no
+//accuracy, only avoids re-firing on every intrabar recalculation.
+mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_retested_bar, dir_label)=>
+    retested_this_call = false
+    // Guard against an empty array: Pine's `for i = 0 to array.size()-1`
+    // does NOT skip the loop when size is 0 -- with end (-1) less than
+    // start (0), Pine counts DOWNWARD instead, still running once with
+    // i=0 against an empty array ("Index 0 is out of bounds, array size
+    // is 0" at runtime). Every other loop over these arrays guards the
+    // same way.
+    if array.size(ob_top) > 0
+        for i = 0 to array.size(ob_top) - 1
+            // >= , not > : a candle whose OWN high/low overlaps the zone
+            // it just formed now counts as retesting it on that same
+            // candle too, not only from the next candle onward -- zone
+            // geometry (top/btm come from hl2[length]/high[length]/
+            // low[length], `length` bars back) is independent of the
+            // CURRENT confirming bar's own high/low, so this is a real
+            // retest, not a self-reference.
+            if not array.get(ob_retested, i) and bar_index >= array.get(ob_formed_bar, i)
+                z_top = array.get(ob_top, i)
+                z_btm = array.get(ob_btm, i)
+
+                if high >= z_btm and low <= z_top
+                    array.set(ob_retested, i, true)
+                    array.set(ob_retested_bar, i, bar_index)
+                    retested_this_call := true
+
+                    zone_start = array.get(ob_left, i)
+                    retest_payload = '{"secret":"' + webhook_secret +
+                      '","type":"ob_zone_retested","symbol":"' + syminfo.ticker +
+                      '","timeframe":"' + timeframe.period +
+                      '","direction":"' + dir_label +
+                      '","start_time":' + str.tostring(math.round(zone_start / 1000), '#') +
+                      ',"retested_time":' + str.tostring(math.round(time / 1000), '#') + '}'
+                    alert(retest_payload, alert.freq_once_per_bar_close)
+
+    retested_this_call
 
 //Function to remove mitigated order blocks from coordinate arrays, firing a
 //webhook per zone (with its identity/prices) right before it's removed --
 //zone identity is its start_time, matching how the MT5 OB bridge identifies
 //zones (see ob_bridge.reader.Zone / the "zone start_time, not detected_time"
-//fix already applied on the MT5 side).
-remove_mitigated(ob_top, ob_btm, ob_left, ob_avg, target, bull, dir_label, bar_time_sec)=>
+//fix already applied on the MT5 side). Ported from OBD_SecretTrader.pine's
+//own remove_mitigated() 2026-08-20 -- fixes two real bugs the old
+//`for element in target_array` + `array.indexof` approach here had:
+//  1. array.remove() INSIDE a for-in loop over the same array shifts
+//     every later element's index down by one, but the loop doesn't know
+//     that -- two zones mitigating on the same bar could silently land
+//     on the wrong (shifted) index or skip an element entirely.
+//  2. array.indexof(target_array, element) returns the FIRST index
+//     matching that VALUE -- two zones can genuinely share the exact
+//     same top/btm (a recurring round price level), which would target
+//     the wrong zone's arrays.
+//Fixed by walking real indices directly (never searching by value),
+//collecting everything that qualifies first without mutating anything,
+//then removing highest-index-first so each removal can never shift an
+//index still waiting to be processed.
+remove_mitigated(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_retested_bar, target, bull, dir_label, bar_time_sec)=>
     mitigated = false
     target_array = bull ? ob_btm : ob_top
 
-    for element in target_array
-        idx = array.indexof(target_array, element)
+    to_remove = array.new_int(0)
+    if array.size(target_array) > 0
+        for idx = 0 to array.size(target_array) - 1
+            element = array.get(target_array, idx)
+            if (bull ? target < element : target > element)
+                array.push(to_remove, idx)
 
-        if (bull ? target < element : target > element)
+    if array.size(to_remove) > 0
+        for i = array.size(to_remove) - 1 to 0
+            idx = array.get(to_remove, i)
             mitigated := true
 
             zone_start = array.get(ob_left, idx)
@@ -113,49 +172,22 @@ remove_mitigated(ob_top, ob_btm, ob_left, ob_avg, target, bull, dir_label, bar_t
               ',"mitigated_time":' + str.tostring(bar_time_sec, '#') +
               ',"mitigated_price":' + str.tostring(target) + '}'
 
-            alert(mit_payload, alert.freq_all)
+            // freq_once_per_bar_close (not freq_all -- see the matching
+            // comment on the formation alerts below for why): confirmed
+            // live 2026-07-31, freq_all fired the SAME mitigation 8 times
+            // within under a second (one per script recalculation, not
+            // once per real event).
+            alert(mit_payload, alert.freq_once_per_bar_close)
 
             array.remove(ob_top, idx)
             array.remove(ob_btm, idx)
             array.remove(ob_avg, idx)
             array.remove(ob_left, idx)
+            array.remove(ob_formed_bar, idx)
+            array.remove(ob_retested, idx)
+            array.remove(ob_retested_bar, idx)
 
     mitigated
-
-//Function to set order blocks
-set_order_blocks(ob_top, ob_btm, ob_left, ob_avg, ext_last, bg_css, border_css, lvl_css)=>
-    var ob_box = array.new_box(0)
-    var ob_lvl = array.new_line(0)
-
-    //Fill arrays with boxes/lines
-    if barstate.isfirst
-        for i = 0 to ext_last-1
-            array.unshift(ob_box, box.new(na,na,na,na
-              , xloc = xloc.bar_time
-              , extend= extend.right
-              , bgcolor = bg_css
-              , border_color = color.new(border_css, 70)))
-
-            array.unshift(ob_lvl, line.new(na,na,na,na
-              , xloc = xloc.bar_time
-              , extend = extend.right
-              , color = lvl_css
-              , style = get_line_style(line_style)
-              , width = line_width))
-
-    //Set order blocks
-    if barstate.islast
-        if array.size(ob_top) > 0
-            for i = 0 to math.min(ext_last-1, array.size(ob_top)-1)
-                get_box = array.get(ob_box, i)
-                get_lvl = array.get(ob_lvl, i)
-
-                box.set_lefttop(get_box, array.get(ob_left, i), array.get(ob_top, i))
-                box.set_rightbottom(get_box, array.get(ob_left, i), array.get(ob_btm, i))
-
-                line.set_xy1(get_lvl, array.get(ob_left, i), array.get(ob_avg, i))
-                line.set_xy2(get_lvl, array.get(ob_left, i)+1, array.get(ob_avg, i))
-
 
 //-----------------------------------------------------------------------------}
 //Global elements
@@ -164,7 +196,6 @@ var os = 0
 var target_bull = 0.
 var target_bear = 0.
 
-n = bar_index
 upper = ta.highest(length)
 lower = ta.lowest(length)
 
@@ -188,6 +219,9 @@ phv = ta.pivothigh(volume, length, length)
   , bull_btm
   , bull_avg
   , bull_left
+  , bull_formed_bar
+  , bull_retested
+  , bull_retested_bar
   , bull_ob] = get_coordinates(phv and os == 1 and barstate.isconfirmed, hl2[length], low[length], low[length])
 
 //Webhook: bullish OB just formed -- fire the full zone (top/btm/avg/start_time)
@@ -212,12 +246,22 @@ if not na(bull_ob)
       // zone's own origin candle, so close here already reflects a real
       // (if small) run away from the zone -- exactly the concept this feeds.
       ',"detected_price":' + str.tostring(close) + '}'
-    alert(bull_form_payload, alert.freq_all)
+    // freq_once_per_bar_close, not freq_all -- confirmed live 2026-07-31:
+    // freq_all fired this exact same formation event 8 times within
+    // under a second (once per script recalculation on the same closed
+    // bar, not once per real formation). The condition itself is already
+    // gated on barstate.isconfirmed so it's only ever true for one bar;
+    // once_per_bar_close makes the ALERT match that too, matching
+    // atr_trail_webhook.pine's own (already-correct) frequency.
+    alert(bull_form_payload, alert.freq_once_per_bar_close)
 
 [bear_top
   , bear_btm
   , bear_avg
   , bear_left
+  , bear_formed_bar
+  , bear_retested
+  , bear_retested_bar
   , bear_ob] = get_coordinates(phv and os == 0 and barstate.isconfirmed, high[length], hl2[length], high[length])
 
 //Webhook: bearish OB just formed
@@ -236,7 +280,20 @@ if not na(bear_ob)
       ',"detected_time":' + str.tostring(bar_time_sec, '#') +
       // See the matching comment in the bullish branch above.
       ',"detected_price":' + str.tostring(close) + '}'
-    alert(bear_form_payload, alert.freq_all)
+    // See the matching comment on the bullish branch above.
+    alert(bear_form_payload, alert.freq_once_per_bar_close)
+
+//-----------------------------------------------------------------------------}
+//Mark retests (fires the ob_zone_retested webhook the first time a zone's
+//range is actually touched) -- runs on EVERY tick, not gated on
+//barstate.isconfirmed like mitigation below; see mark_retests()'s own
+//docstring for why that's safe/non-repainting. Runs before mitigation
+//removal below so a zone being fully mitigated on this same bar still
+//gets its retest recorded first. Added 2026-08-20 -- see get_coordinates/
+//mark_retests()'s own comments for why this webhook was missing before.
+//-----------------------------------------------------------------------------{
+retested_bull = mark_retests(bull_top, bull_btm, bull_left, bull_avg, bull_formed_bar, bull_retested, bull_retested_bar, "bull")
+retested_bear = mark_retests(bear_top, bear_btm, bear_left, bear_avg, bear_formed_bar, bear_retested, bear_retested_bar, "bear")
 
 //-----------------------------------------------------------------------------}
 //Remove mitigated order blocks (fires ob_zone_mitigated webhooks internally)
@@ -253,6 +310,9 @@ if barstate.isconfirmed
       , bull_btm
       , bull_left
       , bull_avg
+      , bull_formed_bar
+      , bull_retested
+      , bull_retested_bar
       , target_bull
       , true
       , "bull"
@@ -262,75 +322,14 @@ if barstate.isconfirmed
       , bear_btm
       , bear_left
       , bear_avg
+      , bear_formed_bar
+      , bear_retested
+      , bear_retested_bar
       , target_bear
       , false
       , "bear"
       , bar_time_sec)
 
-//-----------------------------------------------------------------------------}
-//Display order blocks
-//-----------------------------------------------------------------------------{
-//Set bullish order blocks
-set_order_blocks(bull_top
-  , bull_btm
-  , bull_left
-  , bull_avg
-  , bull_ext_last
-  , bg_bull_css
-  , bull_css
-  , bull_avg_css)
-
-//Set bearish order blocks
-set_order_blocks(bear_top
-  , bear_btm
-  , bear_left
-  , bear_avg
-  , bear_ext_last
-  , bg_bear_css
-  , bear_css
-  , bear_avg_css)
-
-//Show detected order blocks
-plot(bull_ob, 'Bull OB', bull_css, 2, plot.style_linebr
-  , offset = -length
-  , display = display.none)
-
-plot(bear_ob, 'Bear OB', bear_css, 2, plot.style_linebr
-  , offset = -length
-  , display = display.none)
-
-//-----------------------------------------------------------------------------}
-//Zone coordinates exposed via Data Window -- tv_scraper polls these directly
-//(pull) instead of relying on the alert() calls above (push). The 4 most
-//recent zones per direction are exposed, matching this indicator's deployed
-//bull_ext_last/bear_ext_last=4 (confirmed live: only 3 were exposed here
-//while 4 were actually visible on the chart, silently dropping the 4th/
-//oldest-of-the-visible zones from tv_scraper's view entirely).
-//
-//Top/Btm only -- NOT start_time. start_time is a raw unix-ms value (~1.78e12)
-//and plotting it here once visibly broke this chart's price scale (boxes
-//jumped around) despite display.data_window supposedly excluding a plot from
-//the chart entirely. Top/Btm are normal price-magnitude numbers, same order
-//as everything else already plotted, so they're safe. tv_scraper derives a
-//stable per-zone identity from (top, btm) instead of a real timestamp -- see
-//tv_scraper/scraper.py.
-//-----------------------------------------------------------------------------{
-plot(array.size(bull_top) > 0 ? array.get(bull_top, 0) : na, "Bull1 Top", display = display.data_window)
-plot(array.size(bull_top) > 0 ? array.get(bull_btm, 0) : na, "Bull1 Btm", display = display.data_window)
-plot(array.size(bull_top) > 1 ? array.get(bull_top, 1) : na, "Bull2 Top", display = display.data_window)
-plot(array.size(bull_top) > 1 ? array.get(bull_btm, 1) : na, "Bull2 Btm", display = display.data_window)
-plot(array.size(bull_top) > 2 ? array.get(bull_top, 2) : na, "Bull3 Top", display = display.data_window)
-plot(array.size(bull_top) > 2 ? array.get(bull_btm, 2) : na, "Bull3 Btm", display = display.data_window)
-plot(array.size(bear_top) > 0 ? array.get(bear_top, 0) : na, "Bear1 Top", display = display.data_window)
-plot(array.size(bear_top) > 0 ? array.get(bear_btm, 0) : na, "Bear1 Btm", display = display.data_window)
-plot(array.size(bear_top) > 1 ? array.get(bear_top, 1) : na, "Bear2 Top", display = display.data_window)
-plot(array.size(bear_top) > 1 ? array.get(bear_btm, 1) : na, "Bear2 Btm", display = display.data_window)
-plot(array.size(bear_top) > 2 ? array.get(bear_top, 2) : na, "Bear3 Top", display = display.data_window)
-plot(array.size(bear_top) > 2 ? array.get(bear_btm, 2) : na, "Bear3 Btm", display = display.data_window)
-plot(array.size(bull_top) > 3 ? array.get(bull_top, 3) : na, "Bull4 Top", display = display.data_window)
-plot(array.size(bull_top) > 3 ? array.get(bull_btm, 3) : na, "Bull4 Btm", display = display.data_window)
-plot(array.size(bear_top) > 3 ? array.get(bear_top, 3) : na, "Bear4 Top", display = display.data_window)
-plot(array.size(bear_top) > 3 ? array.get(bear_btm, 3) : na, "Bear4 Btm", display = display.data_window)
 //-----------------------------------------------------------------------------}
 //Alerts
 //-----------------------------------------------------------------------------{
@@ -342,4 +341,14 @@ alertcondition(mitigated_bull, 'Bullish OB Mitigated', 'Bullish order block miti
 
 alertcondition(mitigated_bear, 'Bearish OB Mitigated', 'bearish order block mitigated')
 
+alertcondition(retested_bull, 'Bullish OB Retested', 'Bullish order block retested')
+
+alertcondition(retested_bear, 'Bearish OB Retested', 'bearish order block retested')
+
+// NOTE: these alertcondition() entries are for the alert dialog's dropdown
+// discoverability only -- they do NOT carry the JSON webhook payload. When
+// creating the actual TradingView alert against this script, the
+// condition must be "Any alert() function call", not one of these named
+// entries, or the ob_zone_formed/mitigated/retested JSON this script
+// builds above never gets sent.
 //-----------------------------------------------------------------------------}

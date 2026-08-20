@@ -64,9 +64,11 @@ no MT5 connection, runs independently of main.py).
   bridge files the Python bots above read. Compiled and attached to
   charts manually in MetaTrader — not run by Python.
 - **`pine/`** — TradingView Pine scripts. `atr_trail_webhook.pine` /
-  `ob_detector_webhook.pine` are the alert-push path `v3/tv_bridge`
-  reads; `v3/pine/OBD_SecretTrader.pine` (moved under `v3/`) is the
-  scrape-pull path `v3/tv_scraper` reads instead.
+  `OBD_Reversal.pine` (renamed 2026-08-20 from `ob_detector_webhook.pine`,
+  LuxAlgo attribution trimmed to a comment since it's been substantially
+  modified — see the file's own header) are the alert-push path
+  `v3/tv_bridge` reads; `v3/pine/OBD_SecretTrader.pine` (moved under
+  `v3/`) is the scrape-pull path `v3/tv_scraper` reads instead.
 
 ## Conventions worth knowing before touching any bot
 
