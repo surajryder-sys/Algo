@@ -89,6 +89,14 @@ class ActiveReversalTrade:
     # only (mark_filled/open_trade always set a real value from here
     # on).
     opened_at: float = 0.0
+    # True when entry_start_time came from an ATR flip
+    # (reversal_manager._check_direction_atr_or_ob), not a real OB --
+    # same meaning and same live bug as trade_tracker.ActiveTrade's own
+    # exec_via_atr (see that field's docstring): _close_if_invalidated's
+    # zone lookup on a synthetic ATR timestamp always comes back empty,
+    # reading as "mitigated" and closing the trade almost immediately.
+    # _close_if_invalidated skips entirely when this is True.
+    exec_via_atr: bool = False
 
 
 class ReversalTracker:

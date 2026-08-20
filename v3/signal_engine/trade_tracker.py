@@ -70,6 +70,16 @@ class ActiveTrade:
     entry_price: Optional[float] = None
     sl_price: Optional[float] = None
     status: str = "AWAITING_TRIGGER"    # AWAITING_TRIGGER -> PENDING -> FILLED
+    # True when this trade's exec_timeframe/exec_start_time came from an
+    # ATR flip (trend_manager._try_fire_entry_atr_or_ob), not a real OB
+    # -- exec_start_time in that case is the ATR event's own timestamp,
+    # which never corresponds to an actual zone in the store. Added
+    # 2026-08-20 after a real live bug: close_if_invalidated's zone
+    # lookup on that synthetic timestamp always came back empty,
+    # reading as "reference OB mitigated" and closing a USTEC trade 4
+    # seconds after it opened. close_if_invalidated skips its check
+    # entirely when this is True.
+    exec_via_atr: bool = False
 
 
 class TradeTracker:
@@ -211,10 +221,11 @@ class TradeTracker:
         self._save()
 
     def fill_market(self, symbol: str, exec_timeframe: str, exec_start_time: int,
-                     entry_price: float, sl_price: Optional[float]) -> None:
-        """A trigger timeframe's OB produced a MARKET-mode entry plan --
-        fills immediately (no waiting for price to reach anything).
-        Blocks both the parent's and the exec timeframe's own buckets
+                     entry_price: float, sl_price: Optional[float], via_atr: bool = False) -> None:
+        """A trigger timeframe's OB (or, for USOIL/USTEC, an ATR flip --
+        see via_atr) produced a MARKET-mode entry plan -- fills
+        immediately (no waiting for price to reach anything). Blocks
+        both the parent's and the exec timeframe's own buckets
         permanently, right now."""
         trade = self._active[symbol]
         trade.exec_timeframe = exec_timeframe
@@ -223,6 +234,7 @@ class TradeTracker:
         trade.entry_price = entry_price
         trade.sl_price = sl_price
         trade.status = "FILLED"
+        trade.exec_via_atr = via_atr
         self._advance_watermark(symbol, trade.parent_timeframe, trade.direction, trade.parent_start_time)
         self._advance_watermark(symbol, exec_timeframe, trade.direction, exec_start_time)
         self._save()
@@ -263,9 +275,19 @@ class TradeTracker:
         mitigated (fully removed from the Data Bridge's zone store) --
         the stand-in for "stopped out." Blocks on close (mitigation of a
         real, chosen setup means it played out and is done -- never
-        worth revisiting). Returns True if a close happened."""
+        worth revisiting). Returns True if a close happened.
+
+        Skips entirely (returns False) when exec_via_atr is True -- an
+        ATR-flip-confirmed trade's exec_start_time is the ATR event's
+        own timestamp, not a real OB's, so there's no zone to look up at
+        all; treating it as "not found -> mitigated" closed a real
+        USTEC trade 4 seconds after it opened (confirmed live
+        2026-08-20). Such a trade relies on SL/trailing, a bias flip, or
+        a real manual/SL/TP close instead -- no reference-OB exit."""
         trade = self._active.get(symbol)
         if trade is None:
+            return False
+        if trade.exec_via_atr:
             return False
         ref_timeframe = trade.exec_timeframe or trade.parent_timeframe
         ref_start_time = trade.exec_start_time if trade.exec_timeframe else trade.parent_start_time

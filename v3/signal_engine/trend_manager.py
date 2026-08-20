@@ -368,7 +368,7 @@ def _try_fire_entry_atr_or_ob(store: ZoneStore, tracker: TradeTracker, sym_cfg: 
     start_time = zone.start_time if ob_confirms else int(atr_store.get(symbol, timeframe).event_time)
     reason = "fresh OB" if ob_confirms else "ATR flip"
 
-    tracker.fill_market(symbol, timeframe, start_time, current_price, sl)
+    tracker.fill_market(symbol, timeframe, start_time, current_price, sl, via_atr=not ob_confirms)
     tf_label = _TF_LABELS.get(timeframe, timeframe)
     direction_label = _DIRECTION_LABELS[direction]
     print(f"[trend_manager] {symbol}: TRADE SIGNAL {direction_label} FILLED (market) via {tf_label} "

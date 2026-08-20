@@ -401,7 +401,7 @@ def _check_direction_atr_or_ob(store: ZoneStore, tracker: ReversalTracker, sym_c
     start_time = zone.start_time if ob_confirms else int(atr_store.get(symbol, timeframe).event_time)
     reason = "fresh OB" if ob_confirms else "ATR flip"
     trade = ActiveReversalTrade(direction, timeframe, start_time, current_price, sl, "MARKET",
-                                 status="FILLED", opened_at=time.time())
+                                 status="FILLED", opened_at=time.time(), exec_via_atr=not ob_confirms)
     tracker.open_trade(symbol, trade)
     tracker.clear_waiting(symbol, direction)
     tf_label = _TF_LABELS.get(timeframe, timeframe)
@@ -478,8 +478,14 @@ def _check_direction(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symbol
 
 
 def _close_if_invalidated(store: ZoneStore, tracker: ReversalTracker, symbol: str) -> bool:
+    """See ActiveReversalTrade.exec_via_atr's own docstring for why an
+    ATR-confirmed trade skips this check entirely -- its entry_start_time
+    is an ATR event's own timestamp, not a real OB's, so the zone lookup
+    below would always come back empty and misread as "mitigated"."""
     trade = tracker.active_trade(symbol)
     if trade is None:
+        return False
+    if trade.exec_via_atr:
         return False
     zone = store.get(symbol, trade.entry_timeframe, trade.direction, trade.entry_start_time)
     if zone is not None:
