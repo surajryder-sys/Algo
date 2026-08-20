@@ -325,6 +325,27 @@ def _reconcile(cfg: Config, source: SourceConfig, tracker: OrderTracker, sym_cfg
                 print(f"{tag} {symbol}: FAILED to place pending order -- retcode={result.retcode} {result.comment}")
 
     elif status == "FILLED":
+        # A still-tracked PENDING order from a DIFFERENT setup than what's
+        # now desired (different exec_timeframe/exec_start_time) -- the
+        # source moved on (cancel-and-replace, or this exact trigger fired
+        # a totally separate later setup) without that old pending order
+        # ever getting cancelled here first. Added 2026-08-20 after a real
+        # live incident: XAUUSD's M5 pending order (128495593) sat
+        # untouched in MT5 for 20+ minutes after Trend Manager's own state
+        # moved on to a fresh M1 MARKET fill -- this exact combination
+        # (tracked.kind == PENDING, status == FILLED, different setup)
+        # fell through every existing branch below as a silent no-op:
+        # the `tracked is None` branch never ran (tracked wasn't None),
+        # and the `elif tracked.kind == "PENDING"` branch only ever
+        # checked for a matching position under the NEW comment, which
+        # will never exist until the new market order is actually placed.
+        # Mirrors the PENDING status branch's own identical
+        # "superseded by a better setup" handling above.
+        if tracked is not None and tracked.kind == "PENDING" and \
+                (tracked.exec_timeframe, tracked.exec_start_time) != (exec_timeframe, exec_start_time):
+            _cancel_or_close_tracked(cfg, source, tracker, symbol, tracked, "superseded by a better setup")
+            tracked = None
+
         if tracked is None:
             if desired.get("mode") == "MARKET":
                 if _cooldown_blocks(source, symbol, exec_timeframe, exec_start_time):
