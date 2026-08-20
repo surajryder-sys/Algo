@@ -34,6 +34,39 @@ from v3.tv_scraper import zone_history_log
 
 _DATA_WINDOW_TAB = "Data window"
 
+# Plausible price range per symbol -- a zone whose top/btm falls outside
+# its OWN labeled symbol's range here is rejected outright rather than
+# written to the store. Added 2026-08-20 after a real, confirmed live
+# incident: USOIL and USTEC share ONE browser window/process (one 2-row
+# grid, not separate windows like every other symbol here), and a
+# pane-focus/repaint race let USOIL's own M15 zone (top=85.88, btm=85.52
+# -- USOIL's own price scale) get written under USTEC's H1 key instead,
+# roughly 2.5 hours after USOIL's own real sighting of it. Fired a real
+# Trend Manager BUY on USTEC off a "bullish H1 OB" that was never a real
+# USTEC signal at all. formed_time_confirmed/the mitigation-debounce
+# guards don't catch this -- the zone was perfectly well-formed, just
+# mislabeled to a symbol whose real price is nowhere near it. Ranges are
+# deliberately wide (generous headroom for real price movement) but
+# don't overlap between any two symbols, so a genuine cross-symbol mixup
+# can never slip through by coincidence. XAUUSD/BTCUSD/ETHUSD each have
+# their own dedicated window/process (no contamination risk between
+# them), but are checked too as cheap defense-in-depth.
+_SYMBOL_PRICE_RANGE = {
+    "XAUUSD": (1000.0, 10000.0),
+    "BTCUSD": (10000.0, 300000.0),
+    "ETHUSD": (300.0, 20000.0),
+    "USOIL": (5.0, 500.0),
+    "USTEC": (3000.0, 100000.0),
+}
+
+
+def _price_plausible(symbol: str, top: float, btm: float) -> bool:
+    bounds = _SYMBOL_PRICE_RANGE.get(symbol)
+    if bounds is None:
+        return True  # no configured range for this symbol -- nothing to check against
+    lo, hi = bounds
+    return lo <= btm and top <= hi
+
 
 def _goto_resilient(page: Page, url: str, attempts: int = 4) -> None:
     """page.goto can get raced by a leftover tab from this real profile's
@@ -458,6 +491,18 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
     new_pending_formed: dict[int, int] = {}
 
     for zone in current:
+        if not _price_plausible(symbol, zone["top"], zone["btm"]):
+            # Cross-symbol contamination guard -- see _SYMBOL_PRICE_RANGE's
+            # own comment. Deliberately doesn't touch seen_now/previously_seen
+            # at all: this poll simply didn't see anything usable in this
+            # slot, same as if the read had failed outright, rather than
+            # treating a real zone as freshly missing/mitigated over a single
+            # bad poll.
+            print(f"[tv_scraper] {symbol} {timeframe} {direction}: REJECTED implausible zone "
+                  f"top={zone['top']} btm={zone['btm']} -- outside {symbol}'s own price range, "
+                  f"likely cross-symbol contamination from another pane")
+            continue
+
         price_key = _price_key(zone)
         is_first_sighting = price_key not in previously_seen
 
@@ -699,8 +744,20 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
               f"-- skipping this poll to let the chart settle")
         return
 
+    # Same cross-symbol contamination risk as OB zones (see
+    # _SYMBOL_PRICE_RANGE's own comment) applies to Close and the ATR
+    # trail-stop too -- both are raw prices read off the same pane. A
+    # contaminated Close would also corrupt entry/distance math
+    # downstream (live.apply below feeds Trend/Reversal Manager's own
+    # _read_live_close), so this is checked before anything uses it,
+    # not just before writing zones.
+    if parsed.close is not None and not _price_plausible(symbol, parsed.close, parsed.close):
+        print(f"[tv_scraper] {symbol} {timeframe}: REJECTED implausible Close={parsed.close} "
+              f"-- outside {symbol}'s own price range, likely cross-symbol contamination")
+        parsed.close = None
+
     atr_data = None
-    if parsed.atr is not None:
+    if parsed.atr is not None and _price_plausible(symbol, parsed.atr["trail_stop"], parsed.atr["trail_stop"]):
         atr_data = dict(parsed.atr)
         # trend: derived live from close vs trail_stop instead of a
         # dedicated chart plot (see atr_trend_tracker.py's docstring for
@@ -714,6 +771,10 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
             atr_data["trend"] = trend
             atr_data["event_time"] = event_time
         atr.apply(symbol, timeframe, atr_data, now)
+    elif parsed.atr is not None:
+        print(f"[tv_scraper] {symbol} {timeframe}: REJECTED implausible ATR trail_stop="
+              f"{parsed.atr['trail_stop']} -- outside {symbol}'s own price range, "
+              f"likely cross-symbol contamination")
 
     for direction, direction_zones in (("bull", parsed.bull_zones), ("bear", parsed.bear_zones)):
         seen, streak, pending_retest, pending_formed = _apply_direction(
