@@ -262,14 +262,25 @@ def _best_parent_candidate(store: ZoneStore, tracker: TradeTracker, symbol: str,
 def _newest_post_parent_zone(store: ZoneStore, tracker: TradeTracker, symbol: str, timeframe: str,
                               direction: str, parent_start_time: int) -> Optional[TVZone]:
     """The newest formed_time_confirmed, still-eligible OB on this
-    trigger bucket that formed AFTER the parent OB itself -- None if no
-    such OB exists. Same newest-first short-circuit logic as
-    _newest_eligible_start_time."""
+    trigger bucket that formed AT OR AFTER the parent OB itself -- None
+    if no such OB exists. Same newest-first short-circuit logic as
+    _newest_eligible_start_time.
+
+    Changed 2026-08-20 from a strict "AFTER" (>) to "at or after" (>=):
+    for XAUUSD (M5) and BTCUSD/ETHUSD (M15), the parent timeframe is
+    ALSO one of the symbol's own trigger timeframes, so the exact same
+    OB that just won bias can legitimately BE the entry trigger too --
+    user's explicit rule ("if a m5 forms it can surely buy, being a
+    parent"). A strict > made that impossible by construction (an OB's
+    start_time can never be greater than itself). Only actually changes
+    behavior for that same-OB case: a genuinely distinct trigger OB on a
+    different timeframe/candle can't retroactively equal parent_start_time
+    in practice."""
     for zone in store.zones(symbol, timeframe, direction):
         if not _formation_trusted(zone):
             continue
-        if zone.start_time <= parent_start_time:
-            return None  # newest confirmed zone isn't even post-parent -> nothing older is either
+        if zone.start_time < parent_start_time:
+            return None  # newest confirmed zone isn't even at-or-after parent -> nothing older is either
         if not tracker.is_eligible(symbol, timeframe, direction, zone.start_time):
             return None  # newest confirmed+post-parent zone already blocked -> nothing newer/eligible exists
         return zone
@@ -576,9 +587,20 @@ def _run_trade_logic(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolCon
               f"OB @ {start_time}")
 
     # Block any NEW same-direction parent OB on EITHER parent timeframe (no pyramiding).
+    # Skips the active trade's OWN parent OB (same timeframe, same start_time) --
+    # fixed 2026-08-20: this loop runs every cycle including the very one
+    # that just picked that OB as parent above, so without this skip it
+    # immediately watermarked (blocked) the just-chosen parent OB before
+    # _try_fire_entry below ever got a chance to also use it as its own
+    # trigger (see _newest_post_parent_zone's own 2026-08-20 docstring
+    # update) -- confirmed live: this is what silently prevented a fresh
+    # XAUUSD M5 OB from ever firing its own buy. A genuinely NEWER
+    # same-direction OB appearing later (start_time > active.parent_start_time,
+    # or a different parent timeframe) is still blocked as before.
     for timeframe in parent_timeframes:
         start_time = _newest_eligible_start_time(store, tracker, symbol, timeframe, active.direction)
-        if start_time is not None:
+        if start_time is not None and not (timeframe == active.parent_timeframe
+                                            and start_time == active.parent_start_time):
             tracker.mark_traded_only(symbol, timeframe, active.direction, start_time)
             tf_label = _TF_LABELS.get(timeframe, timeframe)
             print(f"[trend_manager] {symbol}: new {active.direction} OB ({tf_label}) while trade active "
