@@ -718,6 +718,25 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
 _last_symbol_tf: dict[str, tuple[str, str]] = {}
 
 
+def _zone_signature(zones_list: list[dict]) -> tuple:
+    """A comparable snapshot of a parsed zone list's own top/btm values,
+    in order -- used by the settle-verification check below to confirm
+    two consecutive Data Window reads actually agree on the PLOTTED
+    VALUES, not just the pane's header text."""
+    return tuple((z.get("top"), z.get("btm")) for z in zones_list)
+
+
+def _parsed_values_agree(a, b) -> bool:
+    """True only if two ParsedState reads agree on bull/bear zone
+    top/btm AND ATR trail_stop -- see run_once_pane's own comment for
+    why this checks the VALUES, not just symbol/timeframe."""
+    a_atr = (a.atr or {}).get("trail_stop")
+    b_atr = (b.atr or {}).get("trail_stop")
+    return (_zone_signature(a.bull_zones) == _zone_signature(b.bull_zones)
+            and _zone_signature(a.bear_zones) == _zone_signature(b.bear_zones)
+            and a_atr == b_atr)
+
+
 def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: FirstSeenStore,
                    retested: RetestTracker, trend_tracker: AtrTrendTracker, live: LiveSnapshotStore,
                    mitigation_track: MitigationTrackStore,
@@ -780,6 +799,28 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
         print(f"[tv_scraper][{pane_label}] symbol/timeframe changed "
               f"({last_symbol_tf[0]}/{last_symbol_tf[1]} -> {symbol}/{timeframe}) "
               f"-- skipping this poll to let the chart settle")
+        return
+
+    # Verify this read is genuinely settled, not just its header text --
+    # added 2026-08-22 after a real live incident: a real M5 XAUUSD zone's
+    # own top/btm values got written under BOTH M30's and M15's own
+    # timeframe keys, even though each pane's HEADER correctly reported
+    # "M30"/"M15" the whole time -- the check above never caught it,
+    # because it only compares the header (symbol, timeframe), never the
+    # actual plotted Bull/Bear values. Those are rendered in a separate
+    # part of the page and can lag behind the header after the 0.4s
+    # settle sleep above. A second, cheap (no-scroll, since Bull1-4/
+    # Bear1-4 top/btm are always in the first screenful) read a short
+    # moment later that must AGREE with the first is a direct check on
+    # the data itself, not a proxy that can be right while the values
+    # underneath are still stale from whichever pane was focused before
+    # this one.
+    time.sleep(0.3)
+    confirm_text = page.evaluate("document.body.innerText")
+    confirm_parsed = parse_data_window(confirm_text)
+    if not _parsed_values_agree(parsed, confirm_parsed):
+        print(f"[tv_scraper][{pane_label}] {symbol} {timeframe}: zone/ATR values still settling "
+              f"(two reads disagreed) -- skipping this poll")
         return
 
     # Same cross-symbol contamination risk as OB zones (see
