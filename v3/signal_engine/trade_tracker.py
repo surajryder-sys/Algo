@@ -54,6 +54,12 @@ from typing import Optional
 
 from v3.tradingview_bot.zone_store import ZoneStore
 
+# How many consecutive cycles a trade's reference OB must be missing from
+# the zone store before close_if_invalidated treats it as a real
+# mitigation rather than transient scrape churn -- see that method's own
+# docstring for the real live incident this fixes.
+_MISSING_STREAK_THRESHOLD = 2
+
 
 def _bucket_key(symbol: str, timeframe: str, direction: str) -> str:
     return f"{symbol}|{timeframe}|{direction}"
@@ -90,6 +96,17 @@ class ActiveTrade:
     # an opposite OB forming on M1 or M3, OR this specific M3 zone
     # getting mitigated (see trend_manager._close_if_m1_noise_exit).
     m3_watch_start_time: Optional[int] = None
+    # Consecutive cycles in a row the reference OB has been missing from
+    # the zone store -- see close_if_invalidated's own docstring for the
+    # real live bug this fixes (2026-08-21): tv_scraper's zone store can
+    # transiently drop a genuinely-still-valid zone for a single poll
+    # (ordinary top-N visibility churn, not real mitigation), and it
+    # reappears the very next poll. close_if_invalidated used to treat
+    # "not found" as an immediate, permanent mitigation -- closed a real
+    # XAUUSD trade on a zone that was still sitting there, unmitigated,
+    # both before and after that one missed poll. Reset to 0 the moment
+    # the zone is seen again.
+    missing_streak: int = 0
 
 
 class TradeTracker:
@@ -291,6 +308,18 @@ class TradeTracker:
         real, chosen setup means it played out and is done -- never
         worth revisiting). Returns True if a close happened.
 
+        Requires the zone to be missing for MISSING_STREAK_THRESHOLD
+        consecutive cycles in a row before treating it as a real
+        mitigation -- added 2026-08-21 after a real live bug: a genuine,
+        still-valid XAUUSD M5 zone transiently dropped out of
+        tv_scraper's own zone store for a single poll (ordinary top-N
+        visibility churn, not real mitigation -- see
+        ActiveTrade.missing_streak's own docstring) and closed a real
+        trade that was never actually invalidated; the zone was back,
+        unmitigated, on the very next poll. A single missed poll no
+        longer closes anything -- the streak has to hold for two polls
+        running. Resets to 0 the instant the zone is seen again.
+
         Skips entirely (returns False) when exec_via_atr is True -- an
         ATR-flip-confirmed trade's exec_start_time is the ATR event's
         own timestamp, not a real OB's, so there's no zone to look up at
@@ -317,6 +346,13 @@ class TradeTracker:
         ref_start_time = trade.exec_start_time if trade.exec_timeframe else trade.parent_start_time
         zone = store.get(symbol, ref_timeframe, trade.direction, ref_start_time)
         if zone is not None:
+            if trade.missing_streak != 0:
+                trade.missing_streak = 0
+                self._save()
             return False  # still live -- trade stays open
+        trade.missing_streak += 1
+        if trade.missing_streak < _MISSING_STREAK_THRESHOLD:
+            self._save()
+            return False  # could be transient churn -- give it one more cycle
         self.close_trade(symbol, block=True)
         return True
