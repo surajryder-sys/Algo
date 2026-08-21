@@ -482,9 +482,47 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
          ceiling makes formed_hint permanently unavailable -- see
          bar_day_minute()'s own comment) can never be corrected this way
          at all; that's a known, accepted gap for very old zones, not
-         something this mechanism claims to solve."""
+         something this mechanism claims to solve.
+      6. Orphan reconciliation (added 2026-08-22): a ZoneStore entry with
+         no matching previously_seen record at all -- see the loop right
+         at the top of this function's own body for the confirmed live
+         case and full rationale. Seeded into previously_seen so it's no
+         longer permanently invisible to the missing-streak mitigation
+         check below."""
     price_field = "btm" if direction == "bull" else "top"
     now = int(time.time())
+
+    # Reconcile ZoneStore entries that have no corresponding
+    # previously_seen record at all -- confirmed live 2026-08-22: a
+    # BTCUSD H4 bear zone from 2026-01-31 (202 days old) was still
+    # sitting in the store marked virgin, with a COMPLETELY EMPTY
+    # missing_streak dict for its whole bucket, even though price had
+    # since traded straight through its range on the way to 79500 (which
+    # should have mitigated it long ago). The missing-streak loop below
+    # can only ever act on a price_key already present in previously_seen
+    # (it iterates previously_seen.keys() - seen_now.keys()) -- a zone
+    # whose price_key was NEVER in previously_seen is therefore
+    # permanently invisible to mitigation detection, no matter what price
+    # does. Root cause of how the two stores (ZoneStore's own file vs
+    # MitigationTrackStore's) got out of sync isn't fully provable after
+    # the fact (most likely some zone_store write -- a resurrection, a
+    # rekey, a merge -- that wasn't mirrored into the tracker), but this
+    # closes the gap regardless of how it happened: seed the orphan into
+    # previously_seen as if it were "last seen" one poll ago, and the
+    # SAME existing 2-poll debounce below naturally catches and deletes
+    # it over the next two polls if it's genuinely no longer visible --
+    # no separate mechanism, no risk of double-deleting a zone that IS
+    # still legitimately live (this only ever adds a missing tracking
+    # entry, never removes one).
+    for stored_zone in zones.zones(symbol, timeframe, direction):
+        orphan_key = _price_key({"top": stored_zone.top})
+        if orphan_key not in previously_seen:
+            previously_seen[orphan_key] = stored_zone.start_time
+            print(f"[tv_scraper] {symbol} {timeframe} {direction}: reconciled orphaned zone "
+                  f"start_time={stored_zone.start_time} top={stored_zone.top} btm={stored_zone.btm} "
+                  f"virgin={stored_zone.virgin} -- existed in ZoneStore with no mitigation-tracking "
+                  f"entry, now eligible for normal missing-streak mitigation")
+
     seen_now: dict[int, int] = {}
     new_missing_streak: dict[int, int] = {}
     new_pending_retest: dict[int, int] = {}
