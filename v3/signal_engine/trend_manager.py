@@ -594,17 +594,40 @@ def _run_trade_logic(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolCon
     # _try_fire_entry below ever got a chance to also use it as its own
     # trigger (see _newest_post_parent_zone's own 2026-08-20 docstring
     # update) -- confirmed live: this is what silently prevented a fresh
-    # XAUUSD M5 OB from ever firing its own buy. A genuinely NEWER
-    # same-direction OB appearing later (start_time > active.parent_start_time,
-    # or a different parent timeframe) is still blocked as before.
+    # XAUUSD M5 OB from ever firing its own buy.
+    #
+    # Also skips a same-direction OB on a DIFFERENT parent timeframe if
+    # that timeframe is ALSO one of this symbol's trigger timeframes AND
+    # the trade hasn't fired yet -- fixed 2026-08-21 after a real live
+    # incident: M15 won bias (M5 was NOT the newest parent this time),
+    # but a genuinely fresh M5 OB formed at the exact same instant (every
+    # M15 candle-open is also an M5 candle-open) -- since M5 is one of
+    # XAUUSD's own trigger timeframes, that OB should have gotten a shot
+    # at _try_fire_entry below as a normal trigger candidate. Instead
+    # this loop treated it as just another competing parent OB and
+    # blocked it outright, in the SAME cycle, before _try_fire_entry ever
+    # ran -- user's own words: "it should trigger the trade if its in
+    # specified range, flipping the trade is also must." Once the trade
+    # actually FILLS, this exemption stops applying (status != "FILLED"
+    # check below) -- no-pyramiding still holds for every cycle after
+    # that, unchanged.
+    #
+    # A genuinely NEWER same-direction OB appearing later, or on a
+    # parent timeframe that ISN'T also a trigger timeframe (M15 for
+    # XAUUSD, always), is still blocked exactly as before.
     for timeframe in parent_timeframes:
         start_time = _newest_eligible_start_time(store, tracker, symbol, timeframe, active.direction)
-        if start_time is not None and not (timeframe == active.parent_timeframe
-                                            and start_time == active.parent_start_time):
-            tracker.mark_traded_only(symbol, timeframe, active.direction, start_time)
-            tf_label = _TF_LABELS.get(timeframe, timeframe)
-            print(f"[trend_manager] {symbol}: new {active.direction} OB ({tf_label}) while trade active "
-                  f"-- marked traded, no new entry")
+        if start_time is None:
+            continue
+        is_own_parent = (timeframe == active.parent_timeframe and start_time == active.parent_start_time)
+        is_live_trigger_candidate = (timeframe in sym_cfg.trigger_timeframes and active.status != "FILLED"
+                                      and start_time >= active.parent_start_time)
+        if is_own_parent or is_live_trigger_candidate:
+            continue
+        tracker.mark_traded_only(symbol, timeframe, active.direction, start_time)
+        tf_label = _TF_LABELS.get(timeframe, timeframe)
+        print(f"[trend_manager] {symbol}: new {active.direction} OB ({tf_label}) while trade active "
+              f"-- marked traded, no new entry")
 
     if active.status == "FILLED":
         return  # nothing more to do until closure (mitigation) or a bias flip
