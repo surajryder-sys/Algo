@@ -1,6 +1,13 @@
-"""Tracks the tv_bridge signal log offset this bot has already processed (so
-a restart doesn't replay old signals), plus the full history of what it has
-seen so far. Plain JSON file -- same approach as the other bots' state_store.py.
+"""Tracks the tv_bridge signal log offset this bot has already processed
+(so a restart doesn't replay old signals). Plain JSON file -- same approach
+as the other bots' state_store.py.
+
+Used to also carry a "history" list of every raw event ever seen, growing
+forever. Dropped 2026-08-22 -- nothing in the codebase ever read it (verified
+by grep), it was pure unbounded storage for no consumer, and it's the exact
+opposite of the user's explicit "don't keep data past the point it's still
+needed" instruction. ZoneStore/AtrStore are the actual state anything reads;
+this file's only job is the cursor.
 """
 from __future__ import annotations
 
@@ -12,7 +19,6 @@ class SignalStore:
     def __init__(self, path: str):
         self._path = Path(path)
         self._cursor = 0
-        self._history: list[dict] = []
         self._load()
 
     def _load(self) -> None:
@@ -21,19 +27,16 @@ class SignalStore:
         try:
             data = json.loads(self._path.read_text())
             self._cursor = data.get("cursor", 0)
-            self._history = data.get("history", [])
         except (json.JSONDecodeError, OSError):
             self._cursor = 0
-            self._history = []
 
     def _save(self) -> None:
-        self._path.write_text(json.dumps({"cursor": self._cursor, "history": self._history}))
+        self._path.write_text(json.dumps({"cursor": self._cursor}))
 
     @property
     def cursor(self) -> int:
         return self._cursor
 
-    def record(self, cursor: int, signals: list[dict]) -> None:
+    def record(self, cursor: int) -> None:
         self._cursor = cursor
-        self._history.extend(signals)
         self._save()
