@@ -129,7 +129,11 @@ def load_config() -> Config:
                 "ETHUSD",
                 tv_zone_file,
                 os.getenv("SIGNAL_ENGINE_ETHUSD_LIVE_FILE", "tv_scraper_ethusd_live.json"),
-                ltf_timeframes=("5",),
+                # "3" not "5" as of 2026-08-22 -- user changed ETHUSD's
+                # actual bottom chart pane from M5 to M3 ("change it to
+                # m3 everywhere"), matching BTCUSD's own ltf_timeframes
+                # above (already "3", was ahead of this one).
+                ltf_timeframes=("3",),
             ),
             # USOIL/USTEC (added 2026-08-19) -- see trend_manager's own
             # config.py for the shared-tv_scraper-process rationale.

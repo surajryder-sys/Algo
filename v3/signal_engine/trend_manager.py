@@ -45,7 +45,9 @@ itself 2026-08-17).
 
 --- Entry execution, once bias is set ---
 Trigger timeframes (SymbolConfig.trigger_timeframes) are pure execution
-triggers -- XAUUSD: M5/M3/M1. BTCUSD/ETHUSD: M15/M5. Each only reacts
+triggers -- XAUUSD: M5/M3/M1. BTCUSD/ETHUSD: M15/M3 (was M15/M5 until
+2026-08-22, when the user changed both symbols' actual bottom chart
+pane from M5 to M3 -- "change it to m3 everywhere"). Each only reacts
 to an OB on its own timeframe that formed AFTER the parent OB's own
 formation time -- not any OB that already exists (applies to all
 trigger timeframes, confirmed explicitly for M3, implied for M5).

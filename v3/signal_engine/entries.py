@@ -82,14 +82,26 @@ _BTCUSD = EntryConfig(sl_buffer=20.0, market_max=175.0, pullback_min=175.0, pull
 _ETHUSD = EntryConfig(sl_buffer=2.0, market_max=4.0, pullback_min=4.0, pullback_max=20.0, pullback_floor=4.0)
 
 # (symbol, timeframe) -> EntryConfig, for Trend Manager's own entries.
+# BTCUSD/ETHUSD's "3" entries added 2026-08-22, same day the user
+# changed both symbols' actual bottom chart pane from M5 to M3
+# ("change it to m3 everywhere") and trend_manager's/reversal's own
+# trigger_timeframes config followed suit -- without an entry here,
+# compute_entry() would have silently returned EntryMode.NONE for every
+# M3 candidate, breaking entry firing for both symbols entirely. "5"
+# entries kept (not removed) since the old M5 bucket, now stale, will
+# just naturally stop producing any post-parent candidates once the
+# scraper's orphan-reconciliation fix cleans it out -- no harm in the
+# lookup entry remaining.
 ENTRY_CONFIGS = {
     ("XAUUSD", "1"): _XAUUSD_M1,
     ("XAUUSD", "3"): _XAUUSD_M3_M5,
     ("XAUUSD", "5"): _XAUUSD_M3_M5,
     ("BTCUSD", "15"): _BTCUSD,
     ("BTCUSD", "5"): _BTCUSD,
+    ("BTCUSD", "3"): _BTCUSD,
     ("ETHUSD", "15"): _ETHUSD,
     ("ETHUSD", "5"): _ETHUSD,
+    ("ETHUSD", "3"): _ETHUSD,
 }
 
 # Reversal Manager's own LTF confirmation configs -- identical to

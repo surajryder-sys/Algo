@@ -30,10 +30,10 @@ class SymbolConfig:
     # The two "parent" timeframes trend_manager.py compares -- whichever
     # has the newer eligible OB wins and opens the trade. Differs per
     # symbol: XAUUSD (M5/M15) vs BTCUSD/ETHUSD (M15/M30), per explicit
-    # user request 2026-08-17 -- crypto's own tv_scraper grid only scrapes
-    # H4/H2/H1/M30/M15/M5 (no M1/M3 at all, see
-    # project_tv_scraper_multi_symbol_setup memory), so XAUUSD's M5/M3/M1
-    # scheme simply doesn't apply there; everything shifts one tier up.
+    # user request 2026-08-17 -- crypto's own tv_scraper grid scrapes
+    # H4/H2/H1/M30/M15 plus one fast timeframe (M5 originally, M3 as of
+    # 2026-08-22 -- see trigger_timeframes below), not the full M5/M3/M1
+    # set XAUUSD has, so everything shifts one tier up.
     # Was a fixed 2-tuple until USOIL/USTEC (2026-08-19), whose own
     # parent scheme is three-wide (1h/30m/15m) rather than two --
     # _best_parent_candidate/_newest_eligible_start_time already just
@@ -41,9 +41,13 @@ class SymbolConfig:
     parent_timeframes: Tuple[str, ...]
     # Pure execution triggers -- never get their own watermark, just
     # need ANY confirmed OB in the parent's direction to fire. XAUUSD:
-    # M5/M3/M1 ("whichever forms first"). BTCUSD/ETHUSD: M15/M5 (same
+    # M5/M3/M1 ("whichever forms first"). BTCUSD/ETHUSD: M15/M3 (same
     # "whichever gets the early entry" idea, shifted for the TFs crypto
-    # actually has). USOIL/USTEC: M3 only.
+    # actually has -- was M15/M5 until 2026-08-22, when the user changed
+    # BTCUSD/ETHUSD's actual bottom chart pane from M5 to M3, "change it
+    # to m3 everywhere"; the old M5 bucket is now stale and will get
+    # cleaned up by the orphan-reconciliation fix in scraper.py since
+    # nothing writes to it anymore). USOIL/USTEC: M3 only.
     trigger_timeframes: Tuple[str, ...]
     # Set only for USOIL/USTEC (2026-08-19, user's explicit rule) --
     # when present, _try_fire_entry uses a DIFFERENT firing mechanism
@@ -111,14 +115,14 @@ def load_config() -> Config:
                 os.getenv("SIGNAL_ENGINE_BTCUSD_ZONE_FILE", "tv_scraper_zones.json"),
                 live_state_file=os.getenv("SIGNAL_ENGINE_BTCUSD_LIVE_FILE", "tv_scraper_live.json"),
                 parent_timeframes=("15", "30"),
-                trigger_timeframes=("15", "5"),
+                trigger_timeframes=("15", "3"),
             ),
             SymbolConfig(
                 "ETHUSD",
                 os.getenv("SIGNAL_ENGINE_ETHUSD_ZONE_FILE", "tv_scraper_ethusd_zones.json"),
                 live_state_file=os.getenv("SIGNAL_ENGINE_ETHUSD_LIVE_FILE", "tv_scraper_ethusd_live.json"),
                 parent_timeframes=("15", "30"),
-                trigger_timeframes=("15", "5"),
+                trigger_timeframes=("15", "3"),
             ),
             # USOIL/USTEC (added 2026-08-19) -- one shared tv_scraper
             # process/window serves both (same "Scrpr_USOIL/USTEC" 2x4
