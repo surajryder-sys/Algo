@@ -99,6 +99,16 @@ def _format_alert(symbol: str, zone: dict, price: float) -> str:
     )
 
 
+def _is_too_old(zone: dict, max_zone_age_seconds: float) -> bool:
+    """True once a zone's real Pine-confirmed formation age exceeds the
+    configured cap -- see Config.max_zone_age_seconds's own docstring
+    for the confirmed live case (a 202-day-old BTCUSD H4 zone) this
+    guards against. Only meaningful once formed_time_confirmed is
+    already True (caller's responsibility) -- a wall-clock-guessed
+    start_time can't tell you anything real about age."""
+    return (time.time() - zone["start_time"]) > max_zone_age_seconds
+
+
 def _passes_stability(zone: dict, confirmation: ConfirmationTracker, symbol: str, key: str,
                        min_visible_seconds: float) -> bool:
     """Decides whether to trust this zone RIGHT NOW without waiting out
@@ -152,6 +162,7 @@ def run_once(cfg: Config, alerted: AlertedZoneStore, confirmation: ConfirmationT
         eligible_now = {
             _zone_key(sym_cfg.symbol, z) for z in zones
             if z["virgin"] and z["formed_time_confirmed"] and z["timeframe"] not in cfg.excluded_timeframes
+            and not _is_too_old(z, cfg.max_zone_age_seconds)
         }
         confirmation.update(sym_cfg.symbol, sym_cfg.zone_state_file, eligible_now)
 
@@ -159,6 +170,14 @@ def run_once(cfg: Config, alerted: AlertedZoneStore, confirmation: ConfirmationT
             if zone["timeframe"] in cfg.excluded_timeframes:
                 continue
             if not zone["virgin"] or not zone["formed_time_confirmed"]:
+                continue
+            if _is_too_old(zone, cfg.max_zone_age_seconds):
+                # Real Pine-confirmed formation time, but too old to
+                # trust -- see Config.max_zone_age_seconds's own
+                # docstring. Once a zone ages out of whatever top-N set
+                # Pine exposes through the Data Window, tv_scraper can
+                # never learn it was actually mitigated, so it freezes
+                # at "virgin" forever regardless of what price does.
                 continue
             if not (zone["btm"] <= price <= zone["top"]):
                 continue

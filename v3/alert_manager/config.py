@@ -55,6 +55,23 @@ class Config:
     # wrong with the data at fire time. This trades a little latency for
     # only alerting on zones that stay visible long enough to verify.
     min_visible_seconds: float
+    # Maximum real-world age (wall-clock seconds since a zone's own
+    # formed_time_confirmed start_time) before Alert Manager refuses to
+    # fire on it at all, regardless of virgin/formed_time_confirmed
+    # status. Added 2026-08-22 after a confirmed live case: a BTCUSD H4
+    # bear zone from 2026-01-31 (202 days old) still read as virgin in
+    # tv_scraper's own store and fired an alert, even though price had
+    # since traded up to 79500 -- necessarily crossing back through the
+    # zone's 77315-78015 range on the way, which would have mitigated it
+    # in reality. Root cause: once a zone ages out of whatever top-N set
+    # Pine actually exposes through the Data Window, tv_scraper has no
+    # further way to observe it -- no mitigation event ever arrives, so
+    # the zone freezes at its last-known "virgin" state in the store
+    # forever. formed_time_confirmed only guards against a FABRICATED
+    # recency (wall-clock-guessed start_time); it says nothing about a
+    # zone that's genuinely old AND has simply gone stale/unobservable.
+    # This is a blunt but reliable backstop for that gap.
+    max_zone_age_seconds: float
 
 
 def load_config() -> Config:
@@ -80,4 +97,9 @@ def load_config() -> Config:
         alerted_state_file=os.getenv("ALERT_MANAGER_ALERTED_STATE_FILE", "alert_manager_alerted_zones.json"),
         excluded_timeframes=frozenset(t.strip() for t in excluded_raw.split(",") if t.strip()),
         min_visible_seconds=float(os.getenv("ALERT_MANAGER_MIN_VISIBLE_SECONDS", "180")),
+        # 30 days default -- generous enough to keep genuinely long-lived
+        # H4 zones alive, tight enough to rule out the 202-day case that
+        # prompted this. Tunable via env if a symbol/timeframe needs
+        # different judgment later.
+        max_zone_age_seconds=float(os.getenv("ALERT_MANAGER_MAX_ZONE_AGE_DAYS", "30")) * 86400.0,
     )
