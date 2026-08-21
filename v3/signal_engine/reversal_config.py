@@ -40,9 +40,14 @@ class SymbolConfig:
     symbol: str
     zone_state_file: str
     live_state_file: str
-    # LTF confirmation timeframes -- XAUUSD has M1/M3/M5; BTCUSD/ETHUSD's
-    # own tv_scraper grid has no M1/M3 at all (see
-    # project_tv_scraper_multi_symbol_setup memory), so only M5 applies.
+    # LTF confirmation timeframes -- XAUUSD has M1/M3/M5. BTCUSD/ETHUSD's
+    # own tv_scraper PULL grid has no M1/M3 at all (see
+    # project_tv_scraper_multi_symbol_setup memory), so historically only
+    # M5 applied for them; BTCUSD switched to M3 on 2026-08-21 once the
+    # webhook (push) path started carrying its own M3 OBD_Reversal alert --
+    # zone_state_file for BTCUSD is the shared tv_zone_file (webhook data),
+    # not tv_scraper's own pull file, so this isn't limited by the scraper
+    # grid's panes the way live_state_file still is.
     ltf_timeframes: Tuple[str, ...]
     # Trend Manager's own two parent (bias) timeframes for this symbol --
     # None (default) means the M5-immediate/mitigation-close rules below
@@ -118,7 +123,7 @@ def load_config() -> Config:
                 "BTCUSD",
                 tv_zone_file,
                 os.getenv("SIGNAL_ENGINE_BTCUSD_LIVE_FILE", "tv_scraper_live.json"),
-                ltf_timeframes=("5",),
+                ltf_timeframes=("3",),
             ),
             SymbolConfig(
                 "ETHUSD",
