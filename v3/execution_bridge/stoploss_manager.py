@@ -125,8 +125,52 @@ def _manage_one(cfg: Config, source: SourceConfig, sym_cfg: SymbolConfig, tracke
             return  # still respecting the manual change
         state.manual_override_active = False
         state.override_price_reference = None
-        print(f"{tag} {symbol}: new {'high' if direction == 'bull' else 'low'} reached -- "
-              f"resuming normal trailing")
+        # Resuming moves SL to cost (breakeven) ONLY, as a one-time
+        # correction -- NEVER straight into a further-trailed step on
+        # this same resume, even if the CURRENT cycle's own favor
+        # already clears a later step. Real live bug, user's own report
+        # 2026-08-22: "it can only trail to cost once, if manually
+        # changed, then it can trail only when it hits new high/low as
+        # per prescribed sl logic." Simply capping peak_favor_points
+        # here isn't enough on its own -- the normal fall-through below
+        # immediately re-applies max(peak_favor_points, favor) using
+        # THIS cycle's own (already past-reference, so already-elevated)
+        # favor, undoing the cap in the same breath and jumping straight
+        # past cost whenever the resuming price itself already clears a
+        # later step (confirmed live testing this fix: a resume at
+        # +470 points jumped straight to the +150 trail step instead of
+        # stopping at cost). So the resume is handled as its own
+        # explicit, terminal action here -- forces peak_favor_points to
+        # EXACTLY trail_start_points (representing "just reached cost,
+        # nothing more yet") and applies cost directly, then returns.
+        # Normal per-cycle trailing resumes from the NEXT cycle onward,
+        # so any further move beyond cost only ever comes from genuinely
+        # NEW favorable movement accumulating after this point, through
+        # the standard step-by-step formula -- never a same-cycle jump.
+        state.peak_favor_points = sym_cfg.trail_start_points
+        cost_sl = entry_price
+        already_at_cost = abs((position.sl or 0.0) - cost_sl) < 1e-6
+        if already_at_cost:
+            state.last_managed_sl = cost_sl
+            sl_states.save()
+            print(f"{tag} {symbol}: new {'high' if direction == 'bull' else 'low'} reached -- "
+                  f"already at cost, resuming normal trailing from here")
+        elif not cfg.enable_trading:
+            sl_states.save()
+            print(f"{tag} {symbol}: new {'high' if direction == 'bull' else 'low'} reached -- "
+                  f"WOULD move SL to cost ({cost_sl:.2f}) -- trading disabled")
+        else:
+            result = broker.modify_position_sl(symbol, tracked.ticket, cost_sl)
+            if result.ok:
+                state.last_managed_sl = cost_sl
+                sl_states.save()
+                print(f"{tag} {symbol}: new {'high' if direction == 'bull' else 'low'} reached -- "
+                      f"moved SL to cost ({cost_sl:.2f}), resuming normal trailing from here")
+            else:
+                sl_states.save()
+                print(f"{tag} {symbol}: new {'high' if direction == 'bull' else 'low'} reached but "
+                      f"FAILED to move SL to cost -- retcode={result.retcode} {result.comment}")
+        return
 
     state.peak_favor_points = max(state.peak_favor_points, favor)
     sl_states.save()
