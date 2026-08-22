@@ -728,13 +728,22 @@ def _zone_signature(zones_list: list[dict]) -> tuple:
 
 def _parsed_values_agree(a, b) -> bool:
     """True only if two ParsedState reads agree on bull/bear zone
-    top/btm AND ATR trail_stop -- see run_once_pane's own comment for
-    why this checks the VALUES, not just symbol/timeframe."""
+    top/btm, ATR trail_stop, AND Close -- see run_once_pane's own
+    comment for why this checks the VALUES, not just symbol/timeframe.
+    Close was missed in the original 2026-08-22 version of this check
+    (only zones/ATR were compared) -- confirmed live the same day: an
+    ETHUSD M3 pane read a wildly implausible Close (~1916 against a real
+    ~2420) that still passed, because the two consecutive reads
+    apparently agreed on zones/ATR while the stale/wrong Close value was
+    consistent across both of them. Close feeds Trend/Reversal Manager's
+    own entry/distance math directly (via live_snapshot_store), so it
+    needs the exact same settle-guarantee as the zone and ATR data."""
     a_atr = (a.atr or {}).get("trail_stop")
     b_atr = (b.atr or {}).get("trail_stop")
     return (_zone_signature(a.bull_zones) == _zone_signature(b.bull_zones)
             and _zone_signature(a.bear_zones) == _zone_signature(b.bear_zones)
-            and a_atr == b_atr)
+            and a_atr == b_atr
+            and a.close == b.close)
 
 
 def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: FirstSeenStore,
