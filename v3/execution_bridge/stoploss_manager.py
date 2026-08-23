@@ -117,65 +117,45 @@ def _manage_one(cfg: Config, source: SourceConfig, sym_cfg: SymbolConfig, tracke
                   f"pausing trailing until a new {'high' if direction == 'bull' else 'low'}")
 
     if state.manual_override_active:
-        reference = state.override_price_reference
-        made_new_extreme = (current_price > reference) if direction == "bull" else (current_price < reference)
-        if not made_new_extreme:
-            state.peak_favor_points = max(state.peak_favor_points, favor)
+        # Stays paused until a GENUINELY new, further trail step is
+        # earned -- not just any marginal tick past the price recorded
+        # at the moment of intervention. User's explicit rule
+        # 2026-08-23: "it shouldn't even trail, unless a new high or
+        # low... leave manual SL completely alone until price genuinely
+        # advances far enough to justify a brand new, further trail
+        # step -- only then does the bot touch SL at all, moving it
+        # straight to that new step, never restoring an old value
+        # first." peak_favor_points keeps tracking the real running
+        # peak throughout the pause (as it always has); the gate is
+        # simply "does that peak now justify something tighter than
+        # what was already legitimately applied" (state.last_managed_sl,
+        # untouched by manual changes) -- not "has price ticked past an
+        # arbitrary reference point."
+        #
+        # Two earlier attempts at this both over-corrected: (1) forcing
+        # an unconditional move to cost on any reference-cross could
+        # JUMP the SL past cost in one move; (2) restoring to
+        # last_managed_sl on any reference-cross avoided that jump but
+        # could still fire a move the user never asked for (right back
+        # to a value they'd just changed away from) purely because price
+        # ticked marginally past an arbitrary point unrelated to the
+        # actual step formula. Gating on a genuinely new step instead
+        # means NO action at all until real, additional progress earns
+        # one -- exactly matching "per prescribed sl logic."
+        state.peak_favor_points = max(state.peak_favor_points, favor)
+        candidate = _desired_sl(direction, entry_price, state.peak_favor_points, sym_cfg)
+        current_managed = state.last_managed_sl
+        earned_new_step = (
+            candidate is not None and current_managed is not None
+            and ((candidate > current_managed) if direction == "bull" else (candidate < current_managed))
+        )
+        if not earned_new_step:
             sl_states.save()
-            return  # still respecting the manual change
+            return  # still respecting the manual change -- no new step earned yet
         state.manual_override_active = False
         state.override_price_reference = None
-        # Resuming restores SL to whatever the bot had LEGITIMATELY
-        # already earned before the manual change (state.last_managed_sl
-        # -- never touched by the override-detection code above, so it
-        # still holds that value) -- as a one-time correction, NEVER
-        # straight into a further-trailed step on this same resume, even
-        # if the CURRENT cycle's own favor already clears a later step.
-        #
-        # A first attempt at this (2026-08-22) forced the restore target
-        # to entry_price (cost) unconditionally and reset
-        # peak_favor_points down to trail_start_points -- a real,
-        # confirmed live bug: it REGRESSED the SL backward on a trade
-        # that had already trailed well past cost before the user
-        # touched it (peak favor 513 points, SL legitimately at
-        # entry+150), handing back profit protection that was already
-        # earned. That directly violated this module's own "a proper
-        # trailing stop only ever ratchets tighter, never loosens" rule
-        # (see module docstring). last_managed_sl is exactly the right
-        # restore target instead: it's the bot's own last legitimately
-        # -computed value (whatever it actually was -- the original
-        # pre-breakeven SL, cost, or a real trail step), so restoring to
-        # it can never loosen anything, by construction.
-        #
-        # peak_favor_points itself is NOT touched here -- it already only
-        # ever grows via max() and never needs correcting; capping it
-        # down was the mechanism that caused the regression above. The
-        # fall-through below (next cycle onward) uses the real,
-        # unmodified peak_favor_points as usual, so any further trailing
-        # beyond the restored point only comes from genuinely continuing
-        # favorable movement, through the normal step-by-step formula.
-        restore_sl = state.last_managed_sl if state.last_managed_sl is not None else entry_price
-        already_there = abs((position.sl or 0.0) - restore_sl) < 1e-6
-        if already_there:
-            sl_states.save()
-            print(f"{tag} {symbol}: new {'high' if direction == 'bull' else 'low'} reached -- "
-                  f"already at the last managed SL, resuming normal trailing from here")
-        elif not cfg.enable_trading:
-            sl_states.save()
-            print(f"{tag} {symbol}: new {'high' if direction == 'bull' else 'low'} reached -- "
-                  f"WOULD restore SL to {restore_sl:.2f} -- trading disabled")
-        else:
-            result = broker.modify_position_sl(symbol, tracked.ticket, restore_sl)
-            if result.ok:
-                state.last_managed_sl = restore_sl
-                sl_states.save()
-                print(f"{tag} {symbol}: new {'high' if direction == 'bull' else 'low'} reached -- "
-                      f"restored SL to {restore_sl:.2f}, resuming normal trailing from here")
-            else:
-                sl_states.save()
-                print(f"{tag} {symbol}: new {'high' if direction == 'bull' else 'low'} reached but "
-                      f"FAILED to restore SL to {restore_sl:.2f} -- retcode={result.retcode} {result.comment}")
-        return
+        print(f"{tag} {symbol}: new {'high' if direction == 'bull' else 'low'} earned a further trail step -- "
+              f"resuming trailing")
 
     state.peak_favor_points = max(state.peak_favor_points, favor)
     sl_states.save()
