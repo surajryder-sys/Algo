@@ -193,7 +193,14 @@ def _manage_one(cfg: Config, source: SourceConfig, sym_cfg: SymbolConfig, tracke
               f"(peak favor {state.peak_favor_points:.1f} points) -- trading disabled")
         return
 
-    result = broker.modify_position_sl(symbol, tracked.ticket, desired)
+    # Preserve whatever TP is currently on the real position -- broker.
+    # modify_position_sl sends MT5's TRADE_ACTION_SLTP request with BOTH
+    # sl and tp fields; tp defaults to 0.0 (= "no take profit") when not
+    # passed explicitly, so every SL trail was silently wiping out any
+    # TP the user had set manually. Real live bug, user's own report
+    # 2026-08-24. algo_v2_tv_xauusd/main.py already does this correctly
+    # (passes pos.tp) -- this call site was just missing it.
+    result = broker.modify_position_sl(symbol, tracked.ticket, desired, position.tp)
     if result.ok:
         state.last_managed_sl = desired
         sl_states.save()
