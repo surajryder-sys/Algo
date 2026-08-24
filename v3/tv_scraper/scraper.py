@@ -778,6 +778,37 @@ def _parsed_values_agree(a, b) -> bool:
             and a.close == b.close)
 
 
+# The single most-recently-successfully-processed pane's own data
+# signature (pane_label, symbol, bull/bear zone signatures, ATR
+# trail_stop, close) -- deliberately ONE global value (not keyed per
+# pane_label like _last_symbol_tf above), since the failure this guards
+# against is specifically "this pane's click never actually moved focus
+# off whatever pane was processed immediately before it in THIS same
+# poll cycle." Added 2026-08-24 after a real live incident: a USTEC M15
+# pane's own click apparently never took effect, so it kept reading M3's
+# real (correctly-settled, genuinely-agreeing-with-itself-twice) data for
+# a SUSTAINED period -- the settle-verification above only catches a
+# transient single-cycle glitch (one read disagreeing with the next), it
+# does nothing when the SAME wrong content is stuck being read
+# consistently, since two reads of stuck content trivially agree with
+# each other. That USTEC M15 "zone" (really M3's own) fired a real Trend
+# Manager BUY off a parent OB that was never real on M15 at all.
+#
+# Deliberately EXCLUDES timeframe from the signature -- confirmed live
+# in that exact incident, the pane's own HEADER correctly read "M15"
+# (which is WHY the symbol/timeframe-change guard above never caught
+# it) while the deep zone/ATR/close DATA underneath was still M3's
+# stuck content. Comparing timeframe too would have made this check a
+# no-op for the exact failure it exists to catch.
+_last_processed_pane: Optional[tuple] = None
+
+
+def _pane_data_signature(symbol: str, parsed) -> tuple:
+    atr_trail = (parsed.atr or {}).get("trail_stop")
+    return (symbol, _zone_signature(parsed.bull_zones),
+            _zone_signature(parsed.bear_zones), atr_trail, parsed.close)
+
+
 def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: FirstSeenStore,
                    retested: RetestTracker, trend_tracker: AtrTrendTracker, live: LiveSnapshotStore,
                    mitigation_track: MitigationTrackStore,
@@ -863,6 +894,28 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
         print(f"[tv_scraper][{pane_label}] {symbol} {timeframe}: zone/ATR values still settling "
               f"(two reads disagreed) -- skipping this poll")
         return
+
+    # Guards against a SUSTAINED stuck-focus read, not just a transient
+    # one -- see _last_processed_pane's own module-level docstring for
+    # the real live incident (a USTEC M15 pane's click never actually
+    # moved off M3, so it kept consistently reading M3's own data,
+    # passing the two-reads-agree check above trivially every single
+    # time since both reads showed the SAME wrong content). If this
+    # pane's full data signature is IDENTICAL to whatever a DIFFERENT
+    # pane_label just produced immediately before it in this same poll
+    # cycle, that's the signature of stuck focus, not a genuine
+    # coincidence (two distinct timeframes/panes matching exactly on
+    # zone tops/btms, ATR trail_stop, AND close all at once is not
+    # realistic) -- skip rather than write it.
+    global _last_processed_pane
+    this_signature = _pane_data_signature(symbol, parsed)
+    if _last_processed_pane is not None:
+        prev_label, prev_signature = _last_processed_pane
+        if prev_label != pane_label and prev_signature == this_signature:
+            print(f"[tv_scraper][{pane_label}] {symbol} {timeframe}: identical to {prev_label}'s just-read "
+                  f"data -- likely stuck on the wrong pane, skipping this poll")
+            return
+    _last_processed_pane = (pane_label, this_signature)
 
     # Same cross-symbol contamination risk as OB zones (see
     # _SYMBOL_PRICE_RANGE's own comment) applies to Close and the ATR
