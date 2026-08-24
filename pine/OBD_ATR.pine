@@ -1,5 +1,5 @@
 //@version=4
-study(title="OBD_ATR v1.0", overlay = true)
+study(title="OBD_ATR v1.1", overlay = true)
 //CREDITS to HPotter for the orginal ATR-trailing-stop code. The guy trying
 //to sell this as his own is a scammer lol.
 //
@@ -13,10 +13,11 @@ study(title="OBD_ATR v1.0", overlay = true)
 //buy/sell shape labels and bar coloring dropped entirely (were only ever
 //visual sugar tied to a single trail line, meaningless with two), each
 //line still plots its own trailing-stop for visual reference, and each
-//fires its own atr_trail webhook per bar close, tagged with which ATR
-//period it came from (see the "atr_period" payload field below) so the
-//Python side (v3/tradingview_bot/atr_store.py's AtrStore) can track both
-//readings independently instead of one overwriting the other.
+//fires its own atr_trail webhook (see the send-gate section below for
+//exactly when, as of v1.1), tagged with which ATR period it came from
+//(see the "atr_period" payload field below) so the Python side
+//(v3/tradingview_bot/atr_store.py's AtrStore) can track both readings
+//independently instead of one overwriting the other.
 //
 //Every statement below is deliberately kept to ONE line (no wrapped/
 //hanging-indent expressions) even where that makes lines long -- Pine's
@@ -29,6 +30,19 @@ study(title="OBD_ATR v1.0", overlay = true)
 src = close
 
 webhook_secret = input("", title="Webhook Secret")
+// Heartbeat interval (2026-08-24, v1.1) -- was firing every single bar
+// close unconditionally, which meant one webhook per 3-min bar forever
+// even when trend never changed (that volume is what prompted this).
+// Now fires ONLY on an actual trend flip OR every N bars (this input),
+// whichever comes first -- user's own choice, "for every 10 candles plus
+// a flip." The periodic heartbeat is still needed even though it's not a
+// real signal: it's the only way to tell "trend hasn't flipped" apart
+// from "the whole pipeline silently died," which happened for real this
+// week (tv_bridge.receiver was down for hours with nothing to show it
+// except total silence). event_time_N below still only updates on a
+// genuine flip either way, so a heartbeat resend never looks like a new
+// flip on the Python side.
+heartbeat_bars = input(10, title="Heartbeat every N bars", minval=1)
 
 // --- Line 1 (fast, by default) ---
 keyvalue_1 = input(2, title = "Line 1 Key Value", step = .5, group = "Line 1")
@@ -69,33 +83,46 @@ plot(trail_1, color = color_1, title = "Line 1 Trailing Stop")
 plot(trail_2, color = color_2, title = "Line 2 Trailing Stop", style = plot.style_circles)
 
 //-----------------------------------------------------------------------------}
-//Webhook: fires once per closed bar, per line, with that line's own
-//trail/trend state -- mirrors atr_bridge.ATRSnapshot's own shape
-//(trail_stop/trend/event_time), plus a new "atr_period" field (this
-//line's own ATR Period input, stringified) identifying WHICH period this
-//particular reading came from -- AtrStore keys on
-//symbol|timeframe|atr_period now, not just symbol|timeframe, specifically
-//so two periods for the same symbol+timeframe don't overwrite each
-//other. event_time_N only updates on an actual trend flip (matching the
-//original script's own buy-or-sell gate, computed here directly from
-//trend != trend[1] instead of separate buy/sell variables since those
-//got dropped along with the shape labels).
+//Webhook: fires per line, with that line's own trail/trend state --
+//mirrors atr_bridge.ATRSnapshot's own shape (trail_stop/trend/event_time),
+//plus a new "atr_period" field (this line's own ATR Period input,
+//stringified) identifying WHICH period this particular reading came from
+//-- AtrStore keys on symbol|timeframe|atr_period now, not just
+//symbol|timeframe, specifically so two periods for the same
+//symbol+timeframe don't overwrite each other. event_time_N only updates
+//on an actual trend flip (matching the original script's own buy-or-sell
+//gate, computed here directly from trend != trend[1] instead of separate
+//buy/sell variables since those got dropped along with the shape labels).
+//
+//v1.1 (2026-08-24): only actually SENDS on a flip or every heartbeat_bars
+//bars, not every bar close -- see heartbeat_bars input above for why the
+//heartbeat half still matters. flipped_N drives the send gate;
+//event_time_N stays flip-only regardless of the gate, so a heartbeat
+//resend of an unchanged trend carries the SAME event_time as the flip
+//that started it, not a fresh one -- the Python side can always tell
+//"still the same trend since X" from "just flipped."
 //-----------------------------------------------------------------------------{
 var float event_time_1_ms = na
-if trend_1 != nz(trend_1[1], 0)
+flipped_1 = trend_1 != nz(trend_1[1], 0)
+if flipped_1
     event_time_1_ms := time
 event_time_1_sec = na(event_time_1_ms) ? 0 : round(event_time_1_ms / 1000)
+send_1 = flipped_1 or bar_index % heartbeat_bars == 0
 
 atr_payload_1 = '{"secret":"' + webhook_secret + '","type":"atr_trail","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","atr_period":"' + tostring(atrperiod_1, '#') + '","trail_stop":' + tostring(trail_1) + ',"trend":' + tostring(trend_1, '#') + ',"event_time":' + tostring(event_time_1_sec, '#') + ',"bar_time":' + tostring(bar_time_sec, '#') + '}'
-alert(atr_payload_1, alert.freq_once_per_bar_close)
+if send_1
+    alert(atr_payload_1, alert.freq_once_per_bar_close)
 
 var float event_time_2_ms = na
-if trend_2 != nz(trend_2[1], 0)
+flipped_2 = trend_2 != nz(trend_2[1], 0)
+if flipped_2
     event_time_2_ms := time
 event_time_2_sec = na(event_time_2_ms) ? 0 : round(event_time_2_ms / 1000)
+send_2 = flipped_2 or bar_index % heartbeat_bars == 0
 
 atr_payload_2 = '{"secret":"' + webhook_secret + '","type":"atr_trail","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","atr_period":"' + tostring(atrperiod_2, '#') + '","trail_stop":' + tostring(trail_2) + ',"trend":' + tostring(trend_2, '#') + ',"event_time":' + tostring(event_time_2_sec, '#') + ',"bar_time":' + tostring(bar_time_sec, '#') + '}'
-alert(atr_payload_2, alert.freq_once_per_bar_close)
+if send_2
+    alert(atr_payload_2, alert.freq_once_per_bar_close)
 
 //-----------------------------------------------------------------------------}
 //NOT plotting trend_1/trend_2 (deliberately, 2026-08-20) -- the original
