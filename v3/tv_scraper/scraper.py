@@ -483,12 +483,27 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
          bar_day_minute()'s own comment) can never be corrected this way
          at all; that's a known, accepted gap for very old zones, not
          something this mechanism claims to solve.
-      6. Orphan reconciliation (added 2026-08-22): a ZoneStore entry with
-         no matching previously_seen record at all -- see the loop right
-         at the top of this function's own body for the confirmed live
-         case and full rationale. Seeded into previously_seen so it's no
-         longer permanently invisible to the missing-streak mitigation
-         check below."""
+      6. Orphan reconciliation (added 2026-08-22, tightened same day): a
+         ZoneStore entry with no matching previously_seen record at all
+         -- see the loop right at the top of this function's own body
+         for the confirmed live case and full rationale. Deleted
+         IMMEDIATELY (no 2-poll debounce) if it's also absent from this
+         poll's `current` read -- unlike a normal missing zone, an
+         orphan was never being actively tracked, so there's no
+         transient-miss risk the debounce exists to protect against; if
+         it's not in previously_seen AND not in current, it's already
+         definitively not visible. Confirmed live this mattered:
+         seed-and-wait let a 101-day-old BTCUSD H2 orphan sit valid long
+         enough (~180s) for Alert Manager's own stability check to also
+         clear, firing one last spurious alert on it moments before this
+         function's own debounce would have deleted it anyway -- deleting
+         on sight closes that window entirely. Only seeded (not deleted)
+         if the SAME price_key genuinely IS in current this poll -- a
+         legitimate first-time sighting (e.g. right after a
+         previously_seen/mitigation_track reset with zone_store left
+         intact), not a stale ghost; deleting that would destroy a zone
+         that's live and about to be reprocessed normally a few lines
+         below."""
     price_field = "btm" if direction == "bull" else "top"
     now = int(time.time())
 
@@ -507,21 +522,38 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
     # MitigationTrackStore's) got out of sync isn't fully provable after
     # the fact (most likely some zone_store write -- a resurrection, a
     # rekey, a merge -- that wasn't mirrored into the tracker), but this
-    # closes the gap regardless of how it happened: seed the orphan into
-    # previously_seen as if it were "last seen" one poll ago, and the
-    # SAME existing 2-poll debounce below naturally catches and deletes
-    # it over the next two polls if it's genuinely no longer visible --
-    # no separate mechanism, no risk of double-deleting a zone that IS
-    # still legitimately live (this only ever adds a missing tracking
-    # entry, never removes one).
+    # closes the gap regardless of how it happened. See this function's
+    # own docstring point 6 for why a confirmed orphan is deleted on
+    # sight rather than given the normal 2-poll grace period.
+    current_price_keys = {_price_key(z) for z in current if _price_plausible(symbol, z["top"], z["btm"])}
     for stored_zone in zones.zones(symbol, timeframe, direction):
         orphan_key = _price_key({"top": stored_zone.top})
-        if orphan_key not in previously_seen:
+        if orphan_key in previously_seen:
+            continue  # already tracked normally -- nothing to reconcile
+
+        if orphan_key in current_price_keys:
+            # Genuinely visible THIS poll, just never tracked before --
+            # not stale, only untracked. Seed as "seen last poll" so the
+            # current-poll loop below processes it completely normally;
+            # no premature deletion of something that's actually live.
             previously_seen[orphan_key] = stored_zone.start_time
-            print(f"[tv_scraper] {symbol} {timeframe} {direction}: reconciled orphaned zone "
-                  f"start_time={stored_zone.start_time} top={stored_zone.top} btm={stored_zone.btm} "
-                  f"virgin={stored_zone.virgin} -- existed in ZoneStore with no mitigation-tracking "
-                  f"entry, now eligible for normal missing-streak mitigation")
+            continue
+
+        # Confirmed orphan: absent from previously_seen AND absent from
+        # this poll's actual read -- definitively not visible, no grace
+        # period needed. Delete now, same call the normal debounce path
+        # below uses on confirmed mitigation.
+        zones.apply_mitigated(symbol, timeframe, direction, {
+            "start_time": stored_zone.start_time,
+            "mitigated_time": now,
+            "mitigated_price": None,
+        })
+        first_seen.forget(symbol, timeframe, direction, orphan_key)
+        retested.forget(symbol, timeframe, direction, orphan_key)
+        print(f"[tv_scraper] {symbol} {timeframe} {direction}: deleted orphaned zone "
+              f"start_time={stored_zone.start_time} top={stored_zone.top} btm={stored_zone.btm} "
+              f"virgin={stored_zone.virgin} -- existed in ZoneStore with no mitigation-tracking "
+              f"entry and wasn't visible this poll either, no 2-poll grace period given")
 
     seen_now: dict[int, int] = {}
     new_missing_streak: dict[int, int] = {}
