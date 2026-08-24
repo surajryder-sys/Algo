@@ -89,6 +89,7 @@ execution_bridge_orders.json
 execution_bridge_orders_reversal.json
 execution_bridge_sl_state_reversal.json
 execution_bridge_manual_events.json
+profit_alerts_state.json
 execution_bridge_manual_events_reversal.json
 execution_bridge_sl_state.json
 reversal_manager_state.json
