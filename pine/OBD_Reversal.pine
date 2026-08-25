@@ -1,5 +1,19 @@
-// OBD_Reversal v1.05 -- order block detection + retest/mitigation webhooks
+// OBD_Reversal v1.06 -- order block detection + retest/mitigation webhooks
 // feeding v3's Reversal Manager (see v3/signal_engine/reversal_manager.py).
+//
+// v1.06 (2026-08-25): reverts v1.04's freq_all change back to
+// freq_once_per_bar_close -- confirmed live, real problem: TradingView
+// paused the M1 alert outright ("Alert paused due to frequent
+// triggers"), its OWN platform-level rate-limiter, completely separate
+// from this script's own ob_retested[i] dedup guard. That guard only
+// ever prevents the SAME zone from re-alerting -- it does nothing to
+// stop MANY DIFFERENT zones retesting in quick succession on a fast
+// timeframe like M1, and freq_all let enough of those through in a
+// short window to trip TradingView's own throttle. A paused alert
+// delivers NOTHING at all until manually re-enabled -- strictly worse
+// than the delay-to-bar-close problem v1.04 was trying to fix (which at
+// least still delivers, just late). Delayed-but-reliable beats
+// fast-but-occasionally-silenced; reverted.
 //
 // v1.05 (2026-08-25): dropped ob_zone_retested's retest_high/retest_low
 // fields again (added in v1.03, one build later) -- user's own
@@ -39,7 +53,7 @@
 // pane, confirmed as visual clutter once both were added together.
 
 //@version=5
-indicator("OBD_Reversal v1.05"
+indicator("OBD_Reversal v1.06"
   , overlay = true)
 //------------------------------------------------------------------------------
 //Settings
@@ -105,22 +119,19 @@ get_coordinates(condition, top, btm, ob_val)=>
 //close lands (unlike mitigation below, which reads close/high/low as a
 //genuinely moving target).
 //
-//alert.freq_all as of 2026-08-25 -- was freq_once_per_bar_close, on the
-//(wrong) reasoning that delaying delivery "loses no accuracy" since the
-//payload's own retested_time is bar-scoped and doesn't change. That's
-//true for the VALUE, but freq_once_per_bar_close doesn't just mean "only
-//call this once" -- it means TradingView won't actually TRANSMIT the
-//webhook until the bar itself closes, no matter when within the bar
-//alert() was called. Harmless on M1/M3 (1-3 minute delay), but a real
-//problem on H1/H4/M30: a retest detected early in one of those candles
-//could sit undelivered for HOURS, starving Reversal Manager's own
-//M1-confirmation wait of the retest event it needs to even start
-//counting from. User's own catch: "retest alert should send
-//immediately." Safe to switch to freq_all -- the ob_retested[i] guard
-//above already ensures this alert() call only ever fires once per zone
-//(array.get(ob_retested, i) is true on every later tick), so freq_all
-//can't cause a duplicate/repeated alert; it just removes the artificial
-//wait for bar close on top of that single call.
+//Stays freq_once_per_bar_close -- briefly tried freq_all (2026-08-25) to
+//fix a real latency issue (an H1/H4/M30 retest detected early in its own
+//candle could sit undelivered for hours under freq_once_per_bar_close,
+//since that setting delays actual webhook TRANSMISSION to bar close
+//regardless of when alert() was called, not just how often). freq_all
+//WAS safe from this script's own side -- the ob_retested[i] guard above
+//already ensures this call only ever fires once per zone -- but not from
+//TradingView's own separate, platform-level rate limiter: confirmed
+//live, it paused the M1 alert entirely ("Alert paused due to frequent
+//triggers") once enough DIFFERENT zones retested in quick succession on
+//that fast a timeframe. A paused alert delivers nothing at all until
+//manually re-enabled -- worse than the delay this was meant to fix.
+//Reverted (v1.06); the bar-close delay is the accepted tradeoff for now.
 mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_retested_bar, dir_label)=>
     retested_this_call = false
     // Guard against an empty array: Pine's `for i = 0 to array.size()-1`
@@ -154,7 +165,7 @@ mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_ret
                       '","direction":"' + dir_label +
                       '","start_time":' + str.tostring(math.round(zone_start / 1000), '#') +
                       ',"retested_time":' + str.tostring(math.round(time / 1000), '#') + '}'
-                    alert(retest_payload, alert.freq_all)
+                    alert(retest_payload, alert.freq_once_per_bar_close)
 
     retested_this_call
 
