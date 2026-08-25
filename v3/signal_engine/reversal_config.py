@@ -36,6 +36,68 @@ HTF_TIMEFRAMES: Tuple[str, ...] = ("240", "120", "60", "30", "15")
 
 
 @dataclass(frozen=True)
+class HtfM1InvalidationRule:
+    """single_ob_timeframes: any ONE opposite-direction OB formed on any
+    of these timeframes invalidates the setup. double_ob_timeframe: TWO
+    DISTINCT opposite OBs on this ONE timeframe also invalidates it (None
+    -- the default -- means no such rule for this phase). The double-OB
+    case mirrors the same noise-filtering pattern already built for Trend
+    Manager's own XAUUSD M1-exit rule (a single opposite OB on the
+    confirmation timeframe itself proved too noisy to trust; two in a row
+    is the bar instead) -- applied here to whichever timeframe is THIS
+    symbol's own htf_m1 confirmation timeframe, when the user wants that
+    same treatment (XAUUSD's own HTF-M1 rule excludes its confirmation
+    timeframe, M1, from invalidation entirely instead -- different
+    symbols can make different calls here)."""
+    single_ob_timeframes: Tuple[str, ...]
+    double_ob_timeframe: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class HtfM1Config:
+    """Per-symbol parameters for the HTF-retest -> LTF-confirm reversal
+    rule (see reversal_manager.py's own module docstring, "HTF-M1
+    mechanism" section, for the full flow). A symbol with htf_m1=None on
+    its own SymbolConfig doesn't have this rule enabled at all -- XAUUSD
+    was first (2026-08-25), BTCUSD/ETHUSD added the same day once XAUUSD
+    was working; USOIL/USTEC deliberately deferred (their own existing
+    M3 OB-or-ATR-flip mechanism already covers similar ground)."""
+    confirm_timeframe: str  # "1" for XAUUSD, "3" for BTCUSD/ETHUSD
+    # Which timeframes register a "waiting" retest for this mechanism --
+    # NOT necessarily the same as module-level HTF_TIMEFRAMES above (the
+    # ORIGINAL mechanism's own list): XAUUSD folds M5 in as an ordinary
+    # HTF source here (unlike the original mechanism, which gives M5 its
+    # own dedicated immediate-fire treatment instead) since M5 has no
+    # special relationship to M1, this symbol's own confirmation
+    # timeframe. BTCUSD/ETHUSD reuse HTF_TIMEFRAMES as-is (no M5-specific
+    # carve-out needed -- M3 is their confirmation timeframe, not M5).
+    htf_timeframes: Tuple[str, ...]
+    waiting_invalidation: HtfM1InvalidationRule
+    active_invalidation: HtfM1InvalidationRule
+    sl_buffer: float
+    # Which moment active_invalidation's own opposite-OB lookups anchor
+    # to, once a trade is open (filled or pending) -- "retest" (the
+    # original HTF retest event that armed this setup) or "opened_at"
+    # (the trade's own real fill time). XAUUSD's own rule is explicitly
+    # retest-anchored ("this setup becomes invalid... for as long as the
+    # setup is valid," covering the whole wait-to-pending-to-fill span,
+    # not just from the fill onward). BTCUSD/ETHUSD's rule is explicitly
+    # fill-anchored instead -- user's own words, 2026-08-25: "time is
+    # important, dont refer back to older zones, zones should only form
+    # after entering into the trade." Different symbols, deliberately
+    # different anchors, both given explicitly -- not unified on purpose.
+    active_invalidation_anchor: str = "retest"
+    # Same OBD_ATR.pine dual-period pair for every symbol so far (user's
+    # own call, 2026-08-25: "Same as XAUUSD (2 and 300)" when asked about
+    # BTCUSD/ETHUSD) -- kept per-symbol (not a shared module constant)
+    # so a future symbol can get its own tuned periods without touching
+    # this dataclass again.
+    atr_fast_period: str = "2"
+    atr_slow_period: str = "300"
+    pullback_fraction: float = 0.45
+
+
+@dataclass(frozen=True)
 class SymbolConfig:
     symbol: str
     zone_state_file: str
@@ -85,14 +147,13 @@ class SymbolConfig:
     # finds anything and no-ops every cycle.
     atr_confirm_timeframe: Optional[str] = None
     atr_state_file: Optional[str] = None
-    # Enables the second, independent HTF-retest -> M1-only-confirm
-    # mechanism (see reversal_manager.py's own docstring for the full
-    # rule) -- XAUUSD only for now, added 2026-08-25. User's own words:
-    # "this is only for xauusd... once we are done with this we will move
-    # to other instruments as well" -- each symbol will get its OWN
-    # buffer/threshold values when it's that symbol's turn, so this stays
-    # a per-symbol opt-in rather than a blanket toggle.
-    htf_m1_enabled: bool = False
+    # The second, independent HTF-retest -> LTF-confirm reversal mechanism
+    # (see reversal_manager.py's own docstring for the full rule) -- None
+    # means this symbol doesn't have it enabled at all. Added 2026-08-25,
+    # XAUUSD first ("this is only for xauusd... once we are done with
+    # this we will move to other instruments as well"), BTCUSD/ETHUSD the
+    # same day.
+    htf_m1: Optional[HtfM1Config] = None
 
 
 @dataclass(frozen=True)
@@ -126,19 +187,52 @@ def load_config() -> Config:
                 ltf_timeframes=("1", "3", "5"),
                 parent_timeframes=("5", "15"),
                 max_sl_points=20.0,
-                htf_m1_enabled=True,
                 # Needed for the HTF-M1 mechanism's own dual-ATR-flip
                 # confirmation check (Line 1/period=2 AND Line 2/
                 # period=300 on M1) -- same shared webhook ATR file every
                 # other symbol's own atr_confirm_timeframe usage already
                 # points at, not a separate file.
                 atr_state_file=tv_atr_file,
+                htf_m1=HtfM1Config(
+                    confirm_timeframe="1",
+                    htf_timeframes=("240", "120", "60", "30", "15", "5"),
+                    # While waiting: opposite OB on M3, M5, or M15
+                    # invalidates (M1 excluded -- it's the confirmation
+                    # timeframe itself, an opposite OB there is normal
+                    # noise). Once a trade is open: narrower, M5/M15 only
+                    # -- "a trade can only auto square off if a m5 or m15
+                    # opposite side ob forms... else it waits for sl, or
+                    # sl trail" (user's own words, 2026-08-25).
+                    waiting_invalidation=HtfM1InvalidationRule(single_ob_timeframes=("3", "5", "15")),
+                    active_invalidation=HtfM1InvalidationRule(single_ob_timeframes=("5", "15")),
+                    sl_buffer=2.0,  # dedicated, NOT SYMBOL_SL_BUFFER's shared 1.0 -- user's explicit call
+                ),
             ),
             SymbolConfig(
                 "BTCUSD",
                 tv_zone_file,
                 os.getenv("SIGNAL_ENGINE_BTCUSD_LIVE_FILE", "tv_scraper_live.json"),
                 ltf_timeframes=("3",),
+                atr_state_file=tv_atr_file,
+                htf_m1=HtfM1Config(
+                    confirm_timeframe="3",
+                    htf_timeframes=HTF_TIMEFRAMES,  # H4/H2/H1/M30/M15 -- no M5-specific carve-out needed here
+                    # Same rule both while waiting AND once a trade is
+                    # open (unlike XAUUSD, no narrowing on fill) -- one
+                    # opposite OB on M15 or M30, OR two opposite OBs on
+                    # M3 (the confirmation timeframe itself, given the
+                    # same "needs two, not one" noise treatment XAUUSD's
+                    # OWN Trend Manager M1-exit rule got). User's own
+                    # words, 2026-08-25: "invalidation set m15 or m30,
+                    # opposite ob... two opposite ob's on m3 also
+                    # invalidates."
+                    waiting_invalidation=HtfM1InvalidationRule(
+                        single_ob_timeframes=("15", "30"), double_ob_timeframe="3"),
+                    active_invalidation=HtfM1InvalidationRule(
+                        single_ob_timeframes=("15", "30"), double_ob_timeframe="3"),
+                    sl_buffer=20.0,  # reuses BTCUSD's existing Reversal Manager buffer, user's explicit call
+                    active_invalidation_anchor="opened_at",
+                ),
             ),
             SymbolConfig(
                 "ETHUSD",
@@ -149,6 +243,17 @@ def load_config() -> Config:
                 # m3 everywhere"), matching BTCUSD's own ltf_timeframes
                 # above (already "3", was ahead of this one).
                 ltf_timeframes=("3",),
+                atr_state_file=tv_atr_file,
+                htf_m1=HtfM1Config(
+                    confirm_timeframe="3",
+                    htf_timeframes=HTF_TIMEFRAMES,
+                    waiting_invalidation=HtfM1InvalidationRule(
+                        single_ob_timeframes=("15", "30"), double_ob_timeframe="3"),
+                    active_invalidation=HtfM1InvalidationRule(
+                        single_ob_timeframes=("15", "30"), double_ob_timeframe="3"),
+                    sl_buffer=2.0,  # reuses ETHUSD's existing Reversal Manager buffer, user's explicit call
+                    active_invalidation_anchor="opened_at",
+                ),
             ),
             # USOIL/USTEC (added 2026-08-19) -- see trend_manager's own
             # config.py for the shared-tv_scraper-process rationale.

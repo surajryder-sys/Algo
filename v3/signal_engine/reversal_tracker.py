@@ -138,6 +138,18 @@ class ActiveReversalTrade:
     # re-anchored to the trade's own fill time the way the existing
     # opposite-LTF-OB close rule is.
     htf_m1_retest_time: Optional[float] = None
+    # How many DISTINCT opposite-direction OBs have formed (since
+    # whichever moment sym_cfg.htf_m1.active_invalidation_anchor picks --
+    # see that field's own docstring) on the confirmation timeframe
+    # itself -- BTCUSD/ETHUSD's own "two opposite OBs on M3 also
+    # invalidates" rule, added 2026-08-25, same persistent/cross-cycle
+    # counting reasoning as trade_tracker.ActiveTrade.m1_opposite_ob_count
+    # (a counted OB can later get mitigated and vanish from the store, so
+    # this can't be re-derived from "what's currently live" each cycle).
+    # Always 0/None for XAUUSD, whose own rule excludes its confirmation
+    # timeframe (M1) from invalidation entirely instead.
+    htf_m1_double_ob_count: int = 0
+    htf_m1_double_ob_last_start_time: Optional[int] = None
 
 
 class ReversalTracker:
@@ -177,6 +189,18 @@ class ReversalTracker:
         self._htf_m1_watermarks: dict[str, int] = {}
         self._htf_m1_seeded_buckets: set = set()
         self._htf_m1_waiting: dict[str, dict[str, List[WaitingRetest]]] = {}
+        # Waiting-phase "two opposite OBs on the confirmation timeframe"
+        # counters (BTCUSD/ETHUSD's own rule, 2026-08-25) -- symbol ->
+        # direction -> (count, last-counted start_time). Separate from
+        # ActiveReversalTrade.htf_m1_double_ob_count, which covers the
+        # SAME rule once a trade is actually open -- this half covers the
+        # wait itself, before any trade exists to hold the count on.
+        # Reset whenever clear_htf_m1_waiting fires (the wait ending,
+        # confirmed or invalidated) -- NOT on set_htf_m1_waiting (mere
+        # pruning of a mitigated zone leaves the wait, and this count,
+        # alive).
+        self._htf_m1_waiting_double_ob_count: dict[str, dict[str, int]] = {}
+        self._htf_m1_waiting_double_ob_last_start_time: dict[str, dict[str, int]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -219,6 +243,14 @@ class ReversalTracker:
             }
             for symbol, per_symbol in raw.get("htf_m1_waiting", {}).items()
         }
+        self._htf_m1_waiting_double_ob_count = {
+            symbol: dict(per_symbol)
+            for symbol, per_symbol in raw.get("htf_m1_waiting_double_ob_count", {}).items()
+        }
+        self._htf_m1_waiting_double_ob_last_start_time = {
+            symbol: dict(per_symbol)
+            for symbol, per_symbol in raw.get("htf_m1_waiting_double_ob_last_start_time", {}).items()
+        }
 
     def _save(self) -> None:
         out = {
@@ -236,6 +268,8 @@ class ReversalTracker:
                 symbol: {direction: [asdict(w) for w in entries] for direction, entries in per_symbol.items()}
                 for symbol, per_symbol in self._htf_m1_waiting.items()
             },
+            "htf_m1_waiting_double_ob_count": self._htf_m1_waiting_double_ob_count,
+            "htf_m1_waiting_double_ob_last_start_time": self._htf_m1_waiting_double_ob_last_start_time,
         }
         self._path.write_text(json.dumps(out))
 
@@ -372,10 +406,35 @@ class ReversalTracker:
     def clear_htf_m1_waiting(self, symbol: str, direction: str) -> None:
         if symbol in self._htf_m1_waiting and direction in self._htf_m1_waiting[symbol]:
             self._htf_m1_waiting[symbol][direction] = []
-            self._save()
+        # The wait is ending (confirmed or invalidated) -- its own
+        # double-OB count resets too, so a future fresh wait on this same
+        # (symbol, direction) starts counting from zero again, not from
+        # wherever a previous, unrelated wait left off.
+        if symbol in self._htf_m1_waiting_double_ob_count:
+            self._htf_m1_waiting_double_ob_count[symbol].pop(direction, None)
+        if symbol in self._htf_m1_waiting_double_ob_last_start_time:
+            self._htf_m1_waiting_double_ob_last_start_time[symbol].pop(direction, None)
+        self._save()
 
     def set_htf_m1_waiting(self, symbol: str, direction: str, entries: "List[WaitingRetest]") -> None:
         self._htf_m1_waiting.setdefault(symbol, {})[direction] = list(entries)
+        self._save()
+
+    def get_htf_m1_waiting_double_ob_count(self, symbol: str, direction: str) -> int:
+        return self._htf_m1_waiting_double_ob_count.get(symbol, {}).get(direction, 0)
+
+    def get_htf_m1_waiting_double_ob_last_start_time(self, symbol: str, direction: str) -> Optional[int]:
+        return self._htf_m1_waiting_double_ob_last_start_time.get(symbol, {}).get(direction)
+
+    def record_htf_m1_waiting_double_ob(self, symbol: str, direction: str,
+                                         new_sightings: int, newest_start_time: int) -> None:
+        """Advances the WAITING-phase double-OB count (see
+        _htf_m1_waiting_double_ob_count's own docstring) -- the pre-trade
+        half of BTCUSD/ETHUSD's "two opposite OBs on the confirmation
+        timeframe also invalidates" rule."""
+        current = self._htf_m1_waiting_double_ob_count.setdefault(symbol, {}).get(direction, 0)
+        self._htf_m1_waiting_double_ob_count[symbol][direction] = current + new_sightings
+        self._htf_m1_waiting_double_ob_last_start_time.setdefault(symbol, {})[direction] = newest_start_time
         self._save()
 
     # -- active trade -------------------------------------------------------
@@ -397,6 +456,20 @@ class ReversalTracker:
             # formation time (entry_start_time).
             trade.opened_at = time.time()
             self._save()
+
+    def record_htf_m1_active_double_ob(self, symbol: str, new_sightings: int, newest_start_time: int) -> None:
+        """Advances the active trade's own htf_m1_double_ob_count/
+        last_start_time -- see ActiveReversalTrade.htf_m1_double_ob_count's
+        own docstring. No-op if there's no active trade for this symbol
+        (can race with the trade closing for an unrelated reason on the
+        very same cycle) -- same defensive shape as trade_tracker.
+        TradeTracker.record_m1_opposite_obs."""
+        trade = self._active.get(symbol)
+        if trade is None:
+            return
+        trade.htf_m1_double_ob_count += new_sightings
+        trade.htf_m1_double_ob_last_start_time = newest_start_time
+        self._save()
 
     def close_trade(self, symbol: str) -> None:
         self._active.pop(symbol, None)
