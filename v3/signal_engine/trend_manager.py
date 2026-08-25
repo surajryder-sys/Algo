@@ -339,8 +339,14 @@ def _close_if_m1_noise_exit(store: ZoneStore, tracker: TradeTracker, symbol: str
     check for an M1-triggered trade specifically (M5/M3-triggered
     trades are untouched, still use close_if_invalidated as before).
     Closes instead on whichever comes first:
-    - a fresh opposite-direction OB forming on M1, OR
     - a fresh opposite-direction OB forming on M3, OR
+    - a SECOND distinct opposite-direction OB forming on M1 (raised from
+      one to two, 2026-08-25 -- user's own correction: "m1 gets two
+      bullish ob's in sequence after entering into the sell trade" -- a
+      single M1 opposite OB proved too noise-prone by itself; M3's own
+      single-OB trigger is untouched, see ActiveTrade.m1_opposite_ob_
+      count's own docstring for why this needs persistent cross-cycle
+      state rather than a bare "does one exist right now" check), OR
     - the M3 OB that was "in play" (newest eligible, post-parent, same
       direction) at the moment this M1 trade fired getting mitigated
       (trade.m3_watch_start_time, set once at fire time -- see
@@ -350,12 +356,37 @@ def _close_if_m1_noise_exit(store: ZoneStore, tracker: TradeTracker, symbol: str
     forms an opposite side ob, definitely it will close the trade, as
     opposite bias becomes active" is already exactly what that does."""
     opposite = "bear" if trade.direction == "bull" else "bull"
-    if _newest_post_time_zone(store, symbol, "1", opposite, trade.exec_start_time) is not None:
-        tracker.close_trade(symbol, block=True)
-        return True
     if _newest_post_time_zone(store, symbol, "3", opposite, trade.exec_start_time) is not None:
         tracker.close_trade(symbol, block=True)
         return True
+
+    # Count every DISTINCT opposite-direction M1 OB seen since entry, not
+    # just "does one currently exist" -- a counted OB can later get
+    # mitigated and vanish from the store, so this can't be re-derived
+    # from the live store each cycle; it's tracked on the trade itself
+    # (see record_m1_opposite_obs). zones() is newest-first, so this
+    # collects every OB strictly newer than the last one already
+    # counted, in case more than one formed within a single poll gap.
+    since = trade.m1_opposite_ob_last_start_time
+    if since is None or since < trade.exec_start_time:
+        since = trade.exec_start_time
+    new_sightings = [
+        z for z in store.zones(symbol, "1", opposite)
+        if _formation_trusted(z) and z.start_time > since
+    ]
+    if new_sightings:
+        # Capture the count BEFORE record_m1_opposite_obs -- `trade` is
+        # the SAME object tracker._active holds (active_trade() returns
+        # a direct reference, not a copy), so mutating it via that call
+        # updates trade.m1_opposite_ob_count in place too; comparing
+        # AFTER calling it would double-count new_sightings.
+        already_counted = trade.m1_opposite_ob_count
+        newest_start_time = max(z.start_time for z in new_sightings)
+        tracker.record_m1_opposite_obs(symbol, len(new_sightings), newest_start_time)
+        if already_counted + len(new_sightings) >= 2:
+            tracker.close_trade(symbol, block=True)
+            return True
+
     if trade.m3_watch_start_time is not None:
         zone = store.get(symbol, "3", trade.direction, trade.m3_watch_start_time)
         if zone is None:

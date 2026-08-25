@@ -96,6 +96,20 @@ class ActiveTrade:
     # an opposite OB forming on M1 or M3, OR this specific M3 zone
     # getting mitigated (see trend_manager._close_if_m1_noise_exit).
     m3_watch_start_time: Optional[int] = None
+    # How many DISTINCT opposite-direction M1 OBs have formed since this
+    # trade's own exec_start_time -- added 2026-08-25, user's explicit
+    # correction: a single opposite M1 OB was too noise-prone to close
+    # on by itself ("m1 gets two bullish ob's in sequence after entering
+    # into the sell trade" -- raises M1's own bar from one to two,
+    # M3's own single-opposite-OB trigger is untouched). Persisted
+    # across cycles (not re-derived from the live zone store each time)
+    # because a counted OB can later get mitigated and vanish from the
+    # store entirely -- re-deriving from "what's currently live" would
+    # silently undercount. m1_opposite_ob_last_start_time is the
+    # watermark that prevents re-counting the SAME OB sighting twice
+    # across consecutive polls.
+    m1_opposite_ob_count: int = 0
+    m1_opposite_ob_last_start_time: Optional[int] = None
     # Consecutive cycles in a row the reference OB has been missing from
     # the zone store -- see close_if_invalidated's own docstring for the
     # real live bug this fixes (2026-08-21): tv_scraper's zone store can
@@ -319,6 +333,19 @@ class TradeTracker:
             self._advance_watermark(symbol, trade.parent_timeframe, trade.direction, trade.parent_start_time)
             if trade.exec_timeframe is not None:
                 self._advance_watermark(symbol, trade.exec_timeframe, trade.direction, trade.exec_start_time)
+        self._save()
+
+    def record_m1_opposite_obs(self, symbol: str, new_sightings: int, newest_start_time: int) -> None:
+        """Advances the active trade's own m1_opposite_ob_count/
+        last_start_time -- see ActiveTrade.m1_opposite_ob_count's own
+        docstring. No-op if there's no active trade for this symbol
+        (can race with the trade closing for an unrelated reason on the
+        very same cycle)."""
+        trade = self._active.get(symbol)
+        if trade is None:
+            return
+        trade.m1_opposite_ob_count += new_sightings
+        trade.m1_opposite_ob_last_start_time = newest_start_time
         self._save()
 
     def close_if_invalidated(self, symbol: str, store: ZoneStore) -> bool:
