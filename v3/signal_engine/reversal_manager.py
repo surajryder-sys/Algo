@@ -749,12 +749,20 @@ def _price_crossed(direction: str, entry_price: float, current_price: float) -> 
 
 def _check_close_event(tracker: ReversalTracker, symbol: str, manual_events_file: str) -> bool:
     """Reads Execution Bridge's own event file (manual_events.py,
-    read-only from here) -- if it carries a real-world close timestamp
-    (manual cancel/close, or a genuine SL/TP hit) for this symbol that
-    Reversal Manager hasn't already reacted to, closes the current
-    trade. Returns True if a close happened this call."""
-    event_time = manual_events.read_event_time(manual_events_file, symbol)
-    if event_time is None or not tracker.should_react_to_close_event(symbol, event_time):
+    read-only from here) -- if it carries a real-world close (manual
+    cancel/close, or a genuine SL/TP hit) for this symbol that Reversal
+    Manager hasn't already reacted to AND that's still about whatever
+    trade is currently active, closes the current trade. Returns True
+    if a close happened this call. See
+    ReversalTracker.should_react_to_close_event's own docstring for why
+    the identity check (not just "is anything active for this symbol")
+    matters -- real live Trend Manager bug, confirmed 2026-08-25, fixed
+    the same way here for consistency."""
+    event = manual_events.read_event(manual_events_file, symbol)
+    if event is None:
+        return False
+    event_time, entry_timeframe, entry_start_time = event
+    if not tracker.should_react_to_close_event(symbol, event_time, entry_timeframe, entry_start_time):
         return False
     if tracker.active_trade(symbol) is None:
         return False

@@ -538,13 +538,23 @@ def _try_fire_entry(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolConf
 
 def _check_close_event(tracker: TradeTracker, symbol: str, manual_events_file: str) -> bool:
     """Reads Execution Bridge's own event file (manual_events.py,
-    read-only from here) -- if it carries a real-world close timestamp
-    (manual cancel/close, or a genuine SL/TP hit) for this symbol that
-    Trend Manager hasn't already reacted to, closes and permanently
-    blocks the current trade, same treatment as a bias flip. Returns
-    True if a close happened this call."""
-    event_time = manual_events.read_event_time(manual_events_file, symbol)
-    if event_time is None or not tracker.should_react_to_close_event(symbol, event_time):
+    read-only from here) -- if it carries a real-world close (manual
+    cancel/close, or a genuine SL/TP hit) for this symbol that Trend
+    Manager hasn't already reacted to AND that's still about whatever
+    trade is currently active (not an older one Trend Manager has since
+    moved past on its own), closes and permanently blocks the current
+    trade, same treatment as a bias flip. Returns True if a close
+    happened this call.
+
+    The identity check (not just "is anything active for this symbol")
+    matters -- real live bug, confirmed 2026-08-25: see
+    should_react_to_close_event's own docstring for the full USTEC
+    incident this fixes."""
+    event = manual_events.read_event(manual_events_file, symbol)
+    if event is None:
+        return False
+    event_time, exec_timeframe, exec_start_time = event
+    if not tracker.should_react_to_close_event(symbol, event_time, exec_timeframe, exec_start_time):
         return False
     if tracker.active_trade(symbol) is None:
         return False  # nothing currently open/pending to close

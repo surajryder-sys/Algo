@@ -164,20 +164,41 @@ class TradeTracker:
         }
         self._path.write_text(json.dumps(out))
 
-    def should_react_to_close_event(self, symbol: str, event_time: float) -> bool:
+    def should_react_to_close_event(self, symbol: str, event_time: float,
+                                     exec_timeframe: Optional[str] = None,
+                                     exec_start_time: Optional[int] = None) -> bool:
         """True (and records event_time as handled) only if this is a
         real-world close event (manual cancel/close, or a genuine SL/TP
         hit -- see manual_events.py's own docstring) Trend Manager
         hasn't already reacted to for this symbol -- idempotent across
         restarts/repeated polls, since Execution Bridge's event file is
         overwritten in place, not appended, and its own timestamp is
-        the only signal of novelty."""
+        the only signal of novelty.
+
+        Also requires the notification's own (exec_timeframe,
+        exec_start_time) identity to match whatever trade is CURRENTLY
+        active, not just the symbol -- real live bug, confirmed
+        2026-08-25: a USTEC long's real SL hit generated a notification,
+        but Trend Manager independently flip-closed that same long and
+        fired a brand new short of its own before the notification got
+        processed. Without an identity check, "is anything active for
+        this symbol" was the only gate, so the stale notification closed
+        the NEW short instead -- collateral damage from a trade the
+        notification was never actually about. exec_timeframe=None means
+        an old-format event (written before this identity info existed)
+        -- falls back to the old symbol-only behavior rather than
+        refusing to ever react to it."""
         last = self._manual_event_watermark.get(symbol, 0.0)
         if event_time <= last:
             return False
         self._manual_event_watermark[symbol] = event_time
         self._save()
-        return True
+        if exec_timeframe is None:
+            return True
+        trade = self._active.get(symbol)
+        if trade is None:
+            return False
+        return trade.exec_timeframe == exec_timeframe and trade.exec_start_time == exec_start_time
 
     # -- watermark ------------------------------------------------------
 

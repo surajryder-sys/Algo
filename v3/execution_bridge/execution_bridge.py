@@ -213,7 +213,8 @@ def _check_disappeared(cfg: Config, source: SourceConfig, tracker: OrderTracker,
         if outcome == "manual":
             _start_cooldown(source, symbol, tracked.exec_timeframe, tracked.exec_start_time)
             if source.manual_events_file:
-                manual_events.write_event(source.manual_events_file, symbol)
+                manual_events.write_event(source.manual_events_file, symbol,
+                                           tracked.exec_timeframe, tracked.exec_start_time)
                 print(f"{tag} {symbol}: pending order {tracked.ticket} manually cancelled -- notified {source.name}")
             else:
                 print(f"{tag} {symbol}: pending order {tracked.ticket} manually cancelled -- "
@@ -242,7 +243,8 @@ def _check_disappeared(cfg: Config, source: SourceConfig, tracker: OrderTracker,
         if outcome in ("manual", "sl", "tp"):
             _start_cooldown(source, symbol, tracked.exec_timeframe, tracked.exec_start_time)
             if source.manual_events_file:
-                manual_events.write_event(source.manual_events_file, symbol)
+                manual_events.write_event(source.manual_events_file, symbol,
+                                           tracked.exec_timeframe, tracked.exec_start_time)
                 print(f"{tag} {symbol}: position {tracked.ticket} closed ({outcome}) -- notified {source.name}")
             else:
                 # Confirmed live 2026-08-18: this used to say "notified"

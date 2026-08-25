@@ -180,7 +180,9 @@ class ReversalTracker:
         }
         self._path.write_text(json.dumps(out))
 
-    def should_react_to_close_event(self, symbol: str, event_time: float) -> bool:
+    def should_react_to_close_event(self, symbol: str, event_time: float,
+                                     entry_timeframe: Optional[str] = None,
+                                     entry_start_time: Optional[int] = None) -> bool:
         """Mirrors trade_tracker.TradeTracker's own -- True (and records
         event_time as handled) only if this is a real-world close event
         (manual cancel/close, or a genuine SL/TP hit) Reversal Manager
@@ -189,13 +191,28 @@ class ReversalTracker:
         active_trade record showing FILLED forever, with nothing real
         behind it, and Execution Bridge kept re-opening a brand new
         position for it every cycle since Reversal Manager never
-        learned the original had closed."""
+        learned the original had closed.
+
+        Also requires the notification's own (entry_timeframe,
+        entry_start_time) identity to match whatever trade is CURRENTLY
+        active, not just the symbol -- same fix as
+        trade_tracker.TradeTracker's own identical method, 2026-08-25,
+        after a real Trend Manager incident where a stale notification
+        about an already-superseded trade closed a brand new one instead
+        (see that method's own docstring for the full incident).
+        entry_timeframe=None means an old-format event -- falls back to
+        the old symbol-only behavior."""
         last = self._manual_event_watermark.get(symbol, 0.0)
         if event_time <= last:
             return False
         self._manual_event_watermark[symbol] = event_time
         self._save()
-        return True
+        if entry_timeframe is None:
+            return True
+        trade = self._active.get(symbol)
+        if trade is None:
+            return False
+        return trade.entry_timeframe == entry_timeframe and trade.entry_start_time == entry_start_time
 
     # -- watermark (retest de-dup) ---------------------------------------
 
