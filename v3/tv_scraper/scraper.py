@@ -779,34 +779,46 @@ def _parsed_values_agree(a, b) -> bool:
 
 
 # The single most-recently-successfully-processed pane's own data
-# signature (pane_label, symbol, bull/bear zone signatures, ATR
-# trail_stop, close) -- deliberately ONE global value (not keyed per
-# pane_label like _last_symbol_tf above), since the failure this guards
-# against is specifically "this pane's click never actually moved focus
-# off whatever pane was processed immediately before it in THIS same
-# poll cycle." Added 2026-08-24 after a real live incident: a USTEC M15
-# pane's own click apparently never took effect, so it kept reading M3's
-# real (correctly-settled, genuinely-agreeing-with-itself-twice) data for
-# a SUSTAINED period -- the settle-verification above only catches a
-# transient single-cycle glitch (one read disagreeing with the next), it
-# does nothing when the SAME wrong content is stuck being read
-# consistently, since two reads of stuck content trivially agree with
-# each other. That USTEC M15 "zone" (really M3's own) fired a real Trend
-# Manager BUY off a parent OB that was never real on M15 at all.
+# signature (pane_label, symbol, bull/bear zone signatures) -- deliberately
+# ONE global value (not keyed per pane_label like _last_symbol_tf above),
+# since the failure this guards against is specifically "this pane's click
+# never actually moved focus off whatever pane was processed immediately
+# before it in THIS same poll cycle." Added 2026-08-24 after a real live
+# incident: a USTEC M15 pane's own click apparently never took effect, so
+# it kept reading M3's real (correctly-settled, genuinely-agreeing-with-
+# itself-twice) data for a SUSTAINED period -- the settle-verification
+# above only catches a transient single-cycle glitch (one read disagreeing
+# with the next), it does nothing when the SAME wrong content is stuck
+# being read consistently, since two reads of stuck content trivially
+# agree with each other. That USTEC M15 "zone" (really M3's own) fired a
+# real Trend Manager BUY off a parent OB that was never real on M15 at
+# all.
 #
 # Deliberately EXCLUDES timeframe from the signature -- confirmed live
 # in that exact incident, the pane's own HEADER correctly read "M15"
 # (which is WHY the symbol/timeframe-change guard above never caught
-# it) while the deep zone/ATR/close DATA underneath was still M3's
-# stuck content. Comparing timeframe too would have made this check a
-# no-op for the exact failure it exists to catch.
+# it) while the deep zone DATA underneath was still M3's stuck content.
+# Comparing timeframe too would have made this check a no-op for the
+# exact failure it exists to catch.
+#
+# Also EXCLUDES atr_trail and close as of 2026-08-26 -- a second real
+# live incident: an M5 pane got stuck on M15's own data, but the
+# ORIGINAL signature (which included close) never flagged it, because
+# close drifts every tick even on a genuinely stuck read -- comparing it
+# made two reads of the SAME stuck zone data look "different enough" to
+# slip past this guard entirely. That XAUUSD "M5" OB (really M15's own,
+# unchanged for over an hour) fired a real Trend Manager SELL. Zone
+# top/btm pairs alone are already an extremely reliable fingerprint on
+# their own (8 independent floating-point values across 4 bull + 4 bear
+# zones matching exactly between two genuinely different, correctly-read
+# panes isn't realistic) -- dropping the two fields that legitimately
+# change every poll even when nothing is actually wrong only makes this
+# check MORE reliable, not less.
 _last_processed_pane: Optional[tuple] = None
 
 
 def _pane_data_signature(symbol: str, parsed) -> tuple:
-    atr_trail = (parsed.atr or {}).get("trail_stop")
-    return (symbol, _zone_signature(parsed.bull_zones),
-            _zone_signature(parsed.bear_zones), atr_trail, parsed.close)
+    return (symbol, _zone_signature(parsed.bull_zones), _zone_signature(parsed.bear_zones))
 
 
 def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: FirstSeenStore,
