@@ -595,6 +595,17 @@ _HTF_M1_TIMEFRAMES: Tuple[str, ...] = ("240", "120", "60", "30", "15", "5")
 # purely as the second confirming line.
 _ATR_FAST_PERIOD = "2"
 _ATR_SLOW_PERIOD = "300"
+# This mechanism's OWN SL buffer, deliberately separate from
+# entries.SYMBOL_SL_BUFFER (which the ORIGINAL mechanism's own M5-
+# immediate/M1-M3-M5-confirm tiers still use, unchanged) -- user's
+# explicit call, 2026-08-25: "use 2.0 not 1.0 for xauusd" specifically
+# for this new rule, not a change to XAUUSD's existing buffer everywhere
+# else. Per-symbol so each instrument gets its own value once it's that
+# symbol's turn (per the user's own stated plan, "once we are done with
+# this we will move to other instruments as well").
+_HTF_M1_SL_BUFFER = {
+    "XAUUSD": 2.0,
+}
 # "place an order at 45% pullback from detection price to trailing stop
 # price" -- user's own number.
 _ATR_PULLBACK_FRACTION = 0.45
@@ -739,7 +750,7 @@ def _resolve_htf_m1_confirmation(store: ZoneStore, tracker: ReversalTracker, atr
                   f"while waiting -- {_DIRECTION_LABELS[direction]} setup invalidated, blocked until next retest")
             return None
 
-    sl_buffer = entries.SYMBOL_SL_BUFFER.get(symbol)
+    sl_buffer = _HTF_M1_SL_BUFFER.get(symbol)
     if sl_buffer is None:
         return None
 
