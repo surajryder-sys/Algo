@@ -1,5 +1,15 @@
-// OBD_Reversal v1.04 -- order block detection + retest/mitigation webhooks
+// OBD_Reversal v1.05 -- order block detection + retest/mitigation webhooks
 // feeding v3's Reversal Manager (see v3/signal_engine/reversal_manager.py).
+//
+// v1.05 (2026-08-25): dropped ob_zone_retested's retest_high/retest_low
+// fields again (added in v1.03, one build later) -- user's own
+// simplification call: the new HTF-M1 Reversal Manager rule now derives
+// SL from the M1 CONFIRMATION itself (the confirming M1 OB's own edge, or
+// the ATR trailing-stop value) instead of the retest candle's real
+// high/low, so this payload data has no consumer left and would only add
+// unused complexity. freq_all (v1.04) stays -- immediate retest delivery
+// is still worth having on its own, independent of what SL ends up being
+// based on.
 //
 // v1.04 (2026-08-25): ob_zone_retested's own alert() switched from
 // freq_once_per_bar_close to freq_all -- the old setting silently delayed
@@ -12,17 +22,6 @@
 // mark_retests()'s own comment for the full reasoning on why freq_all is
 // safe here (the guard already prevents any duplicate firing).
 //
-// v1.03 (2026-08-25): ob_zone_retested's payload now also carries
-// retest_high/retest_low -- the RETEST CANDLE's own high/low (this
-// timeframe's own bar at the moment of retest), not the order block's own
-// top/btm. Added for a new XAUUSD-only Reversal Manager rule (HTF retest
-// -> M1-only confirmation) whose SL is based on the retest candle itself,
-// not the zone boundary -- "when i say retest candle its as per retest
-// time frame only... for example M15 retest event, refer m15 candle
-// high/low respectively" (user's own words). mark_retests() already reads
-// `high`/`low` at the exact moment it detects the retest (see its own
-// comment on why that's non-repainting), so this is just two more fields
-// on the same payload, no new computation.
 // Base order-block detection/mitigation logic originally from LuxAlgo's
 // "Order Block Detector" (CC BY-NC-SA 4.0), substantially modified since:
 // retest tracking (mark_retests), the ob_zone_formed/mitigated/retested
@@ -40,7 +39,7 @@
 // pane, confirmed as visual clutter once both were added together.
 
 //@version=5
-indicator("OBD_Reversal v1.04"
+indicator("OBD_Reversal v1.05"
   , overlay = true)
 //------------------------------------------------------------------------------
 //Settings
@@ -154,9 +153,7 @@ mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_ret
                       '","timeframe":"' + timeframe.period +
                       '","direction":"' + dir_label +
                       '","start_time":' + str.tostring(math.round(zone_start / 1000), '#') +
-                      ',"retested_time":' + str.tostring(math.round(time / 1000), '#') +
-                      ',"retest_high":' + str.tostring(high) +
-                      ',"retest_low":' + str.tostring(low) + '}'
+                      ',"retested_time":' + str.tostring(math.round(time / 1000), '#') + '}'
                     alert(retest_payload, alert.freq_all)
 
     retested_this_call

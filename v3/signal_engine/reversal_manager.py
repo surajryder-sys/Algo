@@ -571,9 +571,12 @@ def _atr_confirms(atr_store: AtrStore, symbol: str, timeframe: str, direction: s
 # 2/period=300 BOTH flipping to the same direction, strictly after the
 # retest) -- the ATR path prices its own entry at a 45% pullback from the
 # flip-moment price to Line 1's own trailing-stop value, as a PENDING
-# order. SL either way comes from the RETEST CANDLE's own high/low (the
-# retest timeframe's own bar at the moment of retest -- see
-# TVZone.retested_high/low's own docstring), not the OB zone's boundary.
+# order. SL comes from whichever confirmation actually fired, not the
+# retest -- user's own simplification, 2026-08-25 (dropped an earlier
+# retest-candle-high/low based version, one build prior, as unneeded
+# complexity): the M1 OB's own opposite edge + buffer for that path, or
+# Line 1's own trailing-stop value +/- buffer (direction-matched) for the
+# ATR path -- see _resolve_htf_m1_confirmation's own docstring.
 # Invalidated by an opposite-direction OB on M3, M5, or M15 (explicitly
 # NOT M1 -- M1 is the confirmation timeframe itself) formed after the
 # retest event, checked for as long as the setup is waiting OR already
@@ -638,10 +641,8 @@ def _register_htf_m1_retests(store: ZoneStore, tracker: ReversalTracker, sym_cfg
             if zone is None:
                 continue
             retest_time = float(zone.retested_at) if zone.retested_at is not None else time.time()
-            tracker.add_htf_m1_waiting(symbol, direction, WaitingRetest(
-                timeframe, zone.start_time, zone.top, zone.btm, retest_time,
-                retested_high=zone.retested_high, retested_low=zone.retested_low,
-            ))
+            tracker.add_htf_m1_waiting(symbol, direction,
+                                        WaitingRetest(timeframe, zone.start_time, zone.top, zone.btm, retest_time))
             tracker.mark_htf_m1_retest_processed(symbol, timeframe, direction, zone.start_time)
             tf_label = _TF_LABELS.get(timeframe, timeframe)
             label = _DIRECTION_LABELS[direction]
@@ -696,50 +697,24 @@ def _atr_dual_flip_confirms(atr_store: AtrStore, symbol: str, timeframe: str,
     return fast, slow
 
 
-def _htf_m1_sl(waiting: list, direction: str, buffer: float) -> Optional[float]:
-    """Retest-candle-based SL -- user's own rule: "sl is retest candle
-    high + buffer for sell trade, low-buffer for buy trade... its as per
-    retest time frame only... for example M15 retest event, refer m15
-    candle high/low respectively." Same multi-waiting-zone selection
-    reasoning as the original mechanism's own SL calc ("whichever zone is
-    at lowerside for buy trade decides sl, similarly whichever zone is
-    far from the price decides the sl for sell trade") -- furthest
-    retested_low for a buy, furthest retested_high for a sell, across
-    every zone currently in HTF-M1's own waiting list, not just whichever
-    one happened to trigger confirmation. Returns None if the deciding
-    zone has no retested_high/low at all (a webhook build from before
-    2026-08-25, or a retest that came through tv_scraper's own
-    Close-approximation path instead of the webhook path) -- callers must
-    NOT fall back to the OB's own top/btm silently; the whole point of
-    this rule is the real candle, not the zone boundary."""
-    candidates = [w for w in waiting if (w.retested_low if direction == "bull" else w.retested_high) is not None]
-    if not candidates:
-        return None
-    if direction == "bull":
-        zone = min(candidates, key=lambda w: w.retested_low)
-        return zone.retested_low - buffer
-    zone = max(candidates, key=lambda w: w.retested_high)
-    return zone.retested_high + buffer
-
-
 def _resolve_htf_m1_confirmation(store: ZoneStore, tracker: ReversalTracker, atr_store: AtrStore,
-                                  sym_cfg: SymbolConfig, direction: str,
-                                  quiet_no_waiting: bool = False) -> Optional[tuple]:
+                                  sym_cfg: SymbolConfig, direction: str) -> Optional[tuple]:
     """The pure "is there a confirmed setup for this direction right now"
-    check -- waiting/invalidation/candidate-selection, everything EXCEPT
-    actually opening a trade (that differs between a fresh fire, handled
-    by _check_htf_m1, and a flip out of an already-open opposite trade,
-    handled by _check_htf_m1_flip -- see that function's own docstring
-    for why they need to share this instead of duplicating it). Returns
-    (waiting, gate_time, mode_value, entry_price, start_time, reason,
-    extra_log) on a genuine confirmation, else None.
+    check -- waiting/invalidation/candidate-selection/SL, everything
+    EXCEPT actually opening a trade (that differs between a fresh fire,
+    handled by _check_htf_m1, and a flip out of an already-open opposite
+    trade, handled by _check_htf_m1_flip -- see that function's own
+    docstring for why they need to share this instead of duplicating
+    it). Returns (waiting, gate_time, mode_value, entry_price, sl,
+    start_time, reason, extra_log) on a genuine confirmation, else None.
 
-    quiet_no_waiting suppresses the "no waiting retests" early return's
-    otherwise-silent no-op -- irrelevant either way (both callers just
-    treat None as "nothing to do"), kept as a parameter only so a future
-    caller could distinguish "no HTF retest has even happened yet" from
-    "one happened but hasn't confirmed" if that's ever useful; unused for
-    now."""
+    SL comes from the CONFIRMATION itself, not the retest -- user's own
+    simplification, 2026-08-25 (dropped an earlier retest-candle-high/low
+    based version, one build prior, as unneeded complexity): the M1 OB
+    path uses that OB's own opposite edge + buffer (entries.initial_sl,
+    same "zone plus buffer" shape used everywhere else in this system);
+    the ATR path uses Line 1's own trailing-stop value +/- buffer
+    (matching direction -- above price for a sell, below for a buy)."""
     symbol = sym_cfg.symbol
     waiting = _prune_mitigated_htf_m1_waiting(store, tracker, symbol, direction)
     if not waiting:
@@ -779,8 +754,10 @@ def _resolve_htf_m1_confirmation(store: ZoneStore, tracker: ReversalTracker, atr
     # Reversal Manager's own wider M1 thresholds here, not Trend
     # Manager's narrower ones -- "same as per m1 ob as per trend manager"
     # meant the same SHAPE of logic (fresh-OB-confirms, market-or-
-    # pullback), not literally Trend Manager's own numbers.
-    ob_candidate = None  # (mode_value, entry_price, distance, start_time, reason)
+    # pullback), not literally Trend Manager's own numbers. SL is that
+    # same OB's own opposite edge + buffer -- "we can add sl based on m1
+    # itself zone plus buffer" (user's own words).
+    ob_candidate = None  # (mode_value, entry_price, distance, start_time, reason, sl)
     ob_zone = _newest_post_time_zone(store, symbol, "1", direction, int(gate_time))
     if ob_zone is not None:
         edge = entries.ob_edge(direction, ob_zone.top, ob_zone.btm)
@@ -788,7 +765,8 @@ def _resolve_htf_m1_confirmation(store: ZoneStore, tracker: ReversalTracker, atr
         if plan.mode != entries.EntryMode.NONE:
             effective_entry = current_price if plan.mode == entries.EntryMode.MARKET else plan.entry_price
             distance = 0.0 if plan.mode == entries.EntryMode.MARKET else abs(effective_entry - current_price)
-            ob_candidate = (plan.mode.value, effective_entry, distance, ob_zone.start_time, "M1 OB")
+            ob_sl = (ob_zone.btm - sl_buffer) if direction == "bull" else (ob_zone.top + sl_buffer)
+            ob_candidate = (plan.mode.value, effective_entry, distance, ob_zone.start_time, "M1 OB", ob_sl)
 
     # Confirmation B: dual ATR flip (Line 1 period=2 AND Line 2
     # period=300, both) -- PENDING order at a 45% pullback from the
@@ -800,16 +778,20 @@ def _resolve_htf_m1_confirmation(store: ZoneStore, tracker: ReversalTracker, atr
     # flipped) -- TVAtrState carries no price field of its own to look
     # back at, same "price at signal time" convention already used
     # throughout this codebase (e.g. _check_direction_atr_or_ob's own
-    # current_price read).
-    atr_candidate = None  # (mode_value, entry_price, distance, start_time, reason, extra_log)
+    # current_price read). SL is that SAME trailing-stop value +/-
+    # buffer, matching direction -- "atr trailing stop plus or minus
+    # buffer, for sell trade and buy trade accordingly" (user's own
+    # words): above the trail stop for a sell, below it for a buy.
+    atr_candidate = None  # (mode_value, entry_price, distance, start_time, reason, sl, extra_log)
     flip = _atr_dual_flip_confirms(atr_store, symbol, "1", direction, gate_time)
     if flip is not None:
         fast, slow = flip
         pullback_price = current_price + _ATR_PULLBACK_FRACTION * (fast.trail_stop - current_price)
         distance = abs(pullback_price - current_price)
         start_time = int(max(fast.event_time, slow.event_time))
+        atr_sl = (fast.trail_stop + sl_buffer) if direction == "bear" else (fast.trail_stop - sl_buffer)
         extra_log = f" (45% pullback from {current_price:.2f} to {fast.trail_stop:.2f})"
-        atr_candidate = ("PENDING", pullback_price, distance, start_time, "ATR dual-flip", extra_log)
+        atr_candidate = ("PENDING", pullback_price, distance, start_time, "ATR dual-flip", atr_sl, extra_log)
 
     if ob_candidate is None and atr_candidate is None:
         return None
@@ -822,9 +804,10 @@ def _resolve_htf_m1_confirmation(store: ZoneStore, tracker: ReversalTracker, atr
     # (distance 0.0 by construction) naturally always wins over any
     # PENDING candidate, immediate beats waiting.
     candidates = [c for c in (ob_candidate, atr_candidate) if c is not None]
-    mode_value, entry_price, _distance, start_time, reason, *extra = min(candidates, key=lambda c: c[2])
+    mode_value, entry_price, _distance, start_time, reason, sl, *extra = min(candidates, key=lambda c: c[2])
     extra_log = extra[0] if extra else ""
-    return waiting, gate_time, mode_value, entry_price, start_time, reason, extra_log
+    sl = _apply_sl_cap(sym_cfg, direction, entry_price, sl)
+    return waiting, gate_time, mode_value, entry_price, sl, start_time, reason, extra_log
 
 
 def _check_htf_m1(store: ZoneStore, tracker: ReversalTracker, atr_store: AtrStore,
@@ -833,15 +816,8 @@ def _check_htf_m1(store: ZoneStore, tracker: ReversalTracker, atr_store: AtrStor
     resolved = _resolve_htf_m1_confirmation(store, tracker, atr_store, sym_cfg, direction)
     if resolved is None:
         return False
-    waiting, gate_time, mode_value, entry_price, start_time, reason, extra_log = resolved
+    waiting, gate_time, mode_value, entry_price, sl, start_time, reason, extra_log = resolved
 
-    sl_buffer = entries.SYMBOL_SL_BUFFER[symbol]
-    sl = _htf_m1_sl(waiting, direction, sl_buffer)
-    if sl is None:
-        print(f"[reversal_manager] {symbol}: (htf-m1) {reason} confirmed but no retest-candle "
-              f"high/low recorded for the deciding zone yet -- skipping until it is")
-        return False
-    sl = _apply_sl_cap(sym_cfg, direction, entry_price, sl)
     status = "FILLED" if mode_value == "MARKET" else "PENDING"
     opened_at = time.time() if mode_value == "MARKET" else 0.0
     trade = ActiveReversalTrade(direction, "1", start_time, entry_price, sl, mode_value,
@@ -881,16 +857,7 @@ def _check_htf_m1_flip(store: ZoneStore, tracker: ReversalTracker, atr_store: At
     resolved = _resolve_htf_m1_confirmation(store, tracker, atr_store, sym_cfg, opposite)
     if resolved is None:
         return False
-    waiting, gate_time, mode_value, entry_price, start_time, reason, extra_log = resolved
-
-    sl_buffer = entries.SYMBOL_SL_BUFFER[symbol]
-    sl = _htf_m1_sl(waiting, opposite, sl_buffer)
-    if sl is None:
-        print(f"[reversal_manager] {symbol}: (htf-m1) opposite {reason} confirmed while "
-              f"{_DIRECTION_LABELS[active.direction]} trade active, but no retest-candle high/low "
-              f"recorded for the deciding zone yet -- not flipping until it is")
-        return False
-    sl = _apply_sl_cap(sym_cfg, opposite, entry_price, sl)
+    waiting, gate_time, mode_value, entry_price, sl, start_time, reason, extra_log = resolved
 
     tracker.close_trade(symbol)
     status = "FILLED" if mode_value == "MARKET" else "PENDING"

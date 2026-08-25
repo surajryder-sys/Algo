@@ -65,14 +65,6 @@ class WaitingRetest:
     top: float
     btm: float
     retest_time: float
-    # The retest CANDLE's own high/low (this zone's timeframe, at the
-    # moment of retest) -- distinct from top/btm above (the order block's
-    # own boundary). Only populated for the HTF-M1 mechanism's own waiting
-    # list (see ReversalTracker's class docstring, section 4) -- None for
-    # the original mechanism's waiting list, which never needed it. Added
-    # 2026-08-25 alongside TVZone.retested_high/low.
-    retested_high: Optional[float] = None
-    retested_low: Optional[float] = None
 
 
 @dataclass
