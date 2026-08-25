@@ -43,6 +43,16 @@ sophisticated component the user is deferring; this is just "opposite
 parent OB shows up -> get out," confirmed in-scope for Trend Manager
 itself 2026-08-17).
 
+Corrected 2026-08-25: the opposite OB must be genuinely NEWER
+(start_time strictly after the active trade's own parent start_time)
+to flip -- not just "eligible." Real live incident: an M5 bull OB and
+an M15 bear OB formed on the exact same candle-open (identical
+start_time); M5 confirmed first and fired a trade, then M15 finished
+confirming ~10 minutes later and, under the old rule, closed that
+trade even though its OB was no newer -- just slower to confirm. A
+same-age or older opposite OB no longer overrides an already-active
+bias; only a strictly newer one does.
+
 --- Entry execution, once bias is set ---
 Trigger timeframes (SymbolConfig.trigger_timeframes) are pure execution
 triggers -- XAUUSD: M5/M3/M1. BTCUSD/ETHUSD: M15/M3 (was M15/M5 until
@@ -566,12 +576,24 @@ def _run_trade_logic(store: ZoneStore, tracker: TradeTracker, sym_cfg: SymbolCon
 
     active = tracker.active_trade(symbol)
 
-    # Opposite-direction parent OB flips the bias -- close/block current, if any.
+    # Opposite-direction parent OB flips the bias -- close/block current, if
+    # any -- but only if it's genuinely NEWER than the active trade's own
+    # parent OB, not merely eligible. Real live incident, confirmed
+    # 2026-08-25: an M5 bullish OB and an M15 bearish OB formed on the exact
+    # same candle-open (identical start_time) -- the M5 side won bias first
+    # and fired a trade because M5 confirms faster, then ~10 minutes later
+    # the M15 side finished confirming and, under the old "any eligible
+    # opposite OB flips" rule, closed that trade immediately even though its
+    # own OB was no more recent than the one already winning -- just slower
+    # to confirm. User's correction: "m5 has the recent bullish ob, which
+    # wins the bias" -- a same-age (or older) opposite OB shouldn't override
+    # an already-active, already-firing bias just because it confirmed
+    # later; only a genuinely newer opposite OB should.
     if active is not None:
         opposite_direction = "bear" if active.direction == "bull" else "bull"
         flip = _best_parent_candidate(store, tracker, symbol, parent_timeframes, (opposite_direction,))
-        if flip is not None:
-            print(f"[trend_manager] {symbol}: opposite-direction parent OB appeared -- bias flip, "
+        if flip is not None and flip[0] > active.parent_start_time:
+            print(f"[trend_manager] {symbol}: newer opposite-direction parent OB appeared -- bias flip, "
                   f"closing {active.direction} trade")
             tracker.close_trade(symbol, block=True)
             active = None
