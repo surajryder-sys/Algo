@@ -1,5 +1,17 @@
-// OBD_Reversal v1.02 -- order block detection + retest/mitigation webhooks
+// OBD_Reversal v1.03 -- order block detection + retest/mitigation webhooks
 // feeding v3's Reversal Manager (see v3/signal_engine/reversal_manager.py).
+//
+// v1.03 (2026-08-25): ob_zone_retested's payload now also carries
+// retest_high/retest_low -- the RETEST CANDLE's own high/low (this
+// timeframe's own bar at the moment of retest), not the order block's own
+// top/btm. Added for a new XAUUSD-only Reversal Manager rule (HTF retest
+// -> M1-only confirmation) whose SL is based on the retest candle itself,
+// not the zone boundary -- "when i say retest candle its as per retest
+// time frame only... for example M15 retest event, refer m15 candle
+// high/low respectively" (user's own words). mark_retests() already reads
+// `high`/`low` at the exact moment it detects the retest (see its own
+// comment on why that's non-repainting), so this is just two more fields
+// on the same payload, no new computation.
 // Base order-block detection/mitigation logic originally from LuxAlgo's
 // "Order Block Detector" (CC BY-NC-SA 4.0), substantially modified since:
 // retest tracking (mark_retests), the ob_zone_formed/mitigated/retested
@@ -17,7 +29,7 @@
 // pane, confirmed as visual clutter once both were added together.
 
 //@version=5
-indicator("OBD_Reversal v1.02"
+indicator("OBD_Reversal v1.03"
   , overlay = true)
 //------------------------------------------------------------------------------
 //Settings
@@ -118,7 +130,9 @@ mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_ret
                       '","timeframe":"' + timeframe.period +
                       '","direction":"' + dir_label +
                       '","start_time":' + str.tostring(math.round(zone_start / 1000), '#') +
-                      ',"retested_time":' + str.tostring(math.round(time / 1000), '#') + '}'
+                      ',"retested_time":' + str.tostring(math.round(time / 1000), '#') +
+                      ',"retest_high":' + str.tostring(high) +
+                      ',"retest_low":' + str.tostring(low) + '}'
                     alert(retest_payload, alert.freq_once_per_bar_close)
 
     retested_this_call

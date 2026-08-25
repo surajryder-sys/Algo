@@ -63,6 +63,20 @@ class TVZone:
     # `formed_time_confirmed and not formed_time_ever_unconfirmed`
     # together, not formed_time_confirmed alone.
     formed_time_ever_unconfirmed: bool = False
+    # The RETEST CANDLE's own high/low (this zone's timeframe, at the
+    # moment it was retested) -- NOT the order block's own top/btm.
+    # Added 2026-08-25 for Reversal Manager's XAUUSD-only HTF-retest ->
+    # M1-confirm rule, whose SL is based on the retest candle itself
+    # ("when i say retest candle its as per retest time frame only... for
+    # example M15 retest event, refer m15 candle high/low respectively" --
+    # user's own words). Only ever populated via the webhook path
+    # (OBD_Reversal.pine's ob_zone_retested payload, added the same day) --
+    # None for a zone whose retest came from tv_scraper's own
+    # Close-approximation path instead (that path has no way to know the
+    # retest bar's real high/low, only tv_scraper's own next-poll Close),
+    # or from a webhook build that predates these two fields.
+    retested_high: Optional[float] = None
+    retested_low: Optional[float] = None
 
 
 class ZoneStore:
@@ -171,6 +185,16 @@ class ZoneStore:
         zone.virgin = False
         if zone.retested_at is None or retested_time < zone.retested_at:
             zone.retested_at = retested_time
+            # Retest candle high/low travel WITH the winning retested_at
+            # update above, not independently -- see TVZone.retested_high's
+            # own docstring. Only present on the webhook path's payload
+            # (optional fields, tv_bridge's own schema check doesn't
+            # require them) -- left None otherwise, same as before these
+            # fields existed.
+            retest_high = data.get("retest_high")
+            retest_low = data.get("retest_low")
+            zone.retested_high = float(retest_high) if retest_high is not None else None
+            zone.retested_low = float(retest_low) if retest_low is not None else None
         self._save()
 
     def zones(self, symbol: str, timeframe: str, direction: str) -> list[TVZone]:

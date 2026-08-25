@@ -32,7 +32,18 @@ docstring for the full rule. Three things live here:
    explicit confirmation 2026-08-17: "both can open same direction or
    opposite direction trades"). Closed via the entry OB's own
    mitigation, same stand-in-for-stopped-out convention used
-   everywhere else in this system.
+   everywhere else in this system. SHARED across both mechanisms below --
+   one reversal trade per symbol at a time, regardless of which
+   mechanism armed it.
+
+4. A second, fully independent copy of (1) and (2) above -- own
+   watermarks/seeded-buckets/waiting-list, "htf_m1_"-prefixed -- for the
+   new HTF-retest -> M1-only-confirm mechanism (XAUUSD only, added
+   2026-08-25, see reversal_manager.py's own docstring for the full
+   rule). Deliberately not sharing state with (1)/(2): each mechanism's
+   own invalidation rule (which LTF timeframes count) only ever affects
+   the trade IT armed, never the other mechanism's own watch on the same
+   underlying retest event.
 """
 from __future__ import annotations
 
@@ -54,6 +65,14 @@ class WaitingRetest:
     top: float
     btm: float
     retest_time: float
+    # The retest CANDLE's own high/low (this zone's timeframe, at the
+    # moment of retest) -- distinct from top/btm above (the order block's
+    # own boundary). Only populated for the HTF-M1 mechanism's own waiting
+    # list (see ReversalTracker's class docstring, section 4) -- None for
+    # the original mechanism's waiting list, which never needed it. Added
+    # 2026-08-25 alongside TVZone.retested_high/low.
+    retested_high: Optional[float] = None
+    retested_low: Optional[float] = None
 
 
 @dataclass
@@ -109,6 +128,24 @@ class ActiveReversalTrade:
     # SL calculation). None only for a trade persisted before this field
     # existed -- execution_bridge.py falls back to exec_timeframe then.
     parent_timeframe: Optional[str] = None
+    # True when this trade came from the new HTF-retest -> M1-only-confirm
+    # mechanism (XAUUSD only, 2026-08-25) rather than the original M1/M3/M5
+    # LTF-confirmation mechanism -- see reversal_manager.py's own docstring
+    # for the full rule. Gates which invalidation check applies
+    # (_close_if_htf_m1_invalidated vs _close_if_opposite_ltf_ob/
+    # _close_if_invalidated) and which SL basis was used, since both
+    # mechanisms share this same one-trade-per-symbol active slot.
+    is_htf_m1: bool = False
+    # The winning HTF zone's own retest_time (wall-clock) that this trade's
+    # setup was armed from -- kept on the trade itself (not just the
+    # waiting-list entry, which gets cleared once the trade fires) so
+    # _close_if_htf_m1_invalidated can keep checking "opposite OB on M3/M5/
+    # M15 after the ORIGINAL retest event" for as long as the trade/pending
+    # order stays open, exactly as specified ("this setup becomes
+    # invalid... square off the trade, or cancel pending orders") -- not
+    # re-anchored to the trade's own fill time the way the existing
+    # opposite-LTF-OB close rule is.
+    htf_m1_retest_time: Optional[float] = None
 
 
 class ReversalTracker:
@@ -134,6 +171,20 @@ class ReversalTracker:
         self._waiting: dict[str, dict[str, List[WaitingRetest]]] = {}  # symbol -> direction -> [WaitingRetest]
         self._active: dict[str, ActiveReversalTrade] = {}
         self._manual_event_watermark: dict[str, float] = {}
+        # Fully separate watermark/seeded/waiting state for the new
+        # HTF-retest -> M1-only-confirm mechanism (XAUUSD only, added
+        # 2026-08-25) -- deliberately NOT sharing the originals above.
+        # User's own call: an opposite OB on, say, M3 should only ever
+        # invalidate the mechanism that actually cares about M3 (the
+        # original one); coupling the two would mean each mechanism's own
+        # invalidation could wipe out the OTHER'S watch on a retest neither
+        # of them intended it to affect. Both still watch the exact same
+        # HTF retest events (H4/H2/H1/M30/M15/M5) independently, so a given
+        # zone's retest is tracked twice -- once per mechanism -- rather
+        # than once shared.
+        self._htf_m1_watermarks: dict[str, int] = {}
+        self._htf_m1_seeded_buckets: set = set()
+        self._htf_m1_waiting: dict[str, dict[str, List[WaitingRetest]]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -166,6 +217,16 @@ class ReversalTracker:
             symbol: ActiveReversalTrade(**t)
             for symbol, t in raw.get("active_trades", {}).items()
         }
+        self._htf_m1_watermarks = dict(raw.get("htf_m1_watermarks", {}))
+        self._htf_m1_seeded_buckets = set(raw.get("htf_m1_seeded_buckets", []))
+        self._htf_m1_seeded_buckets |= set(self._htf_m1_watermarks.keys())
+        self._htf_m1_waiting = {
+            symbol: {
+                direction: [WaitingRetest(**w) for w in entries]
+                for direction, entries in per_symbol.items()
+            }
+            for symbol, per_symbol in raw.get("htf_m1_waiting", {}).items()
+        }
 
     def _save(self) -> None:
         out = {
@@ -177,6 +238,12 @@ class ReversalTracker:
             },
             "active_trades": {symbol: asdict(t) for symbol, t in self._active.items()},
             "manual_event_watermark": self._manual_event_watermark,
+            "htf_m1_watermarks": self._htf_m1_watermarks,
+            "htf_m1_seeded_buckets": sorted(self._htf_m1_seeded_buckets),
+            "htf_m1_waiting": {
+                symbol: {direction: [asdict(w) for w in entries] for direction, entries in per_symbol.items()}
+                for symbol, per_symbol in self._htf_m1_waiting.items()
+            },
         }
         self._path.write_text(json.dumps(out))
 
@@ -274,6 +341,49 @@ class ReversalTracker:
         until an unrelated M1 OB happened to match direction and
         "confirmed" it, firing a trade off a zone that was already gone."""
         self._waiting.setdefault(symbol, {})[direction] = list(entries)
+        self._save()
+
+    # -- HTF-M1 mechanism's own separate state (2026-08-25) ----------------
+    # Mirrors the watermark/seeded/waiting methods above exactly, same
+    # cold-start-safe/prune-safe reasoning throughout -- kept as fully
+    # separate methods (not parameterized) so each mechanism's own call
+    # sites stay unambiguous about which state they're touching.
+
+    def is_new_htf_m1_retest(self, symbol: str, timeframe: str, direction: str, start_time: int) -> bool:
+        key = _bucket_key(symbol, timeframe, direction)
+        return start_time > self._htf_m1_watermarks.get(key, 0)
+
+    def is_htf_m1_bucket_seeded(self, symbol: str, timeframe: str, direction: str) -> bool:
+        return _bucket_key(symbol, timeframe, direction) in self._htf_m1_seeded_buckets
+
+    def seed_htf_m1_bucket(self, symbol: str, timeframe: str, direction: str, start_time: int) -> None:
+        key = _bucket_key(symbol, timeframe, direction)
+        if start_time > self._htf_m1_watermarks.get(key, 0):
+            self._htf_m1_watermarks[key] = start_time
+        self._htf_m1_seeded_buckets.add(key)
+        self._save()
+
+    def mark_htf_m1_retest_processed(self, symbol: str, timeframe: str, direction: str, start_time: int) -> None:
+        key = _bucket_key(symbol, timeframe, direction)
+        if start_time > self._htf_m1_watermarks.get(key, 0):
+            self._htf_m1_watermarks[key] = start_time
+        self._htf_m1_seeded_buckets.add(key)
+        self._save()
+
+    def add_htf_m1_waiting(self, symbol: str, direction: str, retest: WaitingRetest) -> None:
+        self._htf_m1_waiting.setdefault(symbol, {}).setdefault(direction, []).append(retest)
+        self._save()
+
+    def get_htf_m1_waiting(self, symbol: str, direction: str) -> List[WaitingRetest]:
+        return list(self._htf_m1_waiting.get(symbol, {}).get(direction, []))
+
+    def clear_htf_m1_waiting(self, symbol: str, direction: str) -> None:
+        if symbol in self._htf_m1_waiting and direction in self._htf_m1_waiting[symbol]:
+            self._htf_m1_waiting[symbol][direction] = []
+            self._save()
+
+    def set_htf_m1_waiting(self, symbol: str, direction: str, entries: "List[WaitingRetest]") -> None:
+        self._htf_m1_waiting.setdefault(symbol, {})[direction] = list(entries)
         self._save()
 
     # -- active trade -------------------------------------------------------

@@ -21,6 +21,9 @@ the alert() calls added) for the exact shape. Every payload carries "secret",
   ob_zone_mitigated  -- timeframe, direction, start_time, mitigated_time,
                          mitigated_price
   ob_zone_retested   -- timeframe, direction, start_time, retested_time
+                         (retest_high/retest_low optional -- the retest
+                         candle's own high/low, added 2026-08-25 for
+                         Reversal Manager's HTF-retest-M1-confirm rule)
 """
 from __future__ import annotations
 

@@ -550,6 +550,403 @@ def _atr_confirms(atr_store: AtrStore, symbol: str, timeframe: str, direction: s
     return min(candidates, key=lambda s: s.event_time)
 
 
+# =============================================================================
+# HTF-retest -> M1-only-confirm mechanism (XAUUSD only, added 2026-08-25)
+# =============================================================================
+# A second, fully independent reversal mechanism -- runs ALONGSIDE
+# everything above (_fire_m5_immediate, _check_m5_flip, _check_direction's
+# own M1/M3/M5 confirmation), never replacing it. User's own rule, verbatim
+# reasoning preserved in each function's own docstring below. Shares only
+# the single active-trade slot per symbol (ReversalTracker._active) --
+# "one reversal trade at a time" is a hard rule regardless of which
+# mechanism armed it; everything else (watermarks, seeded buckets, waiting
+# list) is its own separate copy (see ReversalTracker's own docstring,
+# section 4, for why: an opposite OB on M3 should only ever invalidate the
+# mechanism that actually cares about M3, not silently wipe out this one's
+# watch on the same underlying retest too).
+#
+# Flow: H4/H2/H1/M30/M15/M5 retest -> waiting state -> M1 confirms via
+# EITHER a fresh M1 OB (Reversal Manager's own existing M1 entry math,
+# unchanged) OR a dual ATR flip (OBD_ATR.pine's Line 1/period=2 AND Line
+# 2/period=300 BOTH flipping to the same direction, strictly after the
+# retest) -- the ATR path prices its own entry at a 45% pullback from the
+# flip-moment price to Line 1's own trailing-stop value, as a PENDING
+# order. SL either way comes from the RETEST CANDLE's own high/low (the
+# retest timeframe's own bar at the moment of retest -- see
+# TVZone.retested_high/low's own docstring), not the OB zone's boundary.
+# Invalidated by an opposite-direction OB on M3, M5, or M15 (explicitly
+# NOT M1 -- M1 is the confirmation timeframe itself) formed after the
+# retest event, checked for as long as the setup is waiting OR already
+# has a trade open (squares off a FILLED trade, cancels a PENDING one).
+
+# H4/H2/H1/M30/M15/M5 -- unlike reversal_config.HTF_TIMEFRAMES (which
+# excludes M5, since the original mechanism gives M5 its own dedicated
+# immediate-fire treatment via _fire_m5_immediate instead), M5 is just
+# another ordinary HTF retest source for THIS mechanism -- no special
+# immediate-fire case, waits for M1 confirmation exactly like every other
+# HTF timeframe here.
+_HTF_M1_TIMEFRAMES: Tuple[str, ...] = ("240", "120", "60", "30", "15", "5")
+# The two OBD_ATR.pine periods that must BOTH flip -- user's own explicit
+# numbers ("atr2,300"), confirmed: Line 1 (fast, period 2) for the
+# pullback-target's own trailing-stop reference, Line 2 (slow, period 300)
+# purely as the second confirming line.
+_ATR_FAST_PERIOD = "2"
+_ATR_SLOW_PERIOD = "300"
+# "place an order at 45% pullback from detection price to trailing stop
+# price" -- user's own number.
+_ATR_PULLBACK_FRACTION = 0.45
+
+
+def _newest_retested_zone_htf_m1(store: ZoneStore, tracker: ReversalTracker, symbol: str,
+                                  timeframe: str, direction: str) -> Optional[TVZone]:
+    """Exact copy of _newest_retested_zone's own logic (same three guards:
+    per-bucket cold start, retested_at != start_time distrust, 30-minute
+    recency cap -- see that function's own docstring for the full
+    reasoning behind each), just reading/writing the HTF-M1 mechanism's
+    own separate tracker state instead of the original's."""
+    now = time.time()
+    if not tracker.is_htf_m1_bucket_seeded(symbol, timeframe, direction):
+        already_retested = [
+            z for z in store.zones(symbol, timeframe, direction)
+            if _formation_trusted(z) and not z.virgin and z.retested_at != z.start_time
+        ]
+        seed_start_time = max((z.start_time for z in already_retested), default=0)
+        tracker.seed_htf_m1_bucket(symbol, timeframe, direction, seed_start_time)
+        if seed_start_time:
+            tf_label = _TF_LABELS.get(timeframe, timeframe)
+            print(f"[reversal_manager] {symbol}: (htf-m1) first look at {tf_label} {_DIRECTION_LABELS[direction]} -- "
+                  f"skipping pre-existing retest @ {seed_start_time}, only reacting to new ones from here")
+        return None
+
+    candidates = [
+        z for z in store.zones(symbol, timeframe, direction)
+        if _formation_trusted(z) and not z.virgin
+        and z.retested_at != z.start_time
+        and (now - z.retested_at) <= _RETEST_MAX_AGE_SECONDS
+        and tracker.is_new_htf_m1_retest(symbol, timeframe, direction, z.start_time)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda z: z.start_time)
+
+
+def _register_htf_m1_retests(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolConfig) -> None:
+    symbol = sym_cfg.symbol
+    for timeframe in _HTF_M1_TIMEFRAMES:
+        for direction in ("bull", "bear"):
+            zone = _newest_retested_zone_htf_m1(store, tracker, symbol, timeframe, direction)
+            if zone is None:
+                continue
+            retest_time = float(zone.retested_at) if zone.retested_at is not None else time.time()
+            tracker.add_htf_m1_waiting(symbol, direction, WaitingRetest(
+                timeframe, zone.start_time, zone.top, zone.btm, retest_time,
+                retested_high=zone.retested_high, retested_low=zone.retested_low,
+            ))
+            tracker.mark_htf_m1_retest_processed(symbol, timeframe, direction, zone.start_time)
+            tf_label = _TF_LABELS.get(timeframe, timeframe)
+            label = _DIRECTION_LABELS[direction]
+            print(f"[reversal_manager] {symbol}: (htf-m1) {tf_label} {label} zone retested -- "
+                  f"waiting for M1 confirmation")
+
+
+def _prune_mitigated_htf_m1_waiting(store: ZoneStore, tracker: ReversalTracker, symbol: str, direction: str) -> list:
+    """Copy of _prune_mitigated_waiting for the HTF-M1 mechanism's own
+    waiting list -- same live-incident reasoning (a mitigated zone left
+    sitting in the waiting list could otherwise "confirm" a setup that's
+    already gone from the real chart)."""
+    waiting = tracker.get_htf_m1_waiting(symbol, direction)
+    still_valid = [w for w in waiting if store.get(symbol, w.timeframe, direction, w.start_time) is not None]
+    if len(still_valid) != len(waiting):
+        tracker.set_htf_m1_waiting(symbol, direction, still_valid)
+        removed = len(waiting) - len(still_valid)
+        tf_labels = ", ".join(_TF_LABELS.get(w.timeframe, w.timeframe)
+                               for w in waiting if w not in still_valid)
+        print(f"[reversal_manager] {symbol}: (htf-m1) {removed} waiting {_DIRECTION_LABELS[direction]} zone(s) "
+              f"({tf_labels}) mitigated while waiting -- dropped, no longer eligible to confirm")
+    return still_valid
+
+
+def _atr_dual_flip_confirms(atr_store: AtrStore, symbol: str, timeframe: str,
+                             direction: str, after_time: float) -> Optional[Tuple[TVAtrState, TVAtrState]]:
+    """Both OBD_ATR.pine lines (period 2 AND period 300) must show
+    direction's own trend, each having flipped to it strictly after
+    after_time -- user's own rule: "we need a price flip on atr both
+    atr2,300... the above event needs to occur after the retest event of
+    HTF." AtrStore only ever holds a period's MOST RECENT reading, and
+    OBD_ATR.pine only fires a webhook event when that period's trend
+    actually flips (see pine/OBD_ATR.pine's own flipped_1/flipped_2
+    gates) -- so "this period's stored event_time is after after_time"
+    already means exactly "this period flipped after after_time," no
+    separate history needed. Returns (fast, slow) if both currently
+    confirm, else None -- callers use fast's own trail_stop for the
+    pullback-price calc (see _check_htf_m1) and max(fast.event_time,
+    slow.event_time) as the trade's own entry identity (the moment BOTH
+    were finally aligned, not just the first one)."""
+    wants_trend = 1 if direction == "bull" else -1
+    fast = atr_store.get(symbol, timeframe, _ATR_FAST_PERIOD)
+    slow = atr_store.get(symbol, timeframe, _ATR_SLOW_PERIOD)
+    if fast is None or slow is None:
+        return None
+    if fast.trend != wants_trend or slow.trend != wants_trend:
+        return None
+    if fast.event_time is None or slow.event_time is None:
+        return None
+    if fast.event_time <= after_time or slow.event_time <= after_time:
+        return None
+    return fast, slow
+
+
+def _htf_m1_sl(waiting: list, direction: str, buffer: float) -> Optional[float]:
+    """Retest-candle-based SL -- user's own rule: "sl is retest candle
+    high + buffer for sell trade, low-buffer for buy trade... its as per
+    retest time frame only... for example M15 retest event, refer m15
+    candle high/low respectively." Same multi-waiting-zone selection
+    reasoning as the original mechanism's own SL calc ("whichever zone is
+    at lowerside for buy trade decides sl, similarly whichever zone is
+    far from the price decides the sl for sell trade") -- furthest
+    retested_low for a buy, furthest retested_high for a sell, across
+    every zone currently in HTF-M1's own waiting list, not just whichever
+    one happened to trigger confirmation. Returns None if the deciding
+    zone has no retested_high/low at all (a webhook build from before
+    2026-08-25, or a retest that came through tv_scraper's own
+    Close-approximation path instead of the webhook path) -- callers must
+    NOT fall back to the OB's own top/btm silently; the whole point of
+    this rule is the real candle, not the zone boundary."""
+    candidates = [w for w in waiting if (w.retested_low if direction == "bull" else w.retested_high) is not None]
+    if not candidates:
+        return None
+    if direction == "bull":
+        zone = min(candidates, key=lambda w: w.retested_low)
+        return zone.retested_low - buffer
+    zone = max(candidates, key=lambda w: w.retested_high)
+    return zone.retested_high + buffer
+
+
+def _resolve_htf_m1_confirmation(store: ZoneStore, tracker: ReversalTracker, atr_store: AtrStore,
+                                  sym_cfg: SymbolConfig, direction: str,
+                                  quiet_no_waiting: bool = False) -> Optional[tuple]:
+    """The pure "is there a confirmed setup for this direction right now"
+    check -- waiting/invalidation/candidate-selection, everything EXCEPT
+    actually opening a trade (that differs between a fresh fire, handled
+    by _check_htf_m1, and a flip out of an already-open opposite trade,
+    handled by _check_htf_m1_flip -- see that function's own docstring
+    for why they need to share this instead of duplicating it). Returns
+    (waiting, gate_time, mode_value, entry_price, start_time, reason,
+    extra_log) on a genuine confirmation, else None.
+
+    quiet_no_waiting suppresses the "no waiting retests" early return's
+    otherwise-silent no-op -- irrelevant either way (both callers just
+    treat None as "nothing to do"), kept as a parameter only so a future
+    caller could distinguish "no HTF retest has even happened yet" from
+    "one happened but hasn't confirmed" if that's ever useful; unused for
+    now."""
+    symbol = sym_cfg.symbol
+    waiting = _prune_mitigated_htf_m1_waiting(store, tracker, symbol, direction)
+    if not waiting:
+        return None
+    gate_time = min(w.retest_time for w in waiting)
+    opposite = "bear" if direction == "bull" else "bull"
+
+    # Invalidation -- opposite OB on M3, M5, or M15 (NOT M1 -- M1 is the
+    # confirmation timeframe itself, an opposite OB there is normal
+    # noise, not an invalidation signal). User's own explicit correction:
+    # "invalidation strictly if m3, m5, or m15 ob, but not m1 ob." Applies
+    # equally whether this direction's own waiting setup is being
+    # evaluated for a fresh fire OR as a flip candidate against an
+    # already-open opposite trade -- either way, an opposite-to-THIS-
+    # direction OB scraps THIS direction's own wait.
+    for timeframe in ("3", "5", "15"):
+        zone = _newest_post_time_zone(store, symbol, timeframe, opposite, int(gate_time))
+        if zone is not None:
+            tracker.clear_htf_m1_waiting(symbol, direction)
+            tf_label = _TF_LABELS.get(timeframe, timeframe)
+            print(f"[reversal_manager] {symbol}: (htf-m1) opposite {_DIRECTION_LABELS[opposite]} OB on {tf_label} "
+                  f"while waiting -- {_DIRECTION_LABELS[direction]} setup invalidated, blocked until next retest")
+            return None
+
+    sl_buffer = entries.SYMBOL_SL_BUFFER.get(symbol)
+    if sl_buffer is None:
+        return None
+
+    current_price = _read_live_close(sym_cfg.live_state_file, symbol, "1")
+    if current_price is None:
+        return None
+
+    # Confirmation A: fresh M1 OB -- Reversal Manager's own EXISTING M1
+    # entry math (compute_reversal_confirm_entry, same config
+    # _check_direction's own M1 tier already uses), unchanged. User's
+    # explicit call, 2026-08-25, after being asked directly: keep
+    # Reversal Manager's own wider M1 thresholds here, not Trend
+    # Manager's narrower ones -- "same as per m1 ob as per trend manager"
+    # meant the same SHAPE of logic (fresh-OB-confirms, market-or-
+    # pullback), not literally Trend Manager's own numbers.
+    ob_candidate = None  # (mode_value, entry_price, distance, start_time, reason)
+    ob_zone = _newest_post_time_zone(store, symbol, "1", direction, int(gate_time))
+    if ob_zone is not None:
+        edge = entries.ob_edge(direction, ob_zone.top, ob_zone.btm)
+        plan = entries.compute_reversal_confirm_entry(symbol, "1", direction, edge, current_price)
+        if plan.mode != entries.EntryMode.NONE:
+            effective_entry = current_price if plan.mode == entries.EntryMode.MARKET else plan.entry_price
+            distance = 0.0 if plan.mode == entries.EntryMode.MARKET else abs(effective_entry - current_price)
+            ob_candidate = (plan.mode.value, effective_entry, distance, ob_zone.start_time, "M1 OB")
+
+    # Confirmation B: dual ATR flip (Line 1 period=2 AND Line 2
+    # period=300, both) -- PENDING order at a 45% pullback from the
+    # flip-moment price to Line 1's own trailing-stop value. User's own
+    # words: "record the price when atr flips, check price during the
+    # flip, see the atr trailing stop value, place an order at 45%
+    # pullback from detection price to trailing stop price." "Detection
+    # price" is read NOW (the moment this code observes both lines have
+    # flipped) -- TVAtrState carries no price field of its own to look
+    # back at, same "price at signal time" convention already used
+    # throughout this codebase (e.g. _check_direction_atr_or_ob's own
+    # current_price read).
+    atr_candidate = None  # (mode_value, entry_price, distance, start_time, reason, extra_log)
+    flip = _atr_dual_flip_confirms(atr_store, symbol, "1", direction, gate_time)
+    if flip is not None:
+        fast, slow = flip
+        pullback_price = current_price + _ATR_PULLBACK_FRACTION * (fast.trail_stop - current_price)
+        distance = abs(pullback_price - current_price)
+        start_time = int(max(fast.event_time, slow.event_time))
+        extra_log = f" (45% pullback from {current_price:.2f} to {fast.trail_stop:.2f})"
+        atr_candidate = ("PENDING", pullback_price, distance, start_time, "ATR dual-flip", extra_log)
+
+    if ob_candidate is None and atr_candidate is None:
+        return None
+
+    # Whichever gives the closer (earlier-to-fill) entry wins -- user's
+    # own explicit rule, 2026-08-25: "whichever gives early entry that
+    # should take... whichever has the best setup that wins." Same
+    # "closest distance wins" comparison _check_direction already uses
+    # when picking between its own M1/M3/M5 candidates -- a MARKET fire
+    # (distance 0.0 by construction) naturally always wins over any
+    # PENDING candidate, immediate beats waiting.
+    candidates = [c for c in (ob_candidate, atr_candidate) if c is not None]
+    mode_value, entry_price, _distance, start_time, reason, *extra = min(candidates, key=lambda c: c[2])
+    extra_log = extra[0] if extra else ""
+    return waiting, gate_time, mode_value, entry_price, start_time, reason, extra_log
+
+
+def _check_htf_m1(store: ZoneStore, tracker: ReversalTracker, atr_store: AtrStore,
+                   sym_cfg: SymbolConfig, direction: str) -> bool:
+    symbol = sym_cfg.symbol
+    resolved = _resolve_htf_m1_confirmation(store, tracker, atr_store, sym_cfg, direction)
+    if resolved is None:
+        return False
+    waiting, gate_time, mode_value, entry_price, start_time, reason, extra_log = resolved
+
+    sl_buffer = entries.SYMBOL_SL_BUFFER[symbol]
+    sl = _htf_m1_sl(waiting, direction, sl_buffer)
+    if sl is None:
+        print(f"[reversal_manager] {symbol}: (htf-m1) {reason} confirmed but no retest-candle "
+              f"high/low recorded for the deciding zone yet -- skipping until it is")
+        return False
+    sl = _apply_sl_cap(sym_cfg, direction, entry_price, sl)
+    status = "FILLED" if mode_value == "MARKET" else "PENDING"
+    opened_at = time.time() if mode_value == "MARKET" else 0.0
+    trade = ActiveReversalTrade(direction, "1", start_time, entry_price, sl, mode_value,
+                                 status=status, opened_at=opened_at, parent_timeframe=waiting[0].timeframe,
+                                 is_htf_m1=True, htf_m1_retest_time=gate_time)
+    tracker.open_trade(symbol, trade)
+    tracker.clear_htf_m1_waiting(symbol, direction)
+    label = _DIRECTION_LABELS[direction]
+    print(f"[reversal_manager] {symbol}: (htf-m1) {reason} confirmation -- REVERSAL TRADE {mode_value} "
+          f"{label} @ {entry_price:.2f}{extra_log} SL={sl:.2f} (not yet wired to MT5 -- signal only)")
+    return True
+
+
+def _check_htf_m1_flip(store: ZoneStore, tracker: ReversalTracker, atr_store: AtrStore,
+                        sym_cfg: SymbolConfig, active: ActiveReversalTrade) -> bool:
+    """While an htf-m1 trade is FILLED, keep watching the OPPOSITE
+    direction's own retest/confirmation -- otherwise it's completely
+    invisible (run_once_symbol only ever reaches _register_htf_m1_retests
+    / _check_htf_m1 when NO trade is active at all). User's explicit
+    rule, 2026-08-25: "if a reversal trade is active and if price hits
+    opposite side zone... trade shouldn't be closed unless the valid buy
+    setup found on opposite side... it should wait for valid
+    confirmation." A mere retest of the opposite zone does nothing by
+    itself (same as always -- retests only ever register a wait,
+    _resolve_htf_m1_confirmation's own invalidation/confirmation checks
+    are the only things that ever act on one); only once that opposite
+    setup gets a GENUINE M1 confirmation (OB or ATR dual-flip, exact same
+    resolution _check_htf_m1 itself uses) does anything happen: close the
+    current trade, open the new opposite one, same entry/SL math either
+    way. Never called for a PENDING htf-m1 trade -- same convention
+    _check_m5_flip already uses ("a still-PENDING reversal order has
+    nothing to flip out of yet"); the existing M5/M15 auto-close/cancel
+    rule (_close_if_htf_m1_invalidated) already covers a PENDING order's
+    only automatic exit."""
+    symbol = sym_cfg.symbol
+    opposite = "bear" if active.direction == "bull" else "bull"
+    resolved = _resolve_htf_m1_confirmation(store, tracker, atr_store, sym_cfg, opposite)
+    if resolved is None:
+        return False
+    waiting, gate_time, mode_value, entry_price, start_time, reason, extra_log = resolved
+
+    sl_buffer = entries.SYMBOL_SL_BUFFER[symbol]
+    sl = _htf_m1_sl(waiting, opposite, sl_buffer)
+    if sl is None:
+        print(f"[reversal_manager] {symbol}: (htf-m1) opposite {reason} confirmed while "
+              f"{_DIRECTION_LABELS[active.direction]} trade active, but no retest-candle high/low "
+              f"recorded for the deciding zone yet -- not flipping until it is")
+        return False
+    sl = _apply_sl_cap(sym_cfg, opposite, entry_price, sl)
+
+    tracker.close_trade(symbol)
+    status = "FILLED" if mode_value == "MARKET" else "PENDING"
+    opened_at = time.time() if mode_value == "MARKET" else 0.0
+    trade = ActiveReversalTrade(opposite, "1", start_time, entry_price, sl, mode_value,
+                                 status=status, opened_at=opened_at, parent_timeframe=waiting[0].timeframe,
+                                 is_htf_m1=True, htf_m1_retest_time=gate_time)
+    tracker.open_trade(symbol, trade)
+    tracker.clear_htf_m1_waiting(symbol, opposite)
+    old_label = _DIRECTION_LABELS[active.direction]
+    new_label = _DIRECTION_LABELS[opposite]
+    print(f"[reversal_manager] {symbol}: (htf-m1) opposite {reason} confirmation -- flipping {old_label} "
+          f"trade to {mode_value} {new_label} @ {entry_price:.2f}{extra_log} SL={sl:.2f} "
+          f"(not yet wired to MT5 -- signal only)")
+    return True
+
+
+def _close_if_htf_m1_invalidated(store: ZoneStore, tracker: ReversalTracker, symbol: str) -> bool:
+    """Only ever called for a trade with is_htf_m1=True (see
+    run_once_symbol) -- squares off a FILLED trade or cancels a PENDING
+    one (tracker.close_trade pops the active-trade slot either way;
+    Execution Bridge's own reconcile loop then does the right real-MT5
+    thing -- close a real position, or cancel a real pending order --
+    based on which kind it was actually tracking). Anchored to the
+    trade's OWN htf_m1_retest_time (the original retest event this setup
+    was armed from), not opened_at -- user's explicit rule applies this
+    "for as long as the setup is valid," which includes the whole waiting
+    period BEFORE a fill too, unlike the original mechanism's own
+    opposite-LTF-OB close rule (_close_if_opposite_ltf_ob), which only
+    ever starts counting from the real fill moment.
+
+    M5/M15 only (NOT M3) -- user's explicit correction 2026-08-25: "a
+    trade can only auto square off if a m5 or m15 opposite side ob
+    forms, else it either waits for sl, or sl trail, or until opposite
+    side trade gets the active setup." Deliberately narrower than the
+    pre-fire waiting-state invalidation just above (_check_htf_m1's own
+    M3/M5/M15 check, unchanged) -- an opposite M3 OB can still scrap a
+    setup that hasn't fired yet, but once a real trade is open (filled or
+    pending), only M5/M15 auto-close it; M3 alone is left for SL/
+    trailing to handle instead."""
+    trade = tracker.active_trade(symbol)
+    if trade is None or not trade.is_htf_m1 or trade.htf_m1_retest_time is None:
+        return False
+    opposite = "bear" if trade.direction == "bull" else "bull"
+    for timeframe in ("5", "15"):
+        zone = _newest_post_time_zone(store, symbol, timeframe, opposite, int(trade.htf_m1_retest_time))
+        if zone is not None:
+            tracker.close_trade(symbol)
+            tf_label = _TF_LABELS.get(timeframe, timeframe)
+            action = "closing" if trade.status == "FILLED" else "cancelling pending"
+            print(f"[reversal_manager] {symbol}: (htf-m1) opposite {_DIRECTION_LABELS[opposite]} OB formed on "
+                  f"{tf_label} -- {action} {_DIRECTION_LABELS[trade.direction]} trade")
+            return True
+    return False
+
+
 def _check_direction_atr_or_ob(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolConfig,
                                 direction: str) -> bool:
     """USOIL/USTEC's own LTF resolution -- user's explicit rule
@@ -777,12 +1174,36 @@ def run_once_symbol(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolC
     # rule instead of mitigation-close -- see _close_if_opposite_ltf_ob's
     # own docstring. BTCUSD/ETHUSD (parent_timeframes None) keep the
     # original mitigation-close behavior, unchanged.
-    if sym_cfg.parent_timeframes is not None:
+    # An HTF-M1 trade uses its own dedicated invalidation rule (opposite
+    # OB on M3/M5/M15 after the ORIGINAL retest, not the trade's own
+    # fill time) instead of either of the two below -- checked first
+    # since it can fire on a still-PENDING trade too, which the other two
+    # close rules don't handle at all.
+    active_before = tracker.active_trade(symbol)
+    if active_before is not None and active_before.is_htf_m1:
+        _close_if_htf_m1_invalidated(store, tracker, symbol)
+    elif sym_cfg.parent_timeframes is not None:
+        # XAUUSD (parent_timeframes set) uses the opposite-M1/M3-OB close
+        # rule instead of mitigation-close -- see _close_if_opposite_ltf_ob's
+        # own docstring. BTCUSD/ETHUSD (parent_timeframes None) keep the
+        # original mitigation-close behavior, unchanged.
         _close_if_opposite_ltf_ob(store, tracker, symbol)
     elif _close_if_invalidated(store, tracker, symbol):
         print(f"[reversal_manager] {symbol}: active trade's entry OB was mitigated -- treating as closed")
 
     _check_close_event(tracker, symbol, manual_events_file)
+
+    # HTF-M1's own retest registration runs unconditionally (not gated on
+    # active being None like the original mechanism's own
+    # _register_htf_retests below) -- otherwise the OPPOSITE direction's
+    # own retest/wait would be completely invisible while a trade is
+    # open, and _check_htf_m1_flip below would never have anything to
+    # find. Registering the SAME direction as an already-open trade too
+    # is harmless -- those entries just sit unused in the waiting list
+    # until the trade closes and the mechanism resumes fresh.
+    atr_store = AtrStore(sym_cfg.atr_state_file) if sym_cfg.htf_m1_enabled else None
+    if sym_cfg.htf_m1_enabled:
+        _register_htf_m1_retests(store, tracker, sym_cfg)
 
     active = tracker.active_trade(symbol)
 
@@ -791,8 +1212,16 @@ def run_once_symbol(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolC
     # previously never even evaluated while a trade was active). Only
     # for a FILLED trade -- a still-PENDING order has no real position
     # to flip out of yet.
-    if active is not None and active.status == "FILLED" and sym_cfg.parent_timeframes is not None:
+    if (active is not None and active.status == "FILLED" and not active.is_htf_m1
+            and sym_cfg.parent_timeframes is not None):
         if _check_m5_flip(store, tracker, sym_cfg, active):
+            active = tracker.active_trade(symbol)  # re-fetch -- now the new flipped trade
+
+    # HTF-M1's own flip -- same real gap, same fix, for the new
+    # mechanism's own confirmation instead of a bare M5 retest. See
+    # _check_htf_m1_flip's own docstring for the user's exact rule.
+    elif active is not None and active.status == "FILLED" and active.is_htf_m1:
+        if _check_htf_m1_flip(store, tracker, atr_store, sym_cfg, active):
             active = tracker.active_trade(symbol)  # re-fetch -- now the new flipped trade
 
     if active is not None:
@@ -813,6 +1242,16 @@ def run_once_symbol(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolC
     for direction in ("bull", "bear"):
         if check_fn(store, tracker, sym_cfg, direction):
             return
+
+    # HTF-M1 mechanism's own fresh-fire check -- fully independent watch,
+    # runs regardless of whether the original mechanism above found
+    # anything this cycle. Retest registration already happened above
+    # (unconditionally, before the active-trade gate) -- only the
+    # confirmation check itself needs to wait until active is None.
+    if sym_cfg.htf_m1_enabled:
+        for direction in ("bull", "bear"):
+            if _check_htf_m1(store, tracker, atr_store, sym_cfg, direction):
+                return
 
 
 def run_once(cfg: Config, tracker: ReversalTracker) -> None:

@@ -85,6 +85,14 @@ class SymbolConfig:
     # finds anything and no-ops every cycle.
     atr_confirm_timeframe: Optional[str] = None
     atr_state_file: Optional[str] = None
+    # Enables the second, independent HTF-retest -> M1-only-confirm
+    # mechanism (see reversal_manager.py's own docstring for the full
+    # rule) -- XAUUSD only for now, added 2026-08-25. User's own words:
+    # "this is only for xauusd... once we are done with this we will move
+    # to other instruments as well" -- each symbol will get its OWN
+    # buffer/threshold values when it's that symbol's turn, so this stays
+    # a per-symbol opt-in rather than a blanket toggle.
+    htf_m1_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,6 +126,13 @@ def load_config() -> Config:
                 ltf_timeframes=("1", "3", "5"),
                 parent_timeframes=("5", "15"),
                 max_sl_points=20.0,
+                htf_m1_enabled=True,
+                # Needed for the HTF-M1 mechanism's own dual-ATR-flip
+                # confirmation check (Line 1/period=2 AND Line 2/
+                # period=300 on M1) -- same shared webhook ATR file every
+                # other symbol's own atr_confirm_timeframe usage already
+                # points at, not a separate file.
+                atr_state_file=tv_atr_file,
             ),
             SymbolConfig(
                 "BTCUSD",
