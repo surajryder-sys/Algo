@@ -163,8 +163,9 @@ _TF_LABELS = {"240": "H4", "120": "H2", "60": "H1", "30": "M30", "15": "M15", "5
 @dataclass(frozen=True)
 class TrendReading:
     symbol: str
-    structure: Optional[str]    # "bullish" / "bearish" / None (no M15 data yet)
-    short_term: Optional[str]   # "bullish" / "bearish" / None (no M5 data yet)
+    structure: Optional[str]        # "bullish" / "bearish" / None (no M15 data yet)
+    short_term: Optional[str]       # "bullish" / "bearish" / None (no data yet on short_term_timeframe)
+    short_term_timeframe: str       # which timeframe short_term actually came from -- see compute()
 
 
 def _formation_trusted(zone: TVZone) -> bool:
@@ -202,18 +203,33 @@ def _most_recent_direction(store: ZoneStore, symbol: str, timeframe: str) -> Opt
     return _DIRECTION_LABELS[best_direction]
 
 
-def compute(store: ZoneStore, symbol: str) -> TrendReading:
+def compute(store: ZoneStore, sym_cfg: SymbolConfig) -> TrendReading:
+    # "Short term" reads M5 for every symbol by default (the original
+    # 2026-08-17 rule) -- but USOIL/USTEC's shared scraper window has NO
+    # M5 pane at all (H1/M30/M15/M3 only), so a fixed M5 lookup can only
+    # ever return None for them, permanently, regardless of real market
+    # activity. User's correction 2026-08-25: "we changed usoil and
+    # ustec panes to m3 for executions" -- M3 is their real fast/
+    # short-term timeframe (already tracked separately as
+    # atr_confirm_timeframe, USOIL/USTEC's own M3-only execution
+    # mechanism marker), so reuse that same field here rather than adding
+    # a new one: when set, it doubles as "the short-term timeframe this
+    # symbol actually has," falling back to M5 for every other symbol
+    # (atr_confirm_timeframe is None for them, unchanged).
+    short_term_timeframe = sym_cfg.atr_confirm_timeframe or _M5
     return TrendReading(
-        symbol=symbol,
-        structure=_most_recent_direction(store, symbol, _M15),
-        short_term=_most_recent_direction(store, symbol, _M5),
+        symbol=sym_cfg.symbol,
+        structure=_most_recent_direction(store, sym_cfg.symbol, _M15),
+        short_term=_most_recent_direction(store, sym_cfg.symbol, short_term_timeframe),
+        short_term_timeframe=short_term_timeframe,
     )
 
 
 def _format_reading(reading: TrendReading) -> str:
     structure = reading.structure or "none"
     short_term = reading.short_term or "none"
-    return f"{reading.symbol}: Structure {structure}, Short term {short_term}"
+    tf_label = _TF_LABELS.get(reading.short_term_timeframe, reading.short_term_timeframe)
+    return f"{reading.symbol}: Structure {structure}, Short term ({tf_label}) {short_term}"
 
 
 # ---------------------------------------------------------------------------
@@ -686,7 +702,7 @@ def run_once(cfg: Config, tracker: TradeTracker) -> list[TrendReading]:
     readings = []
     for sym_cfg in cfg.symbols:
         store = ZoneStore(sym_cfg.zone_state_file)
-        reading = compute(store, sym_cfg.symbol)
+        reading = compute(store, sym_cfg)
         readings.append(reading)
         print(f"[trend_manager] {_format_reading(reading)}")
         _run_trade_logic(store, tracker, sym_cfg, cfg.manual_events_file)
