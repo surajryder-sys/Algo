@@ -340,15 +340,37 @@ def _fire_m5_immediate(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symb
             # (bull's own first-contact edge is the zone top, bear's is
             # the zone bottom).
             edge = entries.ob_edge(direction, zone.top, zone.btm)
+
+            # Classify limit-side vs stop-side against current price --
+            # same test broker.py's own send_pending_order uses to pick
+            # BUY_LIMIT/BUY_STOP -- so the PENDING-fill check below
+            # (_price_crossed via pending_stop_style) tests the correct
+            # direction. Real bug fixed 2026-08-26: the zone's own edge
+            # can legitimately sit on EITHER side of current price here
+            # (unlike every other PENDING path in this module, which
+            # always naturally lands on the limit side) -- price has
+            # already retested this zone by construction, so it may
+            # already have retraced past the far edge by the time this
+            # fires. See ActiveReversalTrade.pending_stop_style's own
+            # docstring for the full incident. Skips firing entirely
+            # (retries next poll) if live price is momentarily
+            # unavailable -- never guess a classification.
+            current_price = _read_live_close(sym_cfg.live_state_file, symbol, "5")
+            if current_price is None:
+                continue
+            stop_style = (edge >= current_price) if direction == "bull" else (edge <= current_price)
+
             sl = entries.initial_sl(symbol, "5", direction, zone.top, zone.btm)
             sl = _apply_sl_cap(sym_cfg, direction, edge, sl)
             trade = ActiveReversalTrade(direction, "5", zone.start_time, edge, sl, "PENDING",
-                                         status="PENDING", opened_at=time.time(), parent_timeframe="5")
+                                         status="PENDING", opened_at=time.time(), parent_timeframe="5",
+                                         pending_stop_style=stop_style)
             tracker.open_trade(symbol, trade)
             tracker.mark_retest_processed(symbol, "5", direction, zone.start_time)
             label = _DIRECTION_LABELS[direction]
+            style_label = "stop-side" if stop_style else "limit-side"
             print(f"[reversal_manager] {symbol}: M5 {label} zone retested, both parents agree -- "
-                  f"REVERSAL TRADE PENDING limit @ {edge:.2f} (zone edge) SL={sl:.2f} "
+                  f"REVERSAL TRADE PENDING ({style_label}) @ {edge:.2f} (zone edge) SL={sl:.2f} "
                   f"(not yet wired to MT5 -- signal only)")
             return True
 
@@ -1170,10 +1192,16 @@ def _close_if_opposite_ltf_ob(store: ZoneStore, tracker: ReversalTracker, symbol
     return False
 
 
-def _price_crossed(direction: str, entry_price: float, current_price: float) -> bool:
-    """Same convention as trade_tracker's own -- a PENDING retracement
-    entry sits below current price at proposal time for a buy (price
-    must fall to reach it), above for a sell."""
+def _price_crossed(direction: str, entry_price: float, current_price: float, stop_style: bool = False) -> bool:
+    """Same convention as trade_tracker's own by default (stop_style=
+    False) -- a PENDING retracement entry sits below current price at
+    proposal time for a buy (price must fall to reach it), above for a
+    sell. stop_style=True inverts this for a PENDING entry that instead
+    sits on the STOP side of current price (see ActiveReversalTrade.
+    pending_stop_style's own docstring for the real bug this fixes) --
+    a buy needs price to RISE to reach it, a sell needs it to FALL."""
+    if stop_style:
+        return current_price >= entry_price if direction == "bull" else current_price <= entry_price
     return current_price <= entry_price if direction == "bull" else current_price >= entry_price
 
 
@@ -1260,7 +1288,8 @@ def run_once_symbol(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolC
     if active is not None:
         if active.status == "PENDING":
             current_price = _read_live_close(sym_cfg.live_state_file, symbol, active.entry_timeframe)
-            if current_price is not None and _price_crossed(active.direction, active.entry_price, current_price):
+            if current_price is not None and _price_crossed(active.direction, active.entry_price, current_price,
+                                                              active.pending_stop_style):
                 tracker.mark_filled(symbol)
                 print(f"[reversal_manager] {symbol}: REVERSAL TRADE FILLED (pending reached) "
                       f"@ {active.entry_price:.2f}")

@@ -150,6 +150,29 @@ class ActiveReversalTrade:
     # timeframe (M1) from invalidation entirely instead.
     htf_m1_double_ob_count: int = 0
     htf_m1_double_ob_last_start_time: Optional[int] = None
+    # Whether this PENDING trade's entry_price sits on the STOP side of
+    # current price (bull: entry >= price at proposal time, needs price
+    # to RISE to reach it -- same test broker.py's own send_pending_
+    # order uses to pick BUY_STOP over BUY_LIMIT) rather than the LIMIT
+    # side (entry below current price for a bull, needs price to FALL
+    # to reach it). Added 2026-08-26, real bug fix: every PENDING entry
+    # before _fire_m5_immediate's own zone-edge direct-fire (2026-08-26)
+    # always naturally landed on the limit side by construction (a
+    # pullback-from-current-price calculation, or an OB edge price
+    # already passed to reach that has already rallied away from it) --
+    # _price_crossed's own "bull entries sit below current price"
+    # assumption held for every one of them. A zone-edge order doesn't:
+    # since the zone was JUST retested (price already touched/passed
+    # through it), the zone's own far edge can easily sit ABOVE current
+    # price for a bull, needing a real BUY_STOP -- confirmed live, the
+    # very first XAUUSD M5 direct-fire under the new rule got marked
+    # FILLED by the signal side within one poll of being placed, even
+    # though the real MT5 order was still a resting, untriggered stop
+    # (current price was already below the zone's own top edge at
+    # placement time). False (the original, still-correct assumption)
+    # for every other PENDING path in this module -- only
+    # _fire_m5_immediate's own direct-fire ever sets this True.
+    pending_stop_style: bool = False
 
 
 class ReversalTracker:
