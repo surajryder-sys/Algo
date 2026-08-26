@@ -176,13 +176,11 @@ def load_config() -> Config:
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_BREAKEVEN_POINTS", "15")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_START_POINTS", "15")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_STEP_POINTS", "5")),
-                # "30+ points 50% close, another 20+ points 25% close"
-                # (2026-08-26) -- both absolute from entry (user's own
-                # clarification), so the 25% tier's 20pts is LOWER than
-                # the 50% tier's 30pts and fires first in practice; kept
-                # here in ascending-points order regardless of which
-                # order the user listed the percentages in.
-                partial_tiers=((20.0, 0.25), (30.0, 0.5)),
+                # 30pts -> 50%, 40pts -> 25%, remaining 25% to the
+                # manager (2026-08-26, superseding an earlier ambiguous
+                # 20/30 pair from the same day -- this is the user's own
+                # corrected, unambiguous table).
+                partial_tiers=((30.0, 0.5), (40.0, 0.25)),
             ),
             # USOIL/USTEC (added 2026-08-20) -- user's explicit values:
             # "initial sl as per parent ob, then as per point trailing
@@ -198,27 +196,27 @@ def load_config() -> Config:
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_USOIL_BREAKEVEN_POINTS", "0.600")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_USOIL_TRAIL_START_POINTS", "0.600")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_USOIL_TRAIL_STEP_POINTS", "0.600")),
-                # "2.0 points 50% close, another 1.0 points 25% close,
-                # remaining sl manager" (2026-08-26) -- both absolute
-                # from entry, so 1.0 fires before 2.0 in practice.
-                partial_tiers=((1.0, 0.25), (2.0, 0.5)),
+                # 2.0pts -> 50%, 3.0pts -> 25%, remaining 25% to the
+                # manager (2026-08-26, superseding an earlier ambiguous
+                # 1.0/2.0 pair from the same day -- this is the user's
+                # own corrected, unambiguous table).
+                partial_tiers=((2.0, 0.5), (3.0, 0.25)),
             ),
             SymbolConfig(
                 "USTEC", float(os.getenv("EXECUTION_BRIDGE_USTEC_LOTS", "0.20")),
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_BREAKEVEN_POINTS", "150")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_TRAIL_START_POINTS", "150")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_TRAIL_STEP_POINTS", "100")),
-                # "200 points 50% close, 100 points 25% close, remaining
-                # 25% manager" (2026-08-26) -- both absolute from entry,
-                # so 100 fires before 200 in practice. Note this tier's
-                # own 100pt trigger is BELOW Stoploss Manager's own
-                # 150pt breakeven_points -- exit_manager's own
-                # breakeven-on-first-tier move is what actually reaches
-                # breakeven first for USTEC specifically, ahead of
-                # Stoploss Manager's native trigger (harmless either
-                # way -- both only ever move SL in the favorable
-                # direction, never backward).
-                partial_tiers=((100.0, 0.25), (200.0, 0.5)),
+                # 200pts -> 50%, 300pts -> 25%, remaining 25% to the
+                # manager (2026-08-26, superseding an earlier ambiguous
+                # 100/200 pair from the same day -- this is the user's
+                # own corrected, unambiguous table). Both now sit above
+                # Stoploss Manager's own 150pt breakeven_points, so its
+                # native trigger reaches breakeven first for USTEC
+                # (unlike the earlier 100/200 pair) -- harmless either
+                # way, both only ever move SL in the favorable
+                # direction, never backward.
+                partial_tiers=((200.0, 0.5), (300.0, 0.25)),
             ),
         ],
     )
