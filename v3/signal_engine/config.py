@@ -35,9 +35,11 @@ class SymbolConfig:
     # 2026-08-22 -- see trigger_timeframes below), not the full M5/M3/M1
     # set XAUUSD has, so everything shifts one tier up.
     # Was a fixed 2-tuple until USOIL/USTEC (2026-08-19), whose own
-    # parent scheme is three-wide (1h/30m/15m) rather than two --
-    # _best_parent_candidate/_newest_eligible_start_time already just
-    # iterate this, so widening the type is the only change needed.
+    # parent scheme is wider than two -- _best_parent_candidate/
+    # _newest_eligible_start_time already just iterate this, so
+    # widening the type is the only change needed. USOIL/USTEC raised
+    # from three-wide (1h/30m/15m) to four-wide (4h/1h/30m/15m)
+    # 2026-08-26 ("ustec 4h, 1h, 30m, 15m... same with usoil as well").
     parent_timeframes: Tuple[str, ...]
     # Pure execution triggers -- never get their own watermark, just
     # need ANY confirmed OB in the parent's direction to fire. XAUUSD:
@@ -47,21 +49,31 @@ class SymbolConfig:
     # BTCUSD/ETHUSD's actual bottom chart pane from M5 to M3, "change it
     # to m3 everywhere"; the old M5 bucket is now stale and will get
     # cleaned up by the orphan-reconciliation fix in scraper.py since
-    # nothing writes to it anymore). USOIL/USTEC: M3 only.
+    # nothing writes to it anymore). USOIL/USTEC: M3-only until
+    # 2026-08-26, when the user moved both execution timeframes to
+    # M30+M15 ("30m and 15m can do executions") and dropped M3 from
+    # their own tv_scraper chart/alerts entirely -- see
+    # _try_fire_entry_atr_or_ob's own docstring for the firing-side
+    # generalization this needed.
     trigger_timeframes: Tuple[str, ...]
     # Set only for USOIL/USTEC (2026-08-19, user's explicit rule) --
-    # when present, _try_fire_entry uses a DIFFERENT firing mechanism
-    # entirely: instead of the pullback/market distance math every other
-    # symbol uses, it fires a MARKET order the instant EITHER a fresh OB
-    # forms on this timeframe (matching bias direction) OR this
-    # timeframe's own ATR trend flips to match bias direction --
-    # whichever happens first ("m3 is the only execution timeframe...
-    # fresh ob's trend manager will trade, based on the confirmation of
-    # atr in m3... also ATR flip or a fresh ob on m3, whichever confirms
-    # first... fresh ob on m3 also market entry, as its lower time
-    # frame... or ATR flip also market entry"). None (default) keeps
-    # every existing symbol on the original pullback-distance mechanism,
-    # untouched.
+    # when present, _try_fire_entry_atr_or_ob (not the default
+    # _try_fire_entry) uses a DIFFERENT firing mechanism entirely:
+    # instead of the pullback/market distance math every other symbol
+    # uses, it fires a MARKET order the instant EITHER a fresh OB forms
+    # on ANY of trigger_timeframes above (matching bias direction) OR
+    # THIS one timeframe's own ATR trend flips to match bias direction
+    # -- whichever happens first ("m3 is the only execution
+    # timeframe... fresh ob's trend manager will trade, based on the
+    # confirmation of atr in m3... also ATR flip or a fresh ob on m3,
+    # whichever confirms first... fresh ob on m3 also market entry, as
+    # its lower time frame... or ATR flip also market entry" -- the
+    # ORIGINAL 2026-08-19 quote, back when M3 was the only trigger
+    # timeframe and this field and trigger_timeframes were the same
+    # single value; moved to M15 2026-08-26 alongside the trigger_
+    # timeframes widening above, same "lower/faster of the two" role).
+    # None (default) keeps every other symbol on the original
+    # pullback-distance mechanism, untouched.
     atr_confirm_timeframe: Optional[str] = None
     # Where to read this symbol's ATR trend/event_time from (AtrStore) --
     # only needed when atr_confirm_timeframe is set. Shares the SAME
