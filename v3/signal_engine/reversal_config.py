@@ -95,6 +95,20 @@ class HtfM1Config:
     atr_fast_period: str = "2"
     atr_slow_period: str = "300"
     pullback_fraction: float = 0.45
+    # When set, SL for a confirmed HTF-M1 trade comes from the HTF
+    # retest zone itself instead of the confirmation (M1 OB's own edge
+    # or the ATR trail stop) -- user's own correction, 2026-08-26,
+    # replacing that "SL from the confirmation" rule entirely for this
+    # symbol. Value is the zone-size threshold (this symbol's own point
+    # scale): a waiting zone no wider than this uses its own opposite
+    # edge + sl_buffer (same shape as everywhere else); wider than this
+    # uses the zone's own CENTER point + sl_buffer instead, so an
+    # unusually wide HTF zone doesn't produce an excessively wide stop.
+    # See reversal_manager._htf_m1_zone_sl for the exact selection logic
+    # among multiple simultaneously-waiting zones. None (default) keeps
+    # the original confirmation-based SL rule -- XAUUSD only for now
+    # (7.0, its own point scale); BTCUSD/ETHUSD left unset.
+    sl_zone_center_threshold: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +220,11 @@ def load_config() -> Config:
                     waiting_invalidation=HtfM1InvalidationRule(single_ob_timeframes=("3", "5", "15")),
                     active_invalidation=HtfM1InvalidationRule(single_ob_timeframes=("5", "15")),
                     sl_buffer=2.0,  # dedicated, NOT SYMBOL_SL_BUFFER's shared 1.0 -- user's explicit call
+                    # SL now comes from the HTF zone itself, not the
+                    # confirmation -- 2026-08-26, user's own correction
+                    # (see HtfM1Config.sl_zone_center_threshold's own
+                    # docstring). 7.0 = XAUUSD's own point scale.
+                    sl_zone_center_threshold=7.0,
                 ),
             ),
             SymbolConfig(

@@ -128,7 +128,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from v3.execution_bridge import manual_events
 from v3.signal_engine import entries, reversal_config
@@ -672,6 +672,35 @@ def _count_new_opposite_obs(store: ZoneStore, record_fn, symbol: str, direction:
     return (current_count + len(new_sightings)) >= 2
 
 
+def _htf_m1_zone_sl(waiting: List[WaitingRetest], direction: str, sl_buffer: float,
+                     center_threshold: float) -> float:
+    """SL from the HTF retest zone itself, used when sym_cfg.htf_m1.
+    sl_zone_center_threshold is set -- replaces "SL from the
+    confirmation" for that symbol entirely (see that field's own
+    docstring). Among every zone currently waiting for this direction
+    (more than one HTF timeframe can be waiting at once), picks the
+    most conservative one first -- same selection _check_direction's
+    own multi-waiting-zone SL logic already uses (min btm for a bull,
+    max top for a bear). Then:
+    - zone size (top - btm) <= center_threshold: SL = that zone's own
+      opposite edge (btm for bull, top for bear) minus/plus buffer --
+      same "zone plus buffer" shape used everywhere else in this system
+      (entries.initial_sl).
+    - zone size > center_threshold: SL = that zone's own CENTER point
+      instead, minus/plus buffer -- user's own rule, 2026-08-26: a wide
+      HTF zone's outer edge makes for an excessively wide stop once the
+      zone crosses this width, so use the midpoint instead."""
+    if direction == "bull":
+        zone = min(waiting, key=lambda w: w.btm)
+        size = zone.top - zone.btm
+        base = zone.btm if size <= center_threshold else (zone.top + zone.btm) / 2
+        return base - sl_buffer
+    zone = max(waiting, key=lambda w: w.top)
+    size = zone.top - zone.btm
+    base = zone.top if size <= center_threshold else (zone.top + zone.btm) / 2
+    return base + sl_buffer
+
+
 def _resolve_htf_m1_confirmation(store: ZoneStore, tracker: ReversalTracker, atr_store: AtrStore,
                                   sym_cfg: SymbolConfig, direction: str) -> Optional[tuple]:
     """The pure "is there a confirmed setup for this direction right now"
@@ -683,13 +712,21 @@ def _resolve_htf_m1_confirmation(store: ZoneStore, tracker: ReversalTracker, atr
     it). Returns (waiting, gate_time, mode_value, entry_price, sl,
     start_time, reason, extra_log) on a genuine confirmation, else None.
 
-    SL comes from the CONFIRMATION itself, not the retest -- user's own
-    simplification, 2026-08-25 (dropped an earlier retest-candle-high/low
-    based version, one build prior, as unneeded complexity): the M1 OB
-    path uses that OB's own opposite edge + buffer (entries.initial_sl,
-    same "zone plus buffer" shape used everywhere else in this system);
-    the ATR path uses Line 1's own trailing-stop value +/- buffer
-    (matching direction -- above price for a sell, below for a buy)."""
+    SL comes from the CONFIRMATION itself by default, not the retest --
+    user's own simplification, 2026-08-25 (dropped an earlier
+    retest-candle-high/low based version, one build prior, as unneeded
+    complexity): the M1 OB path uses that OB's own opposite edge +
+    buffer (entries.initial_sl, same "zone plus buffer" shape used
+    everywhere else in this system); the ATR path uses Line 1's own
+    trailing-stop value +/- buffer (matching direction -- above price
+    for a sell, below for a buy).
+
+    Overridden entirely for a symbol whose htf_m1.sl_zone_center_
+    threshold is set (XAUUSD, 2026-08-26) -- SL then comes from the HTF
+    retest zone itself instead (_htf_m1_zone_sl), regardless of which
+    confirmation actually fired; entry price/mode selection above is
+    unaffected, only the SL value changes. See that function's own
+    docstring for the exact edge-vs-center logic."""
     symbol = sym_cfg.symbol
     htf_m1 = sym_cfg.htf_m1
     confirm_tf = htf_m1.confirm_timeframe
@@ -800,6 +837,8 @@ def _resolve_htf_m1_confirmation(store: ZoneStore, tracker: ReversalTracker, atr
     candidates = [c for c in (ob_candidate, atr_candidate) if c is not None]
     mode_value, entry_price, _distance, start_time, reason, sl, *extra = min(candidates, key=lambda c: c[2])
     extra_log = extra[0] if extra else ""
+    if htf_m1.sl_zone_center_threshold is not None:
+        sl = _htf_m1_zone_sl(waiting, direction, sl_buffer, htf_m1.sl_zone_center_threshold)
     sl = _apply_sl_cap(sym_cfg, direction, entry_price, sl)
     return waiting, gate_time, mode_value, entry_price, sl, start_time, reason, extra_log
 
