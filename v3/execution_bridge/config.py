@@ -192,7 +192,14 @@ def load_config() -> Config:
             # explicitly interim -- "will modify later according to
             # market movements".
             SymbolConfig(
-                "USOIL", float(os.getenv("EXECUTION_BRIDGE_USOIL_LOTS", "0.02")),
+                # Lots raised 0.02 -> 0.04, 2026-08-26 -- user's explicit
+                # call, specifically so its partial-booking tiers land on
+                # the same clean absolute amounts as XAUUSD's own (0.04
+                # lots, 50%/25% -> 0.02/0.01). This is the symbol's own
+                # EXECUTION lot size, not scoped to partial booking alone
+                # -- every new USOIL entry (Trend or Reversal Manager)
+                # places 0.04 lots from here on, not just the tiers below.
+                "USOIL", float(os.getenv("EXECUTION_BRIDGE_USOIL_LOTS", "0.04")),
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_USOIL_BREAKEVEN_POINTS", "0.600")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_USOIL_TRAIL_START_POINTS", "0.600")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_USOIL_TRAIL_STEP_POINTS", "0.600")),
@@ -203,7 +210,14 @@ def load_config() -> Config:
                 partial_tiers=((2.0, 0.5), (3.0, 0.25)),
             ),
             SymbolConfig(
-                "USTEC", float(os.getenv("EXECUTION_BRIDGE_USTEC_LOTS", "0.20")),
+                # Lots raised 0.20 -> 1.0, 2026-08-26 -- user's explicit
+                # call, specifically so its partial-booking tiers land on
+                # clean amounts (50%/25% -> 0.50/0.25 lots, "follow
+                # closure 50%-0.50, 0.25 closure on 25%"). Same scope
+                # note as USOIL above -- this is the symbol's own
+                # EXECUTION lot size, a 5x increase from before, not
+                # limited to partial booking alone.
+                "USTEC", float(os.getenv("EXECUTION_BRIDGE_USTEC_LOTS", "1.0")),
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_BREAKEVEN_POINTS", "150")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_TRAIL_START_POINTS", "150")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_TRAIL_STEP_POINTS", "100")),
