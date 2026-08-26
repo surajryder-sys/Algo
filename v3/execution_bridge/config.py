@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -43,6 +43,25 @@ class SymbolConfig:
     breakeven_points: float
     trail_start_points: float
     trail_step_points: float
+    # Exit Manager's own points-based partial-booking tiers -- user's
+    # rule 2026-08-26, given per symbol directly ("XAUUSD 50% at 10
+    # points, another 25% at 20 points from entry, remaining 25% is
+    # left for sl trail manager or bias exit" and so on for the other
+    # four). Each (points, fraction) pair is absolute distance from
+    # entry (favor points, same convention as Stoploss Manager's own
+    # breakeven_points/trail_start_points) and the FRACTION of the
+    # symbol's own fixed `lots` above to close at that point -- not a
+    # fraction of whatever volume remains, so tier fractions across a
+    # symbol's whole tuple plus whatever's left for Stoploss Manager's
+    # own trailing always sum to 1.0. Sorted ascending by points so
+    # exit_manager.py can fire them in the order price actually reaches
+    # them, regardless of which order the user listed them in (e.g.
+    # ETHUSD's own "50% close" tier is a LARGER point value than its
+    # "25% close" tier, so the 25% one fires first in practice). Empty
+    # tuple (none configured) means no partial booking for that symbol
+    # -- position rides entirely on Stoploss Manager's own trailing,
+    # the original/default behavior.
+    partial_tiers: Tuple[Tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -53,6 +72,7 @@ class SourceConfig:
     decision_state_file: str  # the Manager's own state file (read-only)
     order_state_file: str     # Execution Bridge's own tracking for this source
     sl_state_file: str        # Stoploss Manager's own trailing state for this source
+    exit_state_file: str      # Exit Manager's own partial-booking state for this source
     # Where a REAL manual cancel/close gets relayed back to this
     # source's own Manager (see manual_events.py) -- None for sources
     # that don't have that feedback loop wired up yet (Reversal
@@ -96,6 +116,7 @@ def load_config() -> Config:
                 decision_state_file=os.getenv("SIGNAL_ENGINE_TRADE_STATE_FILE", "trend_manager_trade_state.json"),
                 order_state_file=os.getenv("EXECUTION_BRIDGE_ORDER_STATE_FILE", "execution_bridge_orders.json"),
                 sl_state_file=os.getenv("EXECUTION_BRIDGE_SL_STATE_FILE", "execution_bridge_sl_state.json"),
+                exit_state_file=os.getenv("EXECUTION_BRIDGE_EXIT_STATE_FILE", "execution_bridge_exit_state.json"),
                 manual_events_file=os.getenv("EXECUTION_BRIDGE_MANUAL_EVENTS_FILE", "execution_bridge_manual_events.json"),
             ),
             SourceConfig(
@@ -107,6 +128,8 @@ def load_config() -> Config:
                                             "execution_bridge_orders_reversal.json"),
                 sl_state_file=os.getenv("EXECUTION_BRIDGE_REVERSAL_SL_STATE_FILE",
                                          "execution_bridge_sl_state_reversal.json"),
+                exit_state_file=os.getenv("EXECUTION_BRIDGE_REVERSAL_EXIT_STATE_FILE",
+                                           "execution_bridge_exit_state_reversal.json"),
                 # Confirmed live 2026-08-18: without this, a real SL hit
                 # on a Reversal Manager position left its own state
                 # showing FILLED forever, so Execution Bridge kept
@@ -123,6 +146,11 @@ def load_config() -> Config:
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_XAUUSD_BREAKEVEN_POINTS", "7")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_XAUUSD_TRAIL_START_POINTS", "10")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_XAUUSD_TRAIL_STEP_POINTS", "2")),
+                # Partial-booking tiers, user's rule 2026-08-26: "50% at
+                # 10 points, another 25% at 20 points from entry,
+                # remaining 25% is left for sl trail manager or bias
+                # exit." Already ascending by points.
+                partial_tiers=((10.0, 0.5), (20.0, 0.25)),
             ),
             # BTCUSD/ETHUSD trailing -- user's explicit values 2026-08-18
             # ("SL Trailing for ETHUSD is 15 points up, put at cost, from
@@ -139,12 +167,22 @@ def load_config() -> Config:
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_BREAKEVEN_POINTS", "300")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_TRAIL_START_POINTS", "300")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_TRAIL_STEP_POINTS", "150")),
+                # "900+ points 50% close, another 25% at 1500 points from
+                # entry, 25% for the manager" (2026-08-26).
+                partial_tiers=((900.0, 0.5), (1500.0, 0.25)),
             ),
             SymbolConfig(
                 "ETHUSD", float(os.getenv("EXECUTION_BRIDGE_ETHUSD_LOTS", "1.0")),
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_BREAKEVEN_POINTS", "15")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_START_POINTS", "15")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_ETHUSD_TRAIL_STEP_POINTS", "5")),
+                # "30+ points 50% close, another 20+ points 25% close"
+                # (2026-08-26) -- both absolute from entry (user's own
+                # clarification), so the 25% tier's 20pts is LOWER than
+                # the 50% tier's 30pts and fires first in practice; kept
+                # here in ascending-points order regardless of which
+                # order the user listed the percentages in.
+                partial_tiers=((20.0, 0.25), (30.0, 0.5)),
             ),
             # USOIL/USTEC (added 2026-08-20) -- user's explicit values:
             # "initial sl as per parent ob, then as per point trailing
@@ -160,12 +198,27 @@ def load_config() -> Config:
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_USOIL_BREAKEVEN_POINTS", "0.600")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_USOIL_TRAIL_START_POINTS", "0.600")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_USOIL_TRAIL_STEP_POINTS", "0.600")),
+                # "2.0 points 50% close, another 1.0 points 25% close,
+                # remaining sl manager" (2026-08-26) -- both absolute
+                # from entry, so 1.0 fires before 2.0 in practice.
+                partial_tiers=((1.0, 0.25), (2.0, 0.5)),
             ),
             SymbolConfig(
                 "USTEC", float(os.getenv("EXECUTION_BRIDGE_USTEC_LOTS", "0.20")),
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_BREAKEVEN_POINTS", "150")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_TRAIL_START_POINTS", "150")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_TRAIL_STEP_POINTS", "100")),
+                # "200 points 50% close, 100 points 25% close, remaining
+                # 25% manager" (2026-08-26) -- both absolute from entry,
+                # so 100 fires before 200 in practice. Note this tier's
+                # own 100pt trigger is BELOW Stoploss Manager's own
+                # 150pt breakeven_points -- exit_manager's own
+                # breakeven-on-first-tier move is what actually reaches
+                # breakeven first for USTEC specifically, ahead of
+                # Stoploss Manager's native trigger (harmless either
+                # way -- both only ever move SL in the favorable
+                # direction, never backward).
+                partial_tiers=((100.0, 0.25), (200.0, 0.5)),
             ),
         ],
     )

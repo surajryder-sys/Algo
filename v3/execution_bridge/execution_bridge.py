@@ -70,8 +70,9 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from v3.execution_bridge import broker, intervention, manual_events, stoploss_manager
+from v3.execution_bridge import broker, exit_manager, intervention, manual_events, stoploss_manager
 from v3.execution_bridge.config import Config, SourceConfig, SymbolConfig, load_config
+from v3.execution_bridge.exit_state import ExitStateStore
 from v3.execution_bridge.order_tracker import OrderTracker, TrackedOrder, make_comment
 from v3.execution_bridge.sl_state import SLStateStore
 
@@ -385,12 +386,14 @@ def _reconcile(cfg: Config, source: SourceConfig, tracker: OrderTracker, sym_cfg
 
 
 class SourceRuntime:
-    """Bundles one source's own OrderTracker + SLStateStore -- kept
-    together so main()/run_once() can loop over sources generically."""
+    """Bundles one source's own OrderTracker + SLStateStore +
+    ExitStateStore -- kept together so main()/run_once() can loop over
+    sources generically."""
     def __init__(self, source: SourceConfig):
         self.source = source
         self.tracker = OrderTracker(source.order_state_file)
         self.sl_states = SLStateStore(source.sl_state_file)
+        self.exit_states = ExitStateStore(source.exit_state_file)
 
 
 def run_once(cfg: Config, runtimes: list) -> None:
@@ -416,6 +419,7 @@ def run_once(cfg: Config, runtimes: list) -> None:
                 _reconcile(cfg, source, runtime.tracker, sym_cfg, desired_state.get(sym_cfg.symbol))
             except Exception as exc:
                 print(f"[execution_bridge:{source.name}] {sym_cfg.symbol} ERROR: {exc}")
+        exit_manager.run_once(cfg, source, runtime.tracker, runtime.exit_states)
         stoploss_manager.run_once(cfg, source, runtime.tracker, runtime.sl_states)
 
 

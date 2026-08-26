@@ -19,6 +19,7 @@ supposed to have already gone through the market-order fallback instead
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -163,3 +164,53 @@ def close_position(symbol: str, position, deviation: int, comment: str) -> Order
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
     return _result_from(mt5.order_send(request))
+
+
+def close_partial_position(symbol: str, position, volume: float, deviation: int, comment: str) -> OrderResult:
+    """Exact copy of close_position above except volume is caller-given
+    instead of position.volume -- MT5 treats a TRADE_ACTION_DEAL against
+    an open position with LESS than its full volume as a partial close
+    natively (the position stays open with the remainder), no separate
+    request type needed. Added 2026-08-26 for exit_manager.py's own
+    points-based partial-booking tiers. Caller is responsible for
+    rounding `volume` to this symbol's own volume_step first (see
+    round_volume below) -- an unrounded value is simply rejected by the
+    broker rather than silently coerced."""
+    direction = "bull" if position.type == mt5.POSITION_TYPE_BUY else "bear"
+    bid, ask = get_tick_price(symbol)
+    price = bid if direction == "bull" else ask
+    close_type = mt5.ORDER_TYPE_SELL if direction == "bull" else mt5.ORDER_TYPE_BUY
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": volume,
+        "type": close_type,
+        "position": position.ticket,
+        "price": price,
+        "deviation": deviation,
+        "magic": position.magic,
+        "comment": comment,
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    return _result_from(mt5.order_send(request))
+
+
+def round_volume(symbol: str, volume: float) -> Optional[float]:
+    """Rounds down to this symbol's own broker-reported volume_step
+    (never up -- booking slightly less than the configured tier
+    percentage is safe, booking more never should happen from a
+    rounding artifact). Returns None if symbol_info is unavailable or
+    the rounded result is below the broker's own volume_min (too small
+    to ever fill) -- callers treat None as "skip this tier this cycle,
+    log it, don't guess at a value the broker would reject anyway"."""
+    info = mt5.symbol_info(symbol)
+    if info is None or not info.volume_step:
+        return None
+    step = info.volume_step
+    rounded = math.floor(volume / step) * step
+    rounded = round(rounded, 8)  # clear float division/multiplication noise (e.g. 0.30000000000000004)
+    if rounded < info.volume_min:
+        return None
+    return rounded
