@@ -167,9 +167,17 @@ def load_config() -> Config:
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_BREAKEVEN_POINTS", "300")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_TRAIL_START_POINTS", "300")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_BTCUSD_TRAIL_STEP_POINTS", "150")),
-                # "900+ points 50% close, another 25% at 1500 points from
-                # entry, 25% for the manager" (2026-08-26).
-                partial_tiers=((900.0, 0.5), (1500.0, 0.25)),
+                # 900pts -> 0.03 lots, 1500pts -> 0.01 lots (user's own
+                # final, unambiguous numbers, 2026-08-26 -- supersedes
+                # an earlier "0.03 on 50%, remaining 0.02 split into two
+                # parts for 25% each" version from the same day that
+                # didn't cleanly resolve). At BTCUSD's own 0.05 lots
+                # that's fractions of 0.6 and 0.2 respectively (NOT
+                # literally 50%/25% -- chosen specifically to produce
+                # these exact absolute amounts), leaving 0.01 (20%) for
+                # the SL/bias manager, same two-tier-plus-remainder
+                # shape every other symbol uses.
+                partial_tiers=((900.0, 0.6), (1500.0, 0.2)),
             ),
             SymbolConfig(
                 "ETHUSD", float(os.getenv("EXECUTION_BRIDGE_ETHUSD_LOTS", "1.0")),
