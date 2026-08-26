@@ -173,6 +173,24 @@ class ActiveReversalTrade:
     # for every other PENDING path in this module -- only
     # _fire_m5_immediate's own direct-fire ever sets this True.
     pending_stop_style: bool = False
+    # Wall-clock time this PENDING order's own setup was armed from --
+    # the M5 zone's own retest event, same "anchor to the moment the
+    # setup became active" reasoning htf_m1_retest_time already uses
+    # for the HTF-M1 mechanism. Added 2026-08-26, real gap found live:
+    # _close_if_opposite_ltf_ob (XAUUSD's own opposite-M1/M3-OB
+    # invalidation) only ever anchored to trade.opened_at, the REAL
+    # fill time -- meaningless for a still-PENDING order, whose
+    # opened_at stays at its 0.0 default until it actually fills. That
+    # left a resting M5-direct-fire PENDING order with NO invalidation
+    # check running against it at all (confirmed: the module's own
+    # existing docstring on the HTF-M1 branch above already flagged
+    # this exact gap for HTF-M1, but the plain non-HTF-M1 M5-direct-
+    # fire path never got the equivalent fix until now). None for every
+    # OTHER PENDING path in this module (only _fire_m5_immediate's own
+    # both-parents-agree branch sets it) and for any FILLED trade
+    # (opened_at is the correct, real anchor once a trade has actually
+    # filled).
+    pending_armed_at: Optional[float] = None
 
 
 class ReversalTracker:
