@@ -108,12 +108,24 @@ def _manage_one(cfg: Config, source: SourceConfig, sym_cfg: SymbolConfig, tracke
     if not due:
         return
 
+    # Local bookkeeping for "any further tier this same cycle" -- NOT
+    # position.volume itself, which is a field on MT5's own read-only
+    # position namedtuple (mt5.positions_get()'s return type). Real bug,
+    # caught live 2026-08-26 on the very first XAUUSD partial-close:
+    # assigning to position.volume raised AttributeError ("readonly
+    # attribute"), right after the real partial close had already
+    # succeeded -- so the close itself was fine, but the crash aborted
+    # this loop before the breakeven move below ever ran for that event,
+    # and would have silently skipped any further tier due the same
+    # cycle too. A plain local variable can't have this problem.
+    remaining_volume = position.volume
+
     for points, fraction in due:
-        if position.volume <= 0:
+        if remaining_volume <= 0:
             break  # fully closed by an earlier tier this same cycle -- nothing left to book further
 
         raw_volume = sym_cfg.lots * fraction
-        volume = broker.round_volume(symbol, min(raw_volume, position.volume))
+        volume = broker.round_volume(symbol, min(raw_volume, remaining_volume))
         if volume is None:
             print(f"{tag} {symbol}: partial-book tier @ {points:g}pts ({fraction:.0%}) wants "
                   f"{raw_volume:.4f} lots -- below broker's own volume_min after rounding, skipping "
@@ -136,7 +148,7 @@ def _manage_one(cfg: Config, source: SourceConfig, sym_cfg: SymbolConfig, tracke
         exit_states.save()
         print(f"{tag} {symbol}: partial-closed {volume} lots (tier @ {points:g}pts, {fraction:.0%} "
               f"of {sym_cfg.lots} lots) -- {result}")
-        position.volume = max(position.volume - volume, 0.0)  # local bookkeeping for any further tier this cycle
+        remaining_volume = max(remaining_volume - volume, 0.0)
 
         if not state.breakeven_applied:
             _apply_breakeven_once(tag, symbol, direction, entry_price, position, tracked, cfg, state, exit_states)
