@@ -288,16 +288,29 @@ def load_config() -> Config:
                 "USOIL",
                 tv_zone_file,
                 os.getenv("SIGNAL_ENGINE_USOIL_USTEC_LIVE_FILE", "tv_scraper_usoil_ustec_live.json"),
-                ltf_timeframes=("3",),
-                atr_confirm_timeframe="3",
+                # M3 confirmation removed, M15 is now the default --
+                # user's explicit rule, 2026-08-26: "remove m3
+                # confirmations and make m15 default... i have changed
+                # both alerts, atr alert, also zone alert to m15" (the
+                # TradingView/Pine side no longer even sends M3 data).
+                # ltf_timeframes is actually UNUSED for USOIL/USTEC in
+                # practice -- run_once_symbol always dispatches to
+                # _check_direction_atr_or_ob for these two (since
+                # atr_confirm_timeframe is set), which reads ONLY
+                # atr_confirm_timeframe, never ltf_timeframes; kept in
+                # sync anyway so nothing here still points at a
+                # timeframe TradingView no longer sends.
+                ltf_timeframes=("15",),
+                atr_confirm_timeframe="15",
                 atr_state_file=tv_atr_file,
             ),
             SymbolConfig(
                 "USTEC",
                 tv_zone_file,
                 os.getenv("SIGNAL_ENGINE_USOIL_USTEC_LIVE_FILE", "tv_scraper_usoil_ustec_live.json"),
-                ltf_timeframes=("3",),
-                atr_confirm_timeframe="3",
+                # Same change as USOIL above, same day, same reasoning.
+                ltf_timeframes=("15",),
+                atr_confirm_timeframe="15",
                 atr_state_file=tv_atr_file,
             ),
         ],

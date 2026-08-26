@@ -218,14 +218,19 @@ def load_config() -> Config:
                 partial_tiers=((2.0, 0.5), (3.0, 0.25)),
             ),
             SymbolConfig(
-                # Lots raised 0.20 -> 1.0, 2026-08-26 -- user's explicit
-                # call, specifically so its partial-booking tiers land on
-                # clean amounts (50%/25% -> 0.50/0.25 lots, "follow
-                # closure 50%-0.50, 0.25 closure on 25%"). Same scope
-                # note as USOIL above -- this is the symbol's own
-                # EXECUTION lot size, a 5x increase from before, not
-                # limited to partial booking alone.
-                "USTEC", float(os.getenv("EXECUTION_BRIDGE_USTEC_LOTS", "1.0")),
+                # Lots raised 0.20 -> 1.0 earlier 2026-08-26 (so partial-
+                # booking would land on clean 0.50/0.25 amounts), then
+                # REVERTED back to 0.20 the same day -- user's explicit
+                # correction: "ustec size needs to be 0.2, not 1.0, also
+                # open trade i'll manage, just do the changes to lot
+                # size." Only the lot size changed here, per that
+                # instruction -- partial_tiers below still use the SAME
+                # 0.5/0.25 fractions from the 1.0-lots version, so at
+                # 0.20 lots they now produce 0.10/0.05 (not the
+                # originally-intended 0.50/0.25) plus 0.05 remainder --
+                # not recomputed, since the user asked specifically for
+                # a lot-size-only change.
+                "USTEC", float(os.getenv("EXECUTION_BRIDGE_USTEC_LOTS", "0.2")),
                 breakeven_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_BREAKEVEN_POINTS", "150")),
                 trail_start_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_TRAIL_START_POINTS", "150")),
                 trail_step_points=float(os.getenv("EXECUTION_BRIDGE_USTEC_TRAIL_STEP_POINTS", "100")),
