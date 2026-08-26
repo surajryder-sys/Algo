@@ -5,11 +5,29 @@ position simultaneously with Trend Manager's own trade -- confirmed
 forming, the opposite of Trend Manager's own trigger) across
 H4/H2/H1/M30/M15 and M5, and reacts per the user's rules, 2026-08-18:
 
---- M5: immediate ---
-M5's own retest fires a market order right away -- no waiting. SL =
-the retested OB's own opposite edge minus/plus buffer
+--- M5: direct-fire only when BOTH parents agree, else waits for M1
+    like every other HTF (raised from "any one parent" 2026-08-26) ---
+M5's own retest checks _both_parents_aligned (M5 AND M15 must both
+agree with the retest direction, same bar _check_m5_flip below already
+used) -- if so, fires a PENDING limit order resting right at the zone's
+own edge (entries.ob_edge), not a MARKET fill at whatever price has
+drifted to by the time this poll runs. User's explicit correction,
+2026-08-26: "the retest alert comes, and then market executions,
+sometimes price likely moves away from zone which causes late entry."
+SL = the retested OB's own opposite edge minus/plus buffer
 (entries.initial_sl, reused as-is). Stoploss Manager's existing
-trailing logic takes over from there (reused, not rebuilt).
+trailing logic takes over from there once filled (reused, not rebuilt).
+
+If both parents DON'T agree, this function does nothing at all for that
+retest now -- no special M5-only fallback registration (the old "any
+one agrees, else wait" gate and its M5-trap fakeout filter, both
+2026-08-20, are gone as of 2026-08-26 -- see git history for
+_is_m5_trap/_m5_recent_zones if ever needed again). _register_htf_m1_
+retests already registers this exact same M5 zone unconditionally every
+cycle regardless of parent agreement (M5 is one of XAUUSD's own
+htf_m1.htf_timeframes), so an unconfirmed M5 retest waits for M1
+confirmation exactly like every other HTF timeframe below, with no
+separate code path needed -- the old fallback was pure duplication.
 
 --- M5 flip while a trade is already active (XAUUSD only, 2026-08-20) ---
 User-reported gap: with a reversal trade already open, _fire_m5_immediate
@@ -19,31 +37,15 @@ unevaluated -- not closed, not flipped, no reaction at all. Fixed via
 _check_m5_flip: while a FILLED trade is active, an opposite-direction
 M5 retest closes the current trade and opens the opposite one
 immediately, same SL basis (this M5 zone's own edge) as a normal M5
-immediate fire -- but ONLY if BOTH parent timeframes (M5 and M15) agree
+direct fire -- requiring BOTH parent timeframes (M5 and M15) to agree
 with the new direction ("the flip is when both agrees, both disagrees
-no flip"), a stricter bar than a fresh entry's own "any one" gate below,
-since flipping closes a real, currently-open position. If both don't
-agree, the trade stays open (same as before), but the retest is still
-consumed so it isn't re-examined forever. XAUUSD-only, matching the
-existing parent-gate's own scope (BTCUSD/ETHUSD have no
-parent_timeframes configured, so this never runs for them).
-
---- M5 trap filter (XAUUSD only, fresh entry only, 2026-08-20) ---
-Separate, narrower filter on TOP of the parent-alignment gate below
-(_parent_aligned's own "any one of M5/M15" gate barely constrains
-anything by itself here -- `direction` is almost always M5's own
-just-formed newest OB too, so M5 trivially agrees with itself
-regardless of what M15 says). User's own example: M15 bullish, M5's
-prior OB was ALSO bullish, then M5's newest OB flips bearish and gets
-retested -- that's a suspected trap/fakeout against the dominant
-structure, so don't fire it immediately (mirrored for M15 bearish / M5
-flips bullish). Same fallback as parent-disagreement: registers as a
-waiting retest, can still fire later via M1/M3 LTF confirmation -- never
-dropped outright. See _is_m5_trap's own docstring for the exact check.
-Not applied to the flip above -- flipping's own both-parents-must-agree
-requirement already can't fire when M15 disagrees, which is exactly
-what this filter exists to catch for the weaker "any one" gate a fresh
-entry uses.
+no flip") -- same bar a fresh entry now uses too as of 2026-08-26 (they
+used to differ; a fresh entry's own gate was the weaker "any one" until
+that date). If both don't agree, the trade stays open (same as before),
+but the retest is still consumed so it isn't re-examined forever.
+XAUUSD-only, matching the existing parent-gate's own scope (BTCUSD/
+ETHUSD have no parent_timeframes configured, so this never runs for
+them).
 
 --- H4/H2/H1/M30/M15: retest starts a clock, waits for LTF confirmation ---
 A retest on any of these five timeframes doesn't enter immediately --
@@ -182,78 +184,16 @@ def _parent_direction(store: ZoneStore, symbol: str, timeframe: str) -> Optional
     return best_direction
 
 
-def _parent_aligned(store: ZoneStore, symbol: str, parent_timeframes: Tuple[str, str], direction: str) -> bool:
-    """True if AT LEAST ONE of the two parent timeframes' own newest OB
-    currently agrees with direction -- user's rule 2026-08-19: "if
-    parents agree direct fire, if any one of them agree also direct
-    fire, IF BOTH disagree then wait mode." """
-    return any(_parent_direction(store, symbol, tf) == direction for tf in parent_timeframes)
-
-
 def _both_parents_aligned(store: ZoneStore, symbol: str, parent_timeframes: Tuple[str, str], direction: str) -> bool:
     """True only if BOTH parent timeframes' own newest OB agree with
-    direction -- stricter than _parent_aligned's "any one" (used for a
-    FRESH M5 entry, see above). Added 2026-08-20 for _check_m5_flip
-    specifically -- user's explicit rule: flipping OUT of an already-
-    active trade needs unanimous parent agreement, a higher bar than
-    opening a fresh position from flat ("the flip is when both agrees,
-    both disagrees no flip")."""
+    direction. Added 2026-08-20 for _check_m5_flip specifically --
+    user's explicit rule: flipping OUT of an already-active trade needs
+    unanimous parent agreement ("the flip is when both agrees, both
+    disagrees no flip"). A fresh M5 entry (_fire_m5_immediate) used a
+    weaker "any one parent" gate (_parent_aligned, now removed) until
+    2026-08-26, when the user raised it to this same both-parents bar;
+    both call sites share this one function since."""
     return all(_parent_direction(store, symbol, tf) == direction for tf in parent_timeframes)
-
-
-def _m5_recent_zones(store: ZoneStore, symbol: str, limit: int = 2) -> list:
-    """The newest `limit` M5 OBs overall, bullish and bearish merged
-    together and ordered purely by formation time (newest first),
-    trusted (_formation_trusted) only -- as (direction, TVZone) pairs.
-    Added 2026-08-20 for the M5 trap filter below, which cares about the
-    raw formation SEQUENCE across both directions together (did the very
-    newest M5 OB just flip against the one before it), not either
-    direction's own zone list in isolation."""
-    pairs = []
-    for direction in ("bull", "bear"):
-        pairs.extend((direction, z) for z in store.zones(symbol, "5", direction) if _formation_trusted(z))
-    pairs.sort(key=lambda pair: pair[1].start_time, reverse=True)
-    return pairs[:limit]
-
-
-def _is_m5_trap(store: ZoneStore, symbol: str, direction: str, zone: TVZone) -> bool:
-    """XAUUSD-only M5 trap filter for a FRESH immediate fire (not the
-    flip -- see _check_m5_flip's own docstring for why the flip's
-    stricter both-parents-agree gate already covers this case on its
-    own). Added 2026-08-20, user's explicit example: "if m15 has a
-    bullish ob, and m5 already has a bullish ob, and now a new bearish
-    ob appears in m5 only, only this particular reversal we need to
-    avoid" (mirrored for M15 bearish / M5 bullish).
-
-    Gated on M15's own direction ONLY, not both parents -- deliberately
-    narrower than _parent_aligned's own "any one of M5/M15" gate above,
-    which barely constrains anything here in practice: `direction` is
-    almost always M5's own current newest-formed OB too (the zone just
-    got retested right after forming), so M5 trivially "agrees with
-    itself" and _parent_aligned's any-one check passes regardless of
-    what M15 says. This filter exists specifically to catch what that
-    leaves through: M15 pointing one way, M5's own structure having just
-    flipped against it on the very newest OB.
-
-    True (skip firing) only when ALL of:
-    - M15's own newest OB direction is the OPPOSITE of `direction`
-      (M15 disagrees with this retest).
-    - `zone` (the one just retested) IS M5's own current newest-formed
-      OB (this filter only concerns the newest flip, not some older
-      zone being retested later).
-    - The M5 OB immediately before it (by formation, mixed bull/bear
-      order -- "last but one") has the SAME direction as M15 (i.e. M5's
-      own structure agreed with M15 right up until this newest one)."""
-    m15_dir = _parent_direction(store, symbol, "15")
-    if m15_dir is None or m15_dir == direction:
-        return False  # M15 doesn't disagree with this retest -- not a trap
-    recent = _m5_recent_zones(store, symbol, limit=2)
-    if len(recent) < 2:
-        return False
-    (newest_dir, newest_zone), (second_dir, _second_zone) = recent
-    if newest_zone.start_time != zone.start_time or newest_dir != direction:
-        return False  # the retested zone isn't even M5's own current newest OB
-    return second_dir == m15_dir
 
 
 def _apply_sl_cap(sym_cfg: SymbolConfig, direction: str, entry_price: float, sl: float) -> float:
@@ -375,44 +315,49 @@ def _fire_m5_immediate(store: ZoneStore, tracker: ReversalTracker, sym_cfg: Symb
         if zone is None:
             continue
 
-        # Parent-alignment gate -- XAUUSD only (sym_cfg.parent_timeframes
-        # is None for BTCUSD/ETHUSD, keeping their original always-fire
-        # behavior unchanged). Added 2026-08-19, user's explicit rule:
-        # agreeing with at least one of Trend Manager's own two parent
-        # timeframes still fires immediately below; agreeing with
-        # NEITHER doesn't fire and doesn't drop the signal either -- it
-        # becomes a waiting retest, resolved by the exact same M1/M3/M5
-        # LTF confirmation/invalidation machinery _check_direction
-        # already runs for the HTF (H4/H2/H1/M30/M15) zones. That reuse
-        # also means SL for a later LTF-confirmed fire naturally comes
-        # from THIS M5 zone's own edge (the multi-waiting-zone SL logic
-        # in _check_direction already does that), not the confirming
-        # LTF zone's -- no separate code path needed.
-        if sym_cfg.parent_timeframes is not None and not _parent_aligned(store, symbol, sym_cfg.parent_timeframes, direction):
-            retest_time = float(zone.retested_at) if zone.retested_at is not None else time.time()
-            tracker.add_waiting(symbol, direction, WaitingRetest("5", zone.start_time, zone.top, zone.btm, retest_time))
+        if sym_cfg.parent_timeframes is not None:
+            # XAUUSD only. Gate raised from _parent_aligned's "any one"
+            # to _both_parents_aligned 2026-08-26 -- user's explicit
+            # correction, same bar _check_m5_flip already used. Anything
+            # short of both agreeing gets NO special handling here at
+            # all anymore (the old any-one-else-wait fallback and its
+            # M5-trap filter are gone) -- _register_htf_m1_retests
+            # already registers this same M5 zone unconditionally every
+            # cycle (M5 is one of XAUUSD's own htf_m1.htf_timeframes),
+            # so it's already waiting for M1 confirmation "like every
+            # other HTF" with no separate code path needed -- see this
+            # module's own docstring for the full history.
+            if not _both_parents_aligned(store, symbol, sym_cfg.parent_timeframes, direction):
+                continue
+
+            # LIMIT order resting at the zone's own edge, not a MARKET
+            # fill -- user's explicit correction 2026-08-26: "the retest
+            # alert comes, and then market executions, sometimes price
+            # likely moves away from zone which causes late entry." No
+            # pullback blending (entries.compute_entry's own distance-
+            # based MARKET/PENDING split) -- always PENDING at the raw
+            # edge price, same edge convention as entries.ob_edge itself
+            # (bull's own first-contact edge is the zone top, bear's is
+            # the zone bottom).
+            edge = entries.ob_edge(direction, zone.top, zone.btm)
+            sl = entries.initial_sl(symbol, "5", direction, zone.top, zone.btm)
+            sl = _apply_sl_cap(sym_cfg, direction, edge, sl)
+            trade = ActiveReversalTrade(direction, "5", zone.start_time, edge, sl, "PENDING",
+                                         status="PENDING", opened_at=time.time(), parent_timeframe="5")
+            tracker.open_trade(symbol, trade)
             tracker.mark_retest_processed(symbol, "5", direction, zone.start_time)
             label = _DIRECTION_LABELS[direction]
-            print(f"[reversal_manager] {symbol}: M5 {label} zone retested but neither parent agrees -- "
-                  f"waiting for LTF confirmation instead of firing immediately")
-            continue
+            print(f"[reversal_manager] {symbol}: M5 {label} zone retested, both parents agree -- "
+                  f"REVERSAL TRADE PENDING limit @ {edge:.2f} (zone edge) SL={sl:.2f} "
+                  f"(not yet wired to MT5 -- signal only)")
+            return True
 
-        # M5 trap filter -- XAUUSD only, see _is_m5_trap's own docstring.
-        # Added 2026-08-20, separate from (and narrower than) the
-        # parent-alignment gate above: M15 disagreeing with this retest
-        # while M5's own structure just flipped against M15 to produce
-        # it is treated as a suspected fakeout -- same fallback as
-        # parent-disagreement (waiting retest, can still confirm via
-        # M1/M3 LTF later), not a straight fire.
-        if sym_cfg.parent_timeframes is not None and _is_m5_trap(store, symbol, direction, zone):
-            retest_time = float(zone.retested_at) if zone.retested_at is not None else time.time()
-            tracker.add_waiting(symbol, direction, WaitingRetest("5", zone.start_time, zone.top, zone.btm, retest_time))
-            tracker.mark_retest_processed(symbol, "5", direction, zone.start_time)
-            label = _DIRECTION_LABELS[direction]
-            print(f"[reversal_manager] {symbol}: M5 {label} zone retested but M15 disagrees and M5 just "
-                  f"flipped against it -- suspected trap, waiting for LTF confirmation instead of firing immediately")
-            continue
-
+        # BTCUSD/ETHUSD -- no parent-alignment concept at all in
+        # Reversal Manager (sym_cfg.parent_timeframes is None for both),
+        # unchanged always-fire-MARKET behavior from before this rule
+        # existed. Not in scope for the 2026-08-26 change above -- user's
+        # own instruction was about the parent-agreement gate, which only
+        # exists for XAUUSD to begin with.
         current_price = _read_live_close(sym_cfg.live_state_file, symbol, "5")
         if current_price is None:
             continue
@@ -441,17 +386,16 @@ def _check_m5_flip(store: ZoneStore, tracker: ReversalTracker, sym_cfg: SymbolCo
     while a trade is active, an opposite-direction M5 retest flips the
     trade -- closes the current one and opens the opposite one
     immediately, same SL basis (this M5 zone's own edge) as a normal M5
-    immediate fire -- but ONLY if BOTH parent timeframes (M5 and M15)
-    agree with the new direction ("the flip is when both agrees, both
-    disagrees no flip") -- a stricter bar than a fresh M5 entry's own
-    "any one" gate, since flipping means closing a real, currently-open
-    position. If both don't agree, the current trade is left open (still
-    no reaction -- same as before), but the retest is still consumed/
-    watermarked so it isn't re-examined every cycle forever. No separate
-    M5-trap check here (see _is_m5_trap's own docstring) -- requiring
-    BOTH parents to agree already can't fire when M15 disagrees, which
-    is exactly the trap condition that filter exists to catch for the
-    weaker "any one" gate a fresh entry uses.
+    direct fire -- ONLY if BOTH parent timeframes (M5 and M15) agree
+    with the new direction ("the flip is when both agrees, both
+    disagrees no flip") -- since flipping means closing a real,
+    currently-open position. Fresh M5 entries used a weaker "any one"
+    gate until 2026-08-26; both now share this exact same bar, so this
+    flip's own gate is no longer stricter than a fresh entry's, just
+    identical to it (see module docstring for the full history). If
+    both don't agree, the current trade is left open (still no
+    reaction -- same as before), but the retest is still consumed/
+    watermarked so it isn't re-examined every cycle forever.
 
     Only ever called for a FILLED trade (a real, filled position -- see
     run_once_symbol) -- a still-PENDING reversal order has nothing to
