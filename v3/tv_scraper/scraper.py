@@ -548,6 +548,11 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
             "mitigated_time": now,
             "mitigated_price": None,
         })
+        if zone_history_log_path is not None:
+            zone_history_log.append_removed(
+                zone_history_log_path, symbol=symbol, timeframe=timeframe, direction=direction,
+                start_time=stored_zone.start_time, top=stored_zone.top, btm=stored_zone.btm,
+                virgin=stored_zone.virgin, removed_time=now, reason="orphan")
         first_seen.forget(symbol, timeframe, direction, orphan_key)
         retested.forget(symbol, timeframe, direction, orphan_key)
         print(f"[tv_scraper] {symbol} {timeframe} {direction}: deleted orphaned zone "
@@ -725,11 +730,22 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
             new_missing_streak[price_key] = streak
             continue
 
+        if zone_history_log_path is not None:
+            # Fetched BEFORE apply_mitigated deletes it -- that's the only
+            # place top/btm/virgin still exist for this start_time.
+            about_to_delete = zones.get(symbol, timeframe, direction, previously_seen[price_key])
+        else:
+            about_to_delete = None
         zones.apply_mitigated(symbol, timeframe, direction, {
             "start_time": previously_seen[price_key],
             "mitigated_time": now,
             "mitigated_price": None,
         })
+        if about_to_delete is not None:
+            zone_history_log.append_removed(
+                zone_history_log_path, symbol=symbol, timeframe=timeframe, direction=direction,
+                start_time=about_to_delete.start_time, top=about_to_delete.top, btm=about_to_delete.btm,
+                virgin=about_to_delete.virgin, removed_time=now, reason="debounced")
         first_seen.forget(symbol, timeframe, direction, price_key)
         retested.forget(symbol, timeframe, direction, price_key)
         # No corresponding pending_retest cleanup needed -- new_pending_retest

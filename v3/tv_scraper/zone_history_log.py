@@ -30,6 +30,7 @@ from pathlib import Path
 def append(path: str, *, symbol: str, timeframe: str, direction: str, start_time: int,
            top: float, btm: float, detected_time: int, formed_time_confirmed: bool) -> None:
     record = {
+        "event": "formed",
         "symbol": symbol,
         "timeframe": timeframe,
         "direction": direction,
@@ -38,6 +39,40 @@ def append(path: str, *, symbol: str, timeframe: str, direction: str, start_time
         "btm": btm,
         "detected_time": detected_time,
         "formed_time_confirmed": formed_time_confirmed,
+    }
+    with Path(path).open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def append_removed(path: str, *, symbol: str, timeframe: str, direction: str, start_time: int,
+                    top: float, btm: float, virgin: bool, removed_time: int, reason: str) -> None:
+    """Companion to append() above -- one JSON line per zone _apply_direction
+    actually deletes from ZoneStore (apply_mitigated), added 2026-08-26 after
+    a real "why did this trade close" investigation (USOIL) hit a wall:
+    ZoneStore only ever holds currently-live zones, so there was no way to
+    tell whether a zone genuinely mitigated by price, or only ever LOOKED
+    mitigated because it dropped out of tv_scraper's own top-N read for the
+    _MITIGATION_DEBOUNCE_POLLS-poll debounce window and then reappeared
+    under the same start_time -- exactly the false-positive class
+    close_if_invalidated's own docstring already documents, but with no way
+    to confirm it after the fact. reason distinguishes the two call sites
+    that can trigger a real deletion: "debounced" (missing for
+    _MITIGATION_DEBOUNCE_POLLS consecutive polls -- the normal path) vs
+    "orphan" (a zone found with no matching previously_seen entry at all,
+    deleted on sight -- see _apply_direction's own reconciliation-loop
+    docstring). Same additive, never-read-by-any-bot contract as append()
+    -- purely forensic."""
+    record = {
+        "event": "removed",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "direction": direction,
+        "start_time": start_time,
+        "top": top,
+        "btm": btm,
+        "virgin": virgin,
+        "removed_time": removed_time,
+        "reason": reason,
     }
     with Path(path).open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
