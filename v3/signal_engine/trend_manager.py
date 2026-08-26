@@ -457,19 +457,46 @@ def _try_fire_entry_atr_or_ob(store: ZoneStore, tracker: TradeTracker, sym_cfg: 
     for the full quote. Only ever called while active.status is
     AWAITING_TRIGGER (the caller already returns early on FILLED, and
     this mechanism never produces a PENDING state to revisit -- always
-    an immediate market fire, never a pullback proposal)."""
+    an immediate market fire, never a pullback proposal).
+
+    OB-confirmation generalized 2026-08-26 to scan EVERY one of
+    sym_cfg.trigger_timeframes (previously just the single
+    atr_confirm_timeframe) -- user's own correction: USOIL/USTEC's
+    parents became H4/H1/M30/M15 and "30m and 15m can do executions"
+    (both, not M3 alone anymore). Checked in trigger_timeframes' own
+    order, first match wins -- there's no real "best candidate" contest
+    to run here the way _try_fire_entry's own pullback-distance
+    selection needs, since this is always an immediate MARKET fire with
+    SL from the PARENT zone regardless of which trigger timeframe
+    actually confirmed it. The ATR-flip peer confirmation stays scoped
+    to atr_confirm_timeframe alone (M15, user's own explicit choice,
+    2026-08-26) -- not extended to every trigger timeframe, only the OB
+    side was."""
     symbol = sym_cfg.symbol
-    timeframe = sym_cfg.atr_confirm_timeframe
     direction = active.direction
 
-    zone = _newest_post_parent_zone(store, tracker, symbol, timeframe, direction, active.parent_start_time)
+    zone = None
+    ob_timeframe = None
+    for candidate_tf in sym_cfg.trigger_timeframes:
+        candidate_zone = _newest_post_parent_zone(store, tracker, symbol, candidate_tf, direction,
+                                                    active.parent_start_time)
+        if candidate_zone is not None:
+            zone, ob_timeframe = candidate_zone, candidate_tf
+            break
     ob_confirms = zone is not None
 
     atr_store = AtrStore(sym_cfg.atr_state_file)
-    atr_confirms = _atr_confirms(atr_store, symbol, timeframe, direction, active.parent_start_time)
+    atr_confirms = _atr_confirms(atr_store, symbol, sym_cfg.atr_confirm_timeframe, direction,
+                                  active.parent_start_time)
 
     if not ob_confirms and not atr_confirms:
         return
+
+    # OB confirmation wins over ATR when both are true this cycle --
+    # same priority the original single-timeframe version already gave
+    # (its own `reason` line below picked "fresh OB" over "ATR flip"
+    # whenever both applied to that one timeframe).
+    timeframe = ob_timeframe if ob_confirms else sym_cfg.atr_confirm_timeframe
 
     # SL buffer not configured yet (user said "pending, I'll give
     # later") -- skip cleanly rather than let entries.SYMBOL_SL_BUFFER's

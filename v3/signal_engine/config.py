@@ -140,18 +140,32 @@ def load_config() -> Config:
                 "USOIL",
                 os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ZONE_FILE", "tv_scraper_usoil_ustec_zones.json"),
                 live_state_file=os.getenv("SIGNAL_ENGINE_USOIL_USTEC_LIVE_FILE", "tv_scraper_usoil_ustec_live.json"),
-                parent_timeframes=("60", "30", "15"),
-                trigger_timeframes=("3",),
-                atr_confirm_timeframe="3",
+                # Parents raised from H1/M30/M15 to H4/H1/M30/M15, and
+                # execution moved from M3-only to M30+M15 both -- user's
+                # explicit rule, 2026-08-26: "ustec 4h, 1h, 30m, 15m, 15m
+                # itself itself is execution time frame... 30m and 15m
+                # can do executions" (same for USOIL). M15 is now both a
+                # parent AND a trigger timeframe simultaneously -- the
+                # generic timeframe-membership checks elsewhere in this
+                # module already support that overlap without any code
+                # change (XAUUSD just happens to never have used it).
+                parent_timeframes=("240", "60", "30", "15"),
+                trigger_timeframes=("30", "15"),
+                # ATR-flip peer confirmation moves from M3 to M15 (the
+                # new faster/lower of the two trigger timeframes, same
+                # "lower time frame" reasoning M3 originally had) --
+                # user's own choice when asked directly, 2026-08-26.
+                atr_confirm_timeframe="15",
                 atr_state_file=os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ATR_FILE", "tv_scraper_usoil_ustec_atr.json"),
             ),
             SymbolConfig(
                 "USTEC",
                 os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ZONE_FILE", "tv_scraper_usoil_ustec_zones.json"),
                 live_state_file=os.getenv("SIGNAL_ENGINE_USOIL_USTEC_LIVE_FILE", "tv_scraper_usoil_ustec_live.json"),
-                parent_timeframes=("60", "30", "15"),
-                trigger_timeframes=("3",),
-                atr_confirm_timeframe="3",
+                # Same change as USOIL above, same day, same reasoning.
+                parent_timeframes=("240", "60", "30", "15"),
+                trigger_timeframes=("30", "15"),
+                atr_confirm_timeframe="15",
                 atr_state_file=os.getenv("SIGNAL_ENGINE_USOIL_USTEC_ATR_FILE", "tv_scraper_usoil_ustec_atr.json"),
             ),
         ],
