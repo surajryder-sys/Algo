@@ -1,5 +1,25 @@
-// OBD_Reversal v1.13 -- order block detection + retest/mitigation webhooks
+// OBD_Reversal v1.14 -- order block detection + retest/mitigation webhooks
 // feeding v3's Reversal Manager (see v3/signal_engine/reversal_manager.py).
+//
+// v1.14 (2026-08-27): real bug -- v1.12/v1.13's own last_alert_bar cap
+// never actually fixed the volume problem for ob_zone_retested. User's
+// live evidence: TradingView fully STOPPED the M1 retest alert
+// ("Stopped -- Triggered too often"), firing the exact same zone/
+// retested_time repeatedly within one second, while the mitigation alert
+// (also freq_all, on M30+) fired correctly ONLY ONCE the whole time.
+// Root cause reassessed: ob_zone_retested runs on every tick (not
+// barstate.isconfirmed-gated), so a fast-recalculating real-time bar can
+// reach its alert() line many times a second; freq_all delivers on every
+// one of those reaches, and this script's own state (ob_retested[i],
+// last_alert_bar) can't be trusted to reliably block that across every
+// single intrabar recalculation the way mitigation's isconfirmed gate
+// structurally can (mitigation only ever gets ONE chance per bar to
+// begin with, independent of any custom guard). Fixed by switching
+// ob_zone_retested's alert() to alert.freq_once_per_bar -- TradingView's
+// own platform-level "at most once per bar" guarantee, still firing on
+// the first qualifying tick rather than delayed to close, but enforced
+// by the platform instead of this script's own state. See mark_retests()
+// itself for the full writeup.
 //
 // v1.13 (2026-08-27): widens v1.12's one-webhook-per-bar cap from
 // retested-only to ALL THREE alert types on this pane (formed/mitigated/
@@ -151,7 +171,7 @@
 // pane, confirmed as visual clutter once both were added together.
 
 //@version=5
-indicator("OBD_Reversal v1.13"
+indicator("OBD_Reversal v1.14"
   , overlay = true)
 //------------------------------------------------------------------------------
 //Settings
@@ -304,7 +324,31 @@ mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_ret
                         // known M1 rate-limiter-pause risk on the fast
                         // timeframes as a deliberate tradeoff rather than
                         // delaying delivery to bar close there.
-                        alert(retest_payload, alert.freq_all)
+                        //
+                        // v1.14 (2026-08-27): freq_all -> freq_once_per_bar --
+                        // real bug, confirmed live: the M1 alert got fully
+                        // STOPPED by TradingView ("Stopped -- Triggered too
+                        // often"), firing the SAME zone/retested_time
+                        // repeatedly within one second. Root cause: this
+                        // whole function runs on EVERY tick, not gated to
+                        // barstate.isconfirmed (see its own header comment) --
+                        // a still-forming bar recalculates many times a
+                        // second, and freq_all delivers on every recalculation
+                        // that reaches this line, regardless of this script's
+                        // OWN ob_retested[i]/last_alert_bar guards (their
+                        // mutations can't be trusted to hold reliably across
+                        // every single intrabar recalculation the way
+                        // barstate.isconfirmed-gated code -- formed/mitigated
+                        // below -- structurally can, which is exactly why
+                        // mitigated was NOT affected: confirmed live
+                        // alongside this same bug, "mitigation is coming only
+                        // once"). freq_once_per_bar is TradingView's own
+                        // platform-level guarantee of at most one delivery
+                        // per bar, independent of script-side state -- still
+                        // fires on the FIRST qualifying tick (not delayed to
+                        // bar close like freq_once_per_bar_close), just
+                        // enforced by the platform instead of this script.
+                        alert(retest_payload, alert.freq_once_per_bar)
 
     retested_this_call
 
