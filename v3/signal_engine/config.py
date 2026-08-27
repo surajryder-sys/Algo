@@ -127,14 +127,18 @@ def load_config() -> Config:
                 os.getenv("SIGNAL_ENGINE_BTCUSD_ZONE_FILE", "tv_scraper_zones.json"),
                 live_state_file=os.getenv("SIGNAL_ENGINE_BTCUSD_LIVE_FILE", "tv_scraper_live.json"),
                 parent_timeframes=("15", "30"),
-                trigger_timeframes=("15", "3"),
+                # "5" not "3" as of 2026-08-27 -- M3 replaced by M5,
+                # reversing the M5->M3 move from 2026-08-22 (both Trend
+                # and Reversal Manager together, plus the scraper pane).
+                trigger_timeframes=("15", "5"),
             ),
             SymbolConfig(
                 "ETHUSD",
                 os.getenv("SIGNAL_ENGINE_ETHUSD_ZONE_FILE", "tv_scraper_ethusd_zones.json"),
                 live_state_file=os.getenv("SIGNAL_ENGINE_ETHUSD_LIVE_FILE", "tv_scraper_ethusd_live.json"),
                 parent_timeframes=("15", "30"),
-                trigger_timeframes=("15", "3"),
+                # "5" not "3" as of 2026-08-27 -- same change as BTCUSD above.
+                trigger_timeframes=("15", "5"),
             ),
             # USOIL/USTEC (added 2026-08-19) -- one shared tv_scraper
             # process/window serves both (same "Scrpr_USOIL/USTEC" 2x4

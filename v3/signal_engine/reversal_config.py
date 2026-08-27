@@ -231,24 +231,30 @@ def load_config() -> Config:
                 "BTCUSD",
                 tv_zone_file,
                 os.getenv("SIGNAL_ENGINE_BTCUSD_LIVE_FILE", "tv_scraper_live.json"),
-                ltf_timeframes=("3",),
+                # "5" not "3" as of 2026-08-27 -- user changed BTCUSD's
+                # actual bottom chart pane (and its scraper) from M3 BACK
+                # to M5 ("we changed timeframe to m5 on btc and eth even
+                # on scraper as well"). M3 replaced entirely, not kept
+                # alongside -- confirmed explicitly when asked.
+                ltf_timeframes=("5",),
                 atr_state_file=tv_atr_file,
                 htf_m1=HtfM1Config(
-                    confirm_timeframe="3",
+                    confirm_timeframe="5",
                     htf_timeframes=HTF_TIMEFRAMES,  # H4/H2/H1/M30/M15 -- no M5-specific carve-out needed here
                     # Same rule both while waiting AND once a trade is
                     # open (unlike XAUUSD, no narrowing on fill) -- one
                     # opposite OB on M15 or M30, OR two opposite OBs on
-                    # M3 (the confirmation timeframe itself, given the
-                    # same "needs two, not one" noise treatment XAUUSD's
-                    # OWN Trend Manager M1-exit rule got). User's own
-                    # words, 2026-08-25: "invalidation set m15 or m30,
-                    # opposite ob... two opposite ob's on m3 also
-                    # invalidates."
+                    # the confirmation timeframe itself (M5 as of
+                    # 2026-08-27, was M3), given the same "needs two, not
+                    # one" noise treatment XAUUSD's OWN Trend Manager
+                    # M1-exit rule got. User's own words, 2026-08-25:
+                    # "invalidation set m15 or m30, opposite ob... two
+                    # opposite ob's on m3 also invalidates" -- double_ob_
+                    # timeframe follows confirm_timeframe's own move to M5.
                     waiting_invalidation=HtfM1InvalidationRule(
-                        single_ob_timeframes=("15", "30"), double_ob_timeframe="3"),
+                        single_ob_timeframes=("15", "30"), double_ob_timeframe="5"),
                     active_invalidation=HtfM1InvalidationRule(
-                        single_ob_timeframes=("15", "30"), double_ob_timeframe="3"),
+                        single_ob_timeframes=("15", "30"), double_ob_timeframe="5"),
                     sl_buffer=20.0,  # reuses BTCUSD's existing Reversal Manager buffer, user's explicit call
                     active_invalidation_anchor="opened_at",
                 ),
@@ -257,19 +263,18 @@ def load_config() -> Config:
                 "ETHUSD",
                 tv_zone_file,
                 os.getenv("SIGNAL_ENGINE_ETHUSD_LIVE_FILE", "tv_scraper_ethusd_live.json"),
-                # "3" not "5" as of 2026-08-22 -- user changed ETHUSD's
-                # actual bottom chart pane from M5 to M3 ("change it to
-                # m3 everywhere"), matching BTCUSD's own ltf_timeframes
-                # above (already "3", was ahead of this one).
-                ltf_timeframes=("3",),
+                # "5" not "3" as of 2026-08-27 -- same change as BTCUSD
+                # above, same day, same reasoning (was "3" not "5" as of
+                # 2026-08-22, before that).
+                ltf_timeframes=("5",),
                 atr_state_file=tv_atr_file,
                 htf_m1=HtfM1Config(
-                    confirm_timeframe="3",
+                    confirm_timeframe="5",
                     htf_timeframes=HTF_TIMEFRAMES,
                     waiting_invalidation=HtfM1InvalidationRule(
-                        single_ob_timeframes=("15", "30"), double_ob_timeframe="3"),
+                        single_ob_timeframes=("15", "30"), double_ob_timeframe="5"),
                     active_invalidation=HtfM1InvalidationRule(
-                        single_ob_timeframes=("15", "30"), double_ob_timeframe="3"),
+                        single_ob_timeframes=("15", "30"), double_ob_timeframe="5"),
                     sl_buffer=2.0,  # reuses ETHUSD's existing Reversal Manager buffer, user's explicit call
                     active_invalidation_anchor="opened_at",
                 ),
