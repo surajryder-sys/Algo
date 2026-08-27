@@ -285,9 +285,37 @@ def _reconcile(cfg: Config, source: SourceConfig, tracker: OrderTracker, sym_cfg
                if exec_timeframe else None)
 
     if status == "PENDING":
-        if tracked is not None and (tracked.exec_timeframe, tracked.exec_start_time) != (exec_timeframe, exec_start_time):
+        # Only supersede a still-RESTING pending order this way -- never
+        # a real, already-filled POSITION. Real bug, confirmed live
+        # 2026-08-27: the source's own PENDING->FILLED transition can lag
+        # a real fill by more than one cycle (same root cause the
+        # FILLED-branch's own identical guard below was already added
+        # for, 2026-08-20) -- if a FRESHER trigger candidate replaces the
+        # source's own (still-PENDING-in-its-own-bookkeeping) proposal
+        # before that catch-up happens, this used to close the real,
+        # already-open, possibly-profitable position just to chase the
+        # new candidate ("superseded by a better setup" on a real
+        # position -- XAUUSD lost a live +37.36 position to this exact
+        # sequence). Now leaves the real position tracked and untouched
+        # when this happens -- Stoploss Manager/Exit Manager keep
+        # managing it normally (both key off this tracker, not the
+        # source's own active-trade identity), it just won't get an
+        # early close from the source's own invalidation logic anymore
+        # (that logic no longer considers this ticket "its" trade either,
+        # once its own state moved on) -- SL/TP and manual close still
+        # work exactly as before, and _check_disappeared's own unconditional
+        # per-cycle check cleans up this tracker the moment the real
+        # position actually closes, letting the newer candidate get
+        # placed fresh from there.
+        if tracked is not None and tracked.kind == "PENDING" and \
+                (tracked.exec_timeframe, tracked.exec_start_time) != (exec_timeframe, exec_start_time):
             _cancel_or_close_tracked(cfg, source, tracker, symbol, tracked, "superseded by a better setup")
             tracked = None
+        elif tracked is not None and tracked.kind == "POSITION" and \
+                (tracked.exec_timeframe, tracked.exec_start_time) != (exec_timeframe, exec_start_time):
+            print(f"{tag} {symbol}: source proposes a different PENDING setup, but ticket {tracked.ticket} "
+                  f"is already a real filled position -- leaving it open, not superseding it")
+            return
 
         if tracked is None:
             existing = _find_matching_pending(symbol, magic, comment)
