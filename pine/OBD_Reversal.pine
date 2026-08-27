@@ -1,5 +1,22 @@
-// OBD_Reversal v1.09 -- order block detection + retest/mitigation webhooks
+// OBD_Reversal v1.10 -- order block detection + retest/mitigation webhooks
 // feeding v3's Reversal Manager (see v3/signal_engine/reversal_manager.py).
+//
+// v1.10 (2026-08-27): fixes a real compile error v1.08 shipped with --
+// ob_zone_mitigated's mit_freq (timeframe.in_seconds() >= 1800 ?
+// alert.freq_all : alert.freq_once_per_bar_close) doesn't compile: Pine
+// requires alert()'s freq argument to be a literal constant reference at
+// the call site, and a ternary between two alert.freq_* constants
+// type-checks as "simple string" (runtime-determined) instead of the
+// "input string" alert() requires. ("Cannot call 'alert' with argument
+// 'freq'='mit_freq'. An argument of 'simple string' type was used but a
+// 'input string' is expected" -- user's own error report, confirmed live.)
+// v1.09's retest fix below never hit this because it went straight to an
+// unconditional literal; only mitigation's still-conditional split did.
+// Fixed the same way any Pine call with a const-typed parameter has to
+// be: branch with if/else and call alert() directly inside each arm
+// instead of building the freq value in a variable first. Behavior is
+// unchanged -- M30-and-slower still gets freq_all, M1/M3/M5/M15 still
+// get freq_once_per_bar_close, exactly as v1.08 intended.
 //
 // v1.09 (2026-08-27): ob_zone_retested's alert() drops v1.07's per-call
 // M30-and-slower split entirely -- freq_all unconditionally, on EVERY
@@ -288,8 +305,22 @@ remove_mitigated(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob
             // too (structurally can't approach ~15 alerts/minute), so
             // freq_all is safe here on those four timeframes for BOTH
             // reasons a fast timeframe would still need to avoid it.
-            mit_freq = timeframe.in_seconds() >= 1800 ? alert.freq_all : alert.freq_once_per_bar_close
-            alert(mit_payload, mit_freq)
+            //
+            // v1.10 (2026-08-27): can't pick the freq via a ternary into a
+            // variable like the line just above used to -- Pine's alert()
+            // requires its freq argument to be a literal "input string"
+            // constant reference at the call site itself; a ternary between
+            // two alert.freq_* constants type-checks as "simple string"
+            // instead (chosen at runtime, not compile time), which alert()
+            // rejects ("Cannot call 'alert' with argument 'freq'=... simple
+            // string ... 'input string' expected" -- real compile error,
+            // confirmed live). Same fix as any Pine call with a
+            // const-typed parameter: branch with if/else and call alert()
+            // directly inside each arm instead of building the value first.
+            if timeframe.in_seconds() >= 1800
+                alert(mit_payload, alert.freq_all)
+            else
+                alert(mit_payload, alert.freq_once_per_bar_close)
 
             array.remove(ob_top, idx)
             array.remove(ob_btm, idx)
