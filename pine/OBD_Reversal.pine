@@ -1,5 +1,14 @@
-// OBD_Reversal v1.11 -- order block detection + retest/mitigation webhooks
+// OBD_Reversal v1.12 -- order block detection + retest/mitigation webhooks
 // feeding v3's Reversal Manager (see v3/signal_engine/reversal_manager.py).
+//
+// v1.12 (2026-08-27): caps ob_zone_retested to at most ONE actual webhook
+// per bar, script-wide, while keeping real-time (same-tick, not
+// bar-close-delayed) delivery for whichever zone gets it -- user's own
+// call after v1.09's all-timeframes freq_all produced real volume (10-15+
+// alerts/minute) once several zones started retesting in quick
+// succession. See mark_retests()'s own header comment below for the full
+// mechanism and the accepted tradeoff (a same-bar second zone's retest is
+// silently never reported, not batched).
 //
 // v1.11 (2026-08-27): the indicator("OBD_Reversal v1.06", ...) title
 // string (see @version=5 line below) had been hardcoded at "v1.06" since
@@ -126,7 +135,7 @@
 // pane, confirmed as visual clutter once both were added together.
 
 //@version=5
-indicator("OBD_Reversal v1.11"
+indicator("OBD_Reversal v1.12"
   , overlay = true)
 //------------------------------------------------------------------------------
 //Settings
@@ -210,7 +219,25 @@ get_coordinates(condition, top, btm, ob_val)=>
 //delivery there. The ob_retested[i] guard above still ensures this call
 //only ever fires once per zone either way -- that was never what
 //caused the pause.
-mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_retested_bar, dir_label)=>
+//
+//v1.12 (2026-08-27): even with freq_all, a single bar can still contain
+//MULTIPLE different zones retesting at once (e.g. a sharp move that
+//sweeps several stacked bull AND bear zones on the same tick) -- each
+//one is its own alert() call, so a busy bar could still fire several
+//webhooks within the same second, real volume confirmed live (10-15+/
+//min). User's own call: real-time delivery stays (still fires the
+//INSTANT a retest happens, not delayed to bar close), but now capped to
+//at most ONE actual webhook per bar, script-wide (shared across both the
+//bull and bear calls below via last_retest_alert_bar) -- any additional
+//zone that retests on a bar that's already sent one is still marked
+//ob_retested[i]=true internally (so it's never re-evaluated later) but
+//its own alert() call is skipped, meaning that specific retest is never
+//reported to Reversal Manager at all. Deliberate tradeoff, user's own
+//explicit choice over batching multiple zones into one payload: simpler,
+//matches "one alert per bar" literally, accepts the rare same-bar
+//multi-zone case as silently dropped rather than adding array-payload
+//parsing to the Python side.
+mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_retested_bar, dir_label, last_alert_bar)=>
     retested_this_call = false
     // Guard against an empty array: Pine's `for i = 0 to array.size()-1`
     // does NOT skip the loop when size is 0 -- with end (-1) less than
@@ -236,22 +263,30 @@ mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_ret
                     array.set(ob_retested_bar, i, bar_index)
                     retested_this_call := true
 
-                    zone_start = array.get(ob_left, i)
-                    retest_payload = '{"secret":"' + webhook_secret +
-                      '","type":"ob_zone_retested","symbol":"' + syminfo.ticker +
-                      '","timeframe":"' + timeframe.period +
-                      '","direction":"' + dir_label +
-                      '","start_time":' + str.tostring(math.round(zone_start / 1000), '#') +
-                      ',"retested_time":' + str.tostring(math.round(time / 1000), '#') + '}'
-                    // v1.09 (2026-08-27): freq_all unconditionally, ALL
-                    // timeframes -- user's own explicit call, overriding
-                    // v1.07's M30-and-slower split: "i want the retest
-                    // immediately for all time frames, indicator should
-                    // send retest alert immediately." Accepts v1.06's
-                    // known M1 rate-limiter-pause risk on the fast
-                    // timeframes as a deliberate tradeoff rather than
-                    // delaying delivery to bar close there.
-                    alert(retest_payload, alert.freq_all)
+                    // v1.12 (2026-08-27): cap to one actual webhook per bar,
+                    // script-wide -- see this function's own header comment
+                    // above for the full reasoning. Zone stays marked
+                    // ob_retested[i]=true either way (just above); only the
+                    // alert() call itself is skipped once this bar already
+                    // sent one.
+                    if array.get(last_alert_bar, 0) != bar_index
+                        array.set(last_alert_bar, 0, bar_index)
+                        zone_start = array.get(ob_left, i)
+                        retest_payload = '{"secret":"' + webhook_secret +
+                          '","type":"ob_zone_retested","symbol":"' + syminfo.ticker +
+                          '","timeframe":"' + timeframe.period +
+                          '","direction":"' + dir_label +
+                          '","start_time":' + str.tostring(math.round(zone_start / 1000), '#') +
+                          ',"retested_time":' + str.tostring(math.round(time / 1000), '#') + '}'
+                        // v1.09 (2026-08-27): freq_all unconditionally, ALL
+                        // timeframes -- user's own explicit call, overriding
+                        // v1.07's M30-and-slower split: "i want the retest
+                        // immediately for all time frames, indicator should
+                        // send retest alert immediately." Accepts v1.06's
+                        // known M1 rate-limiter-pause risk on the fast
+                        // timeframes as a deliberate tradeoff rather than
+                        // delaying delivery to bar close there.
+                        alert(retest_payload, alert.freq_all)
 
     retested_this_call
 
@@ -448,8 +483,17 @@ if not na(bear_ob)
 //gets its retest recorded first. Added 2026-08-20 -- see get_coordinates/
 //mark_retests()'s own comments for why this webhook was missing before.
 //-----------------------------------------------------------------------------{
-retested_bull = mark_retests(bull_top, bull_btm, bull_left, bull_avg, bull_formed_bar, bull_retested, bull_retested_bar, "bull")
-retested_bear = mark_retests(bear_top, bear_btm, bear_left, bear_avg, bear_formed_bar, bear_retested, bear_retested_bar, "bear")
+// v1.12 (2026-08-27): shared one-element array holding the bar_index of
+// the last bar a retest alert actually fired on -- passed into BOTH the
+// bull and bear mark_retests() calls below so the one-alert-per-bar cap
+// is script-wide (a bull AND a bear zone retesting the same bar still
+// only sends one webhook total, not one each). Declared `var` so it
+// persists across bars; a Pine array is the only way to mutate shared
+// state from inside a `=>` function -- see mark_retests()'s own header
+// comment for the full reasoning.
+var last_retest_alert_bar = array.new_int(1, -1)
+retested_bull = mark_retests(bull_top, bull_btm, bull_left, bull_avg, bull_formed_bar, bull_retested, bull_retested_bar, "bull", last_retest_alert_bar)
+retested_bear = mark_retests(bear_top, bear_btm, bear_left, bear_avg, bear_formed_bar, bear_retested, bear_retested_bar, "bear", last_retest_alert_bar)
 
 //-----------------------------------------------------------------------------}
 //Remove mitigated order blocks (fires ob_zone_mitigated webhooks internally)
