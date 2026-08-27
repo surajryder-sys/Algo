@@ -1,5 +1,16 @@
-// OBD_Reversal v1.08 -- order block detection + retest/mitigation webhooks
+// OBD_Reversal v1.09 -- order block detection + retest/mitigation webhooks
 // feeding v3's Reversal Manager (see v3/signal_engine/reversal_manager.py).
+//
+// v1.09 (2026-08-27): ob_zone_retested's alert() drops v1.07's per-call
+// M30-and-slower split entirely -- freq_all unconditionally, on EVERY
+// timeframe including M1/M3/M5/M15. User's own explicit call, same
+// session: "i want the retest immediately for all time frames, indicator
+// should send retest alert immediately." Deliberately accepts v1.06's
+// known risk back (TradingView's platform rate-limiter pausing the alert
+// on a fast timeframe when many different zones retest in quick
+// succession) as a tradeoff against every retest arriving late. Only
+// ob_zone_retested changes here -- ob_zone_mitigated (v1.08, just below)
+// keeps its own M30-and-slower split untouched, not part of this ask.
 //
 // v1.08 (2026-08-27): ob_zone_mitigated's alert() gets the SAME per-call
 // M30-and-slower freq_all split v1.07 just added for ob_zone_retested --
@@ -160,14 +171,15 @@ get_coordinates(condition, top, btm, ob_val)=>
 //triggers", once enough DIFFERENT zones retested in quick succession on
 //that fast a timeframe -- a paused alert delivers NOTHING until
 //manually re-enabled, strictly worse than the delay). v1.07 (2026-08-27)
-//resolves this per-call instead of picking one setting for every
-//timeframe: freq_all only on M30 and slower (M30/H1/H2/H4), where the
-//structural ceiling is one bar close per hour or more -- nowhere near
-//the ~15-alerts/minute threshold that actually tripped the M1 pause --
-//while M1/M3/M5/M15 keep freq_once_per_bar_close exactly as before,
-//since those ARE fast enough for that same pause to recur. Either way
-//the ob_retested[i] guard above already ensures this call only ever
-//fires once per zone -- that was never what caused the pause.
+//resolved this per-call instead of picking one setting for every
+//timeframe -- freq_all only on M30 and slower, freq_once_per_bar_close
+//kept on M1/M3/M5/M15 -- but v1.09 (2026-08-27, same day) drops that
+//split again: user wants every retest delivered immediately regardless
+//of timeframe, fast ones included, and is accepting the rate-limiter
+//pause risk on M1/M3/M5/M15 as the tradeoff rather than delaying
+//delivery there. The ob_retested[i] guard above still ensures this call
+//only ever fires once per zone either way -- that was never what
+//caused the pause.
 mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_retested_bar, dir_label)=>
     retested_this_call = false
     // Guard against an empty array: Pine's `for i = 0 to array.size()-1`
@@ -201,12 +213,15 @@ mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_ret
                       '","direction":"' + dir_label +
                       '","start_time":' + str.tostring(math.round(zone_start / 1000), '#') +
                       ',"retested_time":' + str.tostring(math.round(time / 1000), '#') + '}'
-                    // 1800 = 30 minutes -- M30 and slower (M30/H1/H2/H4)
-                    // get immediate delivery, M1/M3/M5/M15 keep the
-                    // bar-close delay. See this function's own comment
-                    // above for the full reasoning.
-                    retest_freq = timeframe.in_seconds() >= 1800 ? alert.freq_all : alert.freq_once_per_bar_close
-                    alert(retest_payload, retest_freq)
+                    // v1.09 (2026-08-27): freq_all unconditionally, ALL
+                    // timeframes -- user's own explicit call, overriding
+                    // v1.07's M30-and-slower split: "i want the retest
+                    // immediately for all time frames, indicator should
+                    // send retest alert immediately." Accepts v1.06's
+                    // known M1 rate-limiter-pause risk on the fast
+                    // timeframes as a deliberate tradeoff rather than
+                    // delaying delivery to bar close there.
+                    alert(retest_payload, alert.freq_all)
 
     retested_this_call
 
