@@ -14,6 +14,21 @@ reappearing in tv_scraper's visible top-4 after being crowded out looks
 like. User's explicit requirement: real-time "exactly when it gets
 retested" alerts must not be delayed for the common case.
 
+Trust check tightened 2026-08-27 to `formed_time_confirmed AND NOT
+formed_time_ever_unconfirmed` (see ZoneStore.TVZone's own docstring for
+the sticky-flag mechanism) -- confirmed live via the exact bug this
+closes: a real, already-retested XAUUSD M30 bull zone (4592.11/4580.60)
+got debounced/removed, then the SAME price range transiently
+resurfaced in tv_scraper's own read without a valid formed_hint that
+poll (formed_time_confirmed=False, wall-clock-fallback start_time
+minted). On the VERY NEXT poll, Pine returned SOME hint again (an
+ordinary flicker, not a real correction), flipping formed_time_confirmed
+back to True -- which used to be enough, on its own, to make this
+module's "zone_age <= min_visible_seconds -> trust instantly" bypass
+fire on a zone whose fresh-looking age was itself fabricated. The
+sticky flag remembers the earlier unconfirmed reading forever for this
+exact start_time, so this exact sequence can no longer slip through.
+
 Run with: python -m v3.alert_manager.watcher
 """
 from __future__ import annotations
@@ -59,6 +74,13 @@ def _read_zones(path: str) -> list[dict]:
             continue
         _symbol, timeframe, direction = parts
         for start_time_str, zone in entries.items():
+            formed_time_confirmed = zone.get("formed_time_confirmed", True)
+            # STICKY -- once True, this start_time is never trusted again
+            # even if a later poll's formed_time_confirmed flips back to
+            # True (see ZoneStore.TVZone.formed_time_ever_unconfirmed's
+            # own docstring for the confirmed live incident this guards).
+            # Default False matches that field's own pre-fix-data default.
+            formed_time_ever_unconfirmed = zone.get("formed_time_ever_unconfirmed", False)
             out.append({
                 "timeframe": timeframe,
                 "direction": direction,
@@ -66,12 +88,13 @@ def _read_zones(path: str) -> list[dict]:
                 "top": zone["top"],
                 "btm": zone["btm"],
                 "virgin": zone.get("virgin", True),
-                # False means start_time is a wall-clock guess, not a
-                # real Pine-confirmed formation time -- see
-                # ZoneStore.TVZone.formed_time_confirmed's own docstring.
-                # Default True matches that field's own pre-fix-data
-                # default, not a design choice made here.
-                "formed_time_confirmed": zone.get("formed_time_confirmed", True),
+                "formed_time_confirmed": formed_time_confirmed,
+                "formed_time_ever_unconfirmed": formed_time_ever_unconfirmed,
+                # The actual trust check every caller below should use --
+                # formed_time_confirmed ALONE isn't enough (see module
+                # docstring for why), so this is computed once here
+                # rather than every call site re-deriving it separately.
+                "trusted": formed_time_confirmed and not formed_time_ever_unconfirmed,
             })
     return out
 
@@ -141,24 +164,27 @@ def run_once(cfg: Config, alerted: AlertedZoneStore, confirmation: ConfirmationT
 
         zones = _read_zones(sym_cfg.zone_state_file)
 
-        # Eligible = virgin AND formed_time_confirmed (see
-        # ZoneStore.TVZone's own docstring -- skips zones tv_scraper can
-        # only wall-clock-guess a formation time for, which could
-        # genuinely be over a month old and already retested/mitigated
-        # in reality despite looking "just formed"). Excluded timeframes
-        # are filtered out of the confirmation set too, not just the
-        # final alert check -- no reason to track staleness for
-        # timeframes that can never fire an alert anyway.
+        # Eligible = virgin AND trusted (formed_time_confirmed AND NOT
+        # formed_time_ever_unconfirmed -- see module docstring). Skips
+        # zones tv_scraper can only wall-clock-guess a formation time
+        # for, which could genuinely be over a month old and already
+        # retested/mitigated in reality despite looking "just formed" --
+        # and, since the sticky flag was added, also skips a zone that
+        # was EVER unconfirmed in its history even if this poll's own
+        # reading looks fine. Excluded timeframes are filtered out of
+        # the confirmation set too, not just the final alert check -- no
+        # reason to track staleness for timeframes that can never fire
+        # an alert anyway.
         eligible_now = {
             _zone_key(sym_cfg.symbol, z) for z in zones
-            if z["virgin"] and z["formed_time_confirmed"] and z["timeframe"] not in cfg.excluded_timeframes
+            if z["virgin"] and z["trusted"] and z["timeframe"] not in cfg.excluded_timeframes
         }
         confirmation.update(sym_cfg.symbol, sym_cfg.zone_state_file, eligible_now)
 
         for zone in zones:
             if zone["timeframe"] in cfg.excluded_timeframes:
                 continue
-            if not zone["virgin"] or not zone["formed_time_confirmed"]:
+            if not zone["virgin"] or not zone["trusted"]:
                 continue
             if not (zone["btm"] <= price <= zone["top"]):
                 continue
