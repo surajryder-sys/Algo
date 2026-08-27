@@ -1,5 +1,21 @@
-// OBD_Reversal v1.12 -- order block detection + retest/mitigation webhooks
+// OBD_Reversal v1.13 -- order block detection + retest/mitigation webhooks
 // feeding v3's Reversal Manager (see v3/signal_engine/reversal_manager.py).
+//
+// v1.13 (2026-08-27): widens v1.12's one-webhook-per-bar cap from
+// retested-only to ALL THREE alert types on this pane (formed/mitigated/
+// retested share one gate now) -- user's own live report: even with
+// v1.12 deployed, "frequently sent many triggers and got disabled again"
+// on a single chart, with M5 and M3 both genuinely retesting (which
+// alone is only 2 alerts, not "many"). remove_mitigated() in particular
+// had no cap at all and can remove/alert for several zones within the
+// same barstate.isconfirmed bar-close -- the exact same pre-v1.12 bug
+// retested used to have, just never fixed there. See the "Global
+// elements" section below for where the shared array now lives (moved
+// earlier in the script so it's declared before every alert() call site,
+// formed included). Same accepted tradeoff as v1.12, just wider: only
+// the first of formed/mitigated/retested to fire on a given bar actually
+// sends a webhook; anything else on that same bar, any type, any zone,
+// is silently dropped.
 //
 // v1.12 (2026-08-27): caps ob_zone_retested to at most ONE actual webhook
 // per bar, script-wide, while keeping real-time (same-tick, not
@@ -135,7 +151,7 @@
 // pane, confirmed as visual clutter once both were added together.
 
 //@version=5
-indicator("OBD_Reversal v1.12"
+indicator("OBD_Reversal v1.13"
   , overlay = true)
 //------------------------------------------------------------------------------
 //Settings
@@ -228,13 +244,15 @@ get_coordinates(condition, top, btm, ob_val)=>
 //min). User's own call: real-time delivery stays (still fires the
 //INSTANT a retest happens, not delayed to bar close), but now capped to
 //at most ONE actual webhook per bar, script-wide (shared across both the
-//bull and bear calls below via last_retest_alert_bar) -- any additional
-//zone that retests on a bar that's already sent one is still marked
-//ob_retested[i]=true internally (so it's never re-evaluated later) but
-//its own alert() call is skipped, meaning that specific retest is never
-//reported to Reversal Manager at all. Deliberate tradeoff, user's own
-//explicit choice over batching multiple zones into one payload: simpler,
-//matches "one alert per bar" literally, accepts the rare same-bar
+//bull and bear calls below via last_alert_bar -- v1.13 further widened
+//this same array to also cover formed/mitigated, see "Global elements"
+//above) -- any additional zone that retests on a bar that's already sent
+//one is still marked ob_retested[i]=true internally (so it's never
+//re-evaluated later) but its own alert() call is skipped, meaning that
+//specific retest is never reported to Reversal Manager at all.
+//Deliberate tradeoff, user's own explicit choice over batching multiple
+//zones into one payload: simpler, matches "one alert per bar" literally,
+//accepts the rare same-bar
 //multi-zone case as silently dropped rather than adding array-payload
 //parsing to the Python side.
 mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_retested_bar, dir_label, last_alert_bar)=>
@@ -309,7 +327,7 @@ mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_ret
 //collecting everything that qualifies first without mutating anything,
 //then removing highest-index-first so each removal can never shift an
 //index still waiting to be processed.
-remove_mitigated(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_retested_bar, target, bull, dir_label, bar_time_sec)=>
+remove_mitigated(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_retested_bar, target, bull, dir_label, bar_time_sec, last_alert_bar)=>
     mitigated = false
     target_array = bull ? ob_btm : ob_top
 
@@ -365,10 +383,20 @@ remove_mitigated(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob
             // confirmed live). Same fix as any Pine call with a
             // const-typed parameter: branch with if/else and call alert()
             // directly inside each arm instead of building the value first.
-            if timeframe.in_seconds() >= 1800
-                alert(mit_payload, alert.freq_all)
-            else
-                alert(mit_payload, alert.freq_once_per_bar_close)
+            //
+            // v1.13 (2026-08-27): also gated on the shared last_alert_bar --
+            // this loop can otherwise remove (and alert for) SEVERAL zones
+            // within the same barstate.isconfirmed bar-close with no cap at
+            // all, the exact same pre-v1.12 bug retested used to have. The
+            // zone is still removed from tracking either way (below,
+            // unconditional) -- only the webhook delivery is skipped once
+            // this bar already sent one (any type, not just mitigated).
+            if array.get(last_alert_bar, 0) != bar_index
+                array.set(last_alert_bar, 0, bar_index)
+                if timeframe.in_seconds() >= 1800
+                    alert(mit_payload, alert.freq_all)
+                else
+                    alert(mit_payload, alert.freq_once_per_bar_close)
 
             array.remove(ob_top, idx)
             array.remove(ob_btm, idx)
@@ -383,6 +411,23 @@ remove_mitigated(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob
 //-----------------------------------------------------------------------------}
 //Global elements
 //-----------------------------------------------------------------------------{
+// v1.13 (2026-08-27): one shared bar-index gate across ALL THREE webhook
+// types (formed/mitigated/retested) on this pane, not just retested --
+// user's own live report: even with v1.12's retest-only cap, "frequently
+// sent many triggers and got disabled again" on the SAME single chart
+// (M5 and M3 both genuinely retested, so that alone wasn't "many" -- the
+// remaining volume was coming from formed/mitigated, which v1.12 never
+// touched: remove_mitigated() in particular can remove and alert() for
+// several zones in the SAME barstate.isconfirmed bar-close with no cap
+// at all, same pre-v1.12 bug retested used to have). Declared here,
+// before every alert() call site in the script (formed/mitigated/
+// retested all execute after this point), since Pine requires a `var`
+// declared before its first use in top-to-bottom bar execution order.
+// Same accepted tradeoff as v1.12: whichever of formed/mitigated/
+// retested happens FIRST on a given bar sends its webhook, anything else
+// that would fire on that same bar (any type, any zone) is silently
+// dropped, not batched.
+var last_alert_bar = array.new_int(1, -1)
 var os = 0
 var target_bull = 0.
 var target_bear = 0.
@@ -444,7 +489,12 @@ if not na(bull_ob)
     // gated on barstate.isconfirmed so it's only ever true for one bar;
     // once_per_bar_close makes the ALERT match that too, matching
     // OBD_ATR.pine's own (already-correct) frequency.
-    alert(bull_form_payload, alert.freq_once_per_bar_close)
+    //
+    // v1.13 (2026-08-27): also gated on the shared last_alert_bar --
+    // see this section's own "Global elements" comment above.
+    if array.get(last_alert_bar, 0) != bar_index
+        array.set(last_alert_bar, 0, bar_index)
+        alert(bull_form_payload, alert.freq_once_per_bar_close)
 
 [bear_top
   , bear_btm
@@ -471,8 +521,11 @@ if not na(bear_ob)
       ',"detected_time":' + str.tostring(bar_time_sec, '#') +
       // See the matching comment in the bullish branch above.
       ',"detected_price":' + str.tostring(close) + '}'
-    // See the matching comment on the bullish branch above.
-    alert(bear_form_payload, alert.freq_once_per_bar_close)
+    // See the matching comment on the bullish branch above, both for the
+    // freq choice and the v1.13 last_alert_bar gate.
+    if array.get(last_alert_bar, 0) != bar_index
+        array.set(last_alert_bar, 0, bar_index)
+        alert(bear_form_payload, alert.freq_once_per_bar_close)
 
 //-----------------------------------------------------------------------------}
 //Mark retests (fires the ob_zone_retested webhook the first time a zone's
@@ -484,16 +537,18 @@ if not na(bear_ob)
 //mark_retests()'s own comments for why this webhook was missing before.
 //-----------------------------------------------------------------------------{
 // v1.12 (2026-08-27): shared one-element array holding the bar_index of
-// the last bar a retest alert actually fired on -- passed into BOTH the
-// bull and bear mark_retests() calls below so the one-alert-per-bar cap
-// is script-wide (a bull AND a bear zone retesting the same bar still
-// only sends one webhook total, not one each). Declared `var` so it
-// persists across bars; a Pine array is the only way to mutate shared
-// state from inside a `=>` function -- see mark_retests()'s own header
-// comment for the full reasoning.
-var last_retest_alert_bar = array.new_int(1, -1)
-retested_bull = mark_retests(bull_top, bull_btm, bull_left, bull_avg, bull_formed_bar, bull_retested, bull_retested_bar, "bull", last_retest_alert_bar)
-retested_bear = mark_retests(bear_top, bear_btm, bear_left, bear_avg, bear_formed_bar, bear_retested, bear_retested_bar, "bear", last_retest_alert_bar)
+// the last bar an alert actually fired on -- passed into BOTH the bull
+// and bear mark_retests() calls below so the one-alert-per-bar cap is
+// script-wide (a bull AND a bear zone retesting the same bar still only
+// sends one webhook total, not one each). Declared `var` so it persists
+// across bars; a Pine array is the only way to mutate shared state from
+// inside a `=>` function -- see mark_retests()'s own header comment for
+// the full reasoning. v1.13 (2026-08-27) widened this SAME array
+// (last_alert_bar, declared once up in "Global elements" above so it's
+// available before the formed webhooks too) to cover formed and
+// mitigated as well, not just retested -- see that section's own comment.
+retested_bull = mark_retests(bull_top, bull_btm, bull_left, bull_avg, bull_formed_bar, bull_retested, bull_retested_bar, "bull", last_alert_bar)
+retested_bear = mark_retests(bear_top, bear_btm, bear_left, bear_avg, bear_formed_bar, bear_retested, bear_retested_bar, "bear", last_alert_bar)
 
 //-----------------------------------------------------------------------------}
 //Remove mitigated order blocks (fires ob_zone_mitigated webhooks internally)
@@ -516,7 +571,8 @@ if barstate.isconfirmed
       , target_bull
       , true
       , "bull"
-      , bar_time_sec)
+      , bar_time_sec
+      , last_alert_bar)
 
     mitigated_bear := remove_mitigated(bear_top
       , bear_btm
@@ -528,7 +584,8 @@ if barstate.isconfirmed
       , target_bear
       , false
       , "bear"
-      , bar_time_sec)
+      , bar_time_sec
+      , last_alert_bar)
 
 //-----------------------------------------------------------------------------}
 //Alerts
