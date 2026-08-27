@@ -1,5 +1,18 @@
-// OBD_Reversal v1.10 -- order block detection + retest/mitigation webhooks
+// OBD_Reversal v1.11 -- order block detection + retest/mitigation webhooks
 // feeding v3's Reversal Manager (see v3/signal_engine/reversal_manager.py).
+//
+// v1.11 (2026-08-27): the indicator("OBD_Reversal v1.06", ...) title
+// string (see @version=5 line below) had been hardcoded at "v1.06" since
+// that build and never bumped alongside every version note in THIS
+// header comment through v1.07-v1.10 -- purely cosmetic in the code
+// itself (doesn't affect any alert logic), but it's the actual string
+// TradingView shows in the script list and, critically, in every alert
+// log entry's title -- meant every "OBD_Reversal v1.06" alert the user
+// saw live could have genuinely been running any of v1.06 through v1.10,
+// with no way to tell which from the alert log alone. User's own catch,
+// pointing at the real title line directly rather than trusting this
+// header comment's version claims. Now matches -- bump this string
+// alongside the header on every future version change too.
 //
 // v1.10 (2026-08-27): fixes a real compile error v1.08 shipped with --
 // ob_zone_mitigated's mit_freq (timeframe.in_seconds() >= 1800 ?
@@ -113,7 +126,7 @@
 // pane, confirmed as visual clutter once both were added together.
 
 //@version=5
-indicator("OBD_Reversal v1.06"
+indicator("OBD_Reversal v1.11"
   , overlay = true)
 //------------------------------------------------------------------------------
 //Settings
