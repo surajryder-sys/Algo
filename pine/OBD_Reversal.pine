@@ -1,5 +1,25 @@
-// OBD_Reversal v1.06 -- order block detection + retest/mitigation webhooks
+// OBD_Reversal v1.07 -- order block detection + retest/mitigation webhooks
 // feeding v3's Reversal Manager (see v3/signal_engine/reversal_manager.py).
+//
+// v1.07 (2026-08-27): ob_zone_retested's alert() now picks freq_all vs
+// freq_once_per_bar_close PER CALL, based on the CURRENT chart's own
+// timeframe (timeframe.in_seconds() >= 1800, i.e. M30 and slower: M30/
+// H1/H2/H4) -- user's own explicit rule: "i want immediate alert when it
+// gets retested, not when the bar closes!!! ... 1h bar will take one
+// hour, m30 will take 30 minutes to send alert, by then price
+// would've moved somewhere." v1.06's revert was real and stays correct
+// for the FAST timeframes (M1/M3/M5/M15, still freq_once_per_bar_close,
+// completely untouched here) -- TradingView's own rate limiter is
+// confirmed to trip under ~15 alerts/minute (user's own figure), which
+// M1's own many-different-zones-retesting-at-once pattern can realistically
+// hit but M30/H1/H2/H4 structurally cannot: each can fire at most once
+// or twice per HOUR (one bar close per candle, at most bull+bear
+// simultaneously), nowhere close to a per-minute limit regardless of how
+// many zones retest on the same candle. Same underlying mechanism v1.04
+// already proved safe from THIS script's own side (the ob_retested[i]
+// guard prevents any duplicate per-zone firing either way) -- only the
+// platform-level rate limit was the real risk, and that risk is
+// structurally absent on these four slower timeframes.
 //
 // v1.06 (2026-08-25): reverts v1.04's freq_all change back to
 // freq_once_per_bar_close -- confirmed live, real problem: TradingView
@@ -119,19 +139,23 @@ get_coordinates(condition, top, btm, ob_val)=>
 //close lands (unlike mitigation below, which reads close/high/low as a
 //genuinely moving target).
 //
-//Stays freq_once_per_bar_close -- briefly tried freq_all (2026-08-25) to
-//fix a real latency issue (an H1/H4/M30 retest detected early in its own
-//candle could sit undelivered for hours under freq_once_per_bar_close,
-//since that setting delays actual webhook TRANSMISSION to bar close
-//regardless of when alert() was called, not just how often). freq_all
-//WAS safe from this script's own side -- the ob_retested[i] guard above
-//already ensures this call only ever fires once per zone -- but not from
-//TradingView's own separate, platform-level rate limiter: confirmed
-//live, it paused the M1 alert entirely ("Alert paused due to frequent
-//triggers") once enough DIFFERENT zones retested in quick succession on
-//that fast a timeframe. A paused alert delivers nothing at all until
-//manually re-enabled -- worse than the delay this was meant to fix.
-//Reverted (v1.06); the bar-close delay is the accepted tradeoff for now.
+//freq_once_per_bar_close delays actual webhook TRANSMISSION to bar close
+//regardless of when alert() was called, not just how often -- meant a
+//real H1/H4/M30 retest detected early in its own candle could sit
+//undelivered for hours. freq_all fixes that but risks TradingView's
+//own separate, platform-level rate limiter (confirmed live 2026-08-25:
+//it paused the M1 alert entirely, "Alert paused due to frequent
+//triggers", once enough DIFFERENT zones retested in quick succession on
+//that fast a timeframe -- a paused alert delivers NOTHING until
+//manually re-enabled, strictly worse than the delay). v1.07 (2026-08-27)
+//resolves this per-call instead of picking one setting for every
+//timeframe: freq_all only on M30 and slower (M30/H1/H2/H4), where the
+//structural ceiling is one bar close per hour or more -- nowhere near
+//the ~15-alerts/minute threshold that actually tripped the M1 pause --
+//while M1/M3/M5/M15 keep freq_once_per_bar_close exactly as before,
+//since those ARE fast enough for that same pause to recur. Either way
+//the ob_retested[i] guard above already ensures this call only ever
+//fires once per zone -- that was never what caused the pause.
 mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_retested_bar, dir_label)=>
     retested_this_call = false
     // Guard against an empty array: Pine's `for i = 0 to array.size()-1`
@@ -165,7 +189,12 @@ mark_retests(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob_ret
                       '","direction":"' + dir_label +
                       '","start_time":' + str.tostring(math.round(zone_start / 1000), '#') +
                       ',"retested_time":' + str.tostring(math.round(time / 1000), '#') + '}'
-                    alert(retest_payload, alert.freq_once_per_bar_close)
+                    // 1800 = 30 minutes -- M30 and slower (M30/H1/H2/H4)
+                    // get immediate delivery, M1/M3/M5/M15 keep the
+                    // bar-close delay. See this function's own comment
+                    // above for the full reasoning.
+                    retest_freq = timeframe.in_seconds() >= 1800 ? alert.freq_all : alert.freq_once_per_bar_close
+                    alert(retest_payload, retest_freq)
 
     retested_this_call
 
