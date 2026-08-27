@@ -1210,6 +1210,25 @@ def _close_if_opposite_ltf_ob(store: ZoneStore, tracker: ReversalTracker, symbol
         anchor = trade.pending_armed_at
     else:
         return False  # neither a real fill nor a known arm time yet -- nothing to check against
+    # Entry zone's own mitigation ALSO closes/cancels now (2026-08-27,
+    # real gap found live: a still-PENDING M5-direct-fire BUY_STOP sat
+    # resting on a zone that had already broken in reality -- real MT5
+    # price already below the zone's own bottom edge -- with nothing
+    # here checking for that at all, only an OPPOSITE OB was ever
+    # checked below). Distinct from the user's own "lower time ob
+    # invalidation doesn't close the trade" rule this function is named
+    # for -- that's specifically about M1/M3 (LOWER than this trade's
+    # own M5 entry timeframe) zones mitigating, not about the trade's
+    # own entry reference itself getting mitigated. User's explicit
+    # confirmation when asked directly, 2026-08-27: "yes, cancel it."
+    if store.get(symbol, trade.entry_timeframe, trade.direction, trade.entry_start_time) is None:
+        tracker.close_trade(symbol)
+        tf_label = _TF_LABELS.get(trade.entry_timeframe, trade.entry_timeframe)
+        action = "closing" if trade.status == "FILLED" else "cancelling pending"
+        print(f"[reversal_manager] {symbol}: entry zone ({tf_label}) itself was mitigated -- "
+              f"{action} {_DIRECTION_LABELS[trade.direction]} trade")
+        return True
+
     opposite = "bear" if trade.direction == "bull" else "bull"
     for timeframe in ("1", "3"):
         zone = _newest_post_time_zone(store, symbol, timeframe, opposite, int(anchor))
