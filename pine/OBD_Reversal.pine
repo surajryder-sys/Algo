@@ -1,5 +1,17 @@
-// OBD_Reversal v1.07 -- order block detection + retest/mitigation webhooks
+// OBD_Reversal v1.08 -- order block detection + retest/mitigation webhooks
 // feeding v3's Reversal Manager (see v3/signal_engine/reversal_manager.py).
+//
+// v1.08 (2026-08-27): ob_zone_mitigated's alert() gets the SAME per-call
+// M30-and-slower freq_all split v1.07 just added for ob_zone_retested --
+// confirmed live the same session, a still-PENDING XAUUSD M5-direct-fire
+// order sat resting on a zone that had already broken (real MT5 price
+// already below the zone's own bottom edge) while the webhook data still
+// showed mitigated_time: null, delayed to that M5 bar's own close. See
+// remove_mitigated()'s own comment for why freq_all is safe here despite
+// this alert's OWN different history (a real duplicate-firing bug, not
+// the rate-limiter pause retests hit) -- the consuming code
+// (ZoneStore.apply_mitigated) is idempotent, so a duplicate delivery is
+// harmless.
 //
 // v1.07 (2026-08-27): ob_zone_retested's alert() now picks freq_all vs
 // freq_once_per_bar_close PER CALL, based on the CURRENT chart's own
@@ -247,12 +259,22 @@ remove_mitigated(ob_top, ob_btm, ob_left, ob_avg, ob_formed_bar, ob_retested, ob
               ',"mitigated_time":' + str.tostring(bar_time_sec, '#') +
               ',"mitigated_price":' + str.tostring(target) + '}'
 
-            // freq_once_per_bar_close (not freq_all -- see the matching
-            // comment on the formation alerts below for why): confirmed
-            // live 2026-07-31, freq_all fired the SAME mitigation 8 times
-            // within under a second (one per script recalculation, not
-            // once per real event).
-            alert(mit_payload, alert.freq_once_per_bar_close)
+            // Same per-timeframe split as ob_zone_retested above (v1.07,
+            // 2026-08-27), and safe for a DIFFERENT reason than that one:
+            // this alert's own freq_all history isn't the rate-limiter
+            // pause, it's a genuine DUPLICATE-firing bug confirmed live
+            // 2026-07-31 (freq_all fired the SAME mitigation 8 times
+            // within under a second, one per script recalculation, not
+            // once per real event) -- but the consuming side
+            // (ZoneStore.apply_mitigated) is a plain dict.pop(key, None),
+            // genuinely idempotent -- a duplicate delivery for an
+            // already-removed zone is a harmless no-op, not a bug. Same
+            // M30-and-slower reasoning applies for the rate-limiter side
+            // too (structurally can't approach ~15 alerts/minute), so
+            // freq_all is safe here on those four timeframes for BOTH
+            // reasons a fast timeframe would still need to avoid it.
+            mit_freq = timeframe.in_seconds() >= 1800 ? alert.freq_all : alert.freq_once_per_bar_close
+            alert(mit_payload, mit_freq)
 
             array.remove(ob_top, idx)
             array.remove(ob_btm, idx)
