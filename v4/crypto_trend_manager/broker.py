@@ -1,0 +1,117 @@
+"""Thin MT5 wrapper for the crypto Trend Manager -- every function takes a
+symbol parameter since one process/one connection handles both BTCUSD and
+ETHUSD (see config.py's own docstring for why). Own copy, not shared with
+v4/trend_manager/broker.py -- same per-bot isolation convention as
+everywhere else in this repo, even though the two are structurally
+similar.
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+import MetaTrader5 as mt5
+
+from v4.crypto_trend_manager.config import Config
+
+
+def connect(cfg: Config) -> None:
+    kwargs = {}
+    if cfg.mt5_terminal_path:
+        kwargs["path"] = cfg.mt5_terminal_path
+    if cfg.mt5_login and cfg.mt5_password and cfg.mt5_server:
+        kwargs.update(login=cfg.mt5_login, password=cfg.mt5_password, server=cfg.mt5_server)
+
+    if not mt5.initialize(**kwargs):
+        raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
+
+    for symbol in ("BTCUSD", "ETHUSD"):
+        if not mt5.symbol_select(symbol, True):
+            raise RuntimeError(f"Could not select symbol {symbol}: {mt5.last_error()}")
+
+
+def shutdown() -> None:
+    mt5.shutdown()
+
+
+def get_mid_price(symbol: str) -> float:
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        raise RuntimeError(f"No tick for {symbol}: {mt5.last_error()}")
+    return (tick.bid + tick.ask) / 2.0
+
+
+def get_position(cfg: Config, symbol: str):
+    """The single open crypto-Trend-Manager position (own magic number)
+    for this symbol, or None -- one position per symbol at a time
+    (netting account; an opposite-direction order closes/reverses it)."""
+    positions = mt5.positions_get(symbol=symbol) or ()
+    for p in positions:
+        if p.magic == cfg.magic_number:
+            return p
+    return None
+
+
+def position_direction(cfg: Config, symbol: str) -> Optional[str]:
+    """"buy" | "sell" | None (flat) -- convenience wrapper used constantly
+    by the cross-symbol gating logic in engine.py."""
+    p = get_position(cfg, symbol)
+    if p is None:
+        return None
+    return "buy" if p.type == mt5.ORDER_TYPE_BUY else "sell"
+
+
+def send_market_order(cfg: Config, symbol: str, direction: str, sl: float, comment: str):
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        raise RuntimeError(f"No tick for {symbol}: {mt5.last_error()}")
+
+    order_type = mt5.ORDER_TYPE_BUY if direction == "buy" else mt5.ORDER_TYPE_SELL
+    price = tick.ask if direction == "buy" else tick.bid
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": cfg.lot_sizes[symbol],
+        "type": order_type,
+        "price": price,
+        "sl": sl,
+        "magic": cfg.magic_number,
+        "comment": comment,
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    return mt5.order_send(request)
+
+
+def close_position(cfg: Config, symbol: str, comment: str):
+    """Flattens this symbol's current crypto-Trend-Manager position with an
+    opposite-direction deal for its FULL volume -- used only by the
+    cross-symbol gating rule (BTCUSD's open position closing ETHUSD's
+    opposing one proactively, "close sell and wait for buy setup"), not by
+    ordinary same-engine reversals (those just net via send_market_order
+    like everywhere else in this repo). No-op (returns None) if nothing is
+    actually open."""
+    p = get_position(cfg, symbol)
+    if p is None:
+        return None
+
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        raise RuntimeError(f"No tick for {symbol}: {mt5.last_error()}")
+
+    closing_type = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+    price = tick.bid if closing_type == mt5.ORDER_TYPE_SELL else tick.ask
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": p.volume,
+        "type": closing_type,
+        "position": p.ticket,
+        "price": price,
+        "magic": cfg.magic_number,
+        "comment": comment,
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    return mt5.order_send(request)
