@@ -98,3 +98,5 @@ execution_bridge_exit_state_reversal.json
 reversal_manager_state.json
 smc_v2_bot_direction_blocks.json
 smc_v2_bot_zone_cooldown.json
+v4_m1_execution_state.json
+v4_exit_manager_state.json

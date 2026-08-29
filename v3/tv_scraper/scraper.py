@@ -347,8 +347,9 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
                       symbol: str, timeframe: str, direction: str, current: list[dict],
                       previously_seen: dict[int, int], missing_streak: dict[int, int],
                       pending_retest: dict[int, int], pending_formed: dict[int, int],
+                      pending_pine_confirm: dict[int, int],
                       close_price: Optional[float], zone_history_log_path: Optional[str] = None
-                      ) -> tuple[dict[int, int], dict[int, int], dict[int, int], dict[int, int]]:
+                      ) -> tuple[dict[int, int], dict[int, int], dict[int, int], dict[int, int], dict[int, int]]:
     """Applies formed zones for one direction and marks any zone that has
     dropped out of view for _MITIGATION_DEBOUNCE_POLLS consecutive polls as
     mitigated -- LuxAlgo only removes a zone once it's actually violated, so
@@ -564,6 +565,7 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
     new_missing_streak: dict[int, int] = {}
     new_pending_retest: dict[int, int] = {}
     new_pending_formed: dict[int, int] = {}
+    new_pending_pine_confirm: dict[int, int] = {}
 
     for zone in current:
         if not _price_plausible(symbol, zone["top"], zone["btm"]):
@@ -687,8 +689,31 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
         # this module next polls), which is a fine trade for not
         # fabricating retests out of slot reuse.
         elif retested_at is None and pine_retested_flag and not is_first_sighting:
-            retested_at = retested.mark(symbol, timeframe, direction, price_key,
-                                         hint=confirmed_retest_hint)
+            # A single poll's pine_retested_flag=True for an ALREADY-
+            # established zone is exactly the slot-reuse failure mode
+            # described above: LuxAlgo's Retested flag is keyed by ARRAY
+            # SLOT position (Bull1-4), not zone identity, so a top-4
+            # display-churn poll can hand an untouched zone a neighbor's
+            # already-true flag for exactly one poll before things
+            # settle back. Confirmed live 2026-08-28: this produced 6
+            # permanently-stuck false retests across multiple
+            # timeframes (two zones even sharing the IDENTICAL
+            # fabricated retested_at from one single churn poll) --
+            # permanent because mark() always tags source="pine", and
+            # reconcile() explicitly refuses to ever un-mark a
+            # "pine"-sourced entry (see that method's own docstring: a
+            # real Pine retest never un-sets, so a "pine" positive is
+            # trusted for good). Same 2-consecutive-poll confirmation
+            # gate as pending_retest/pending_formed above fixes it: only
+            # trust the flag once it reads True on two polls in a row --
+            # a genuine retest keeps reading True every poll after
+            # (LuxAlgo's own flag is one-way), but a one-poll slot-churn
+            # artifact won't still read True on the very next poll.
+            if price_key in pending_pine_confirm:
+                retested_at = retested.mark(symbol, timeframe, direction, price_key,
+                                             hint=confirmed_retest_hint)
+            else:
+                new_pending_pine_confirm[price_key] = 1
 
         # Log to the permanent zone-history record the FIRST time this
         # exact start_time is ever written to ZoneStore -- not every
@@ -753,7 +778,7 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
         # price_keys seen THIS poll), so a mitigated zone's stale pending
         # hint simply isn't carried forward.
 
-    return seen_now, new_missing_streak, new_pending_retest, new_pending_formed
+    return seen_now, new_missing_streak, new_pending_retest, new_pending_formed, new_pending_pine_confirm
 
 
 # Keyed by pane_label -- the last (symbol, timeframe) this pane
@@ -958,34 +983,72 @@ def run_once_pane(page: Page, zones: ZoneStore, atr: AtrStore, first_seen: First
         parsed.close = None
 
     atr_data = None
-    if parsed.atr is not None and _price_plausible(symbol, parsed.atr["trail_stop"], parsed.atr["trail_stop"]):
-        atr_data = dict(parsed.atr)
-        # trend: derived live from close vs trail_stop instead of a
-        # dedicated chart plot (see atr_trend_tracker.py's docstring for
-        # why -- a "Trend" plot broke this chart's price autoscale the
-        # same way raw start_time once did for OB zones). Only overrides
-        # the parser's own trend value when Close was actually read this
-        # poll; falls back to whatever the parser found otherwise.
-        if parsed.close is not None:
-            computed_trend = 1 if parsed.close > atr_data["trail_stop"] else -1
-            trend, event_time = trend_tracker.update(symbol, timeframe, computed_trend, int(now))
-            atr_data["trend"] = trend
-            atr_data["event_time"] = event_time
-        atr.apply(symbol, timeframe, atr_data, now)
-    elif parsed.atr is not None:
-        print(f"[tv_scraper] {symbol} {timeframe}: REJECTED implausible ATR trail_stop="
-              f"{parsed.atr['trail_stop']} -- outside {symbol}'s own price range, "
-              f"likely cross-symbol contamination")
+    if parsed.atr is not None:
+        atr_data = {}
+        for line in ("line1", "line2"):
+            line_raw = parsed.atr.get(line)
+            if line_raw is None:
+                continue
+            trail_stop = line_raw["trail_stop"]
+            if not _price_plausible(symbol, trail_stop, trail_stop):
+                print(f"[tv_scraper] {symbol} {timeframe}: REJECTED implausible ATR {line} trail_stop="
+                      f"{trail_stop} -- outside {symbol}'s own price range, "
+                      f"likely cross-symbol contamination")
+                continue
+            line_data = {"trail_stop": trail_stop}
+            # trend: derived live from close vs trail_stop instead of a
+            # dedicated chart plot (see atr_trend_tracker.py's docstring for
+            # why -- a "Trend" plot broke this chart's price autoscale the
+            # same way raw start_time once did for OB zones). Only computed
+            # when Close was actually read this poll.
+            if parsed.close is not None:
+                computed_trend = 1 if parsed.close > trail_stop else -1
+                trend, event_time = trend_tracker.update_line(symbol, timeframe, line, computed_trend, int(now))
+                line_data["trend"] = trend
+                line_data["event_time"] = event_time
+                # Independent AtrStore entry per line (atr_period="line1"/
+                # "line2") -- reuses the same multi-period keying AtrStore
+                # already supports for the alert path (see that module's
+                # own docstring), so neither line overwrites the other.
+                atr.apply(symbol, timeframe, {**line_data, "atr_period": line}, now)
+            atr_data[line] = line_data
+
+        # Combined structure: both lines' LAST COMMITTED trend (not just
+        # whatever was freshly read this exact poll -- see
+        # get_committed_trend's own docstring) combined per the user's
+        # explicit rule -- both agreeing is STRONG/WEAK, anything else
+        # (disagreement, or a line never seen yet) is UNDECISIVE.
+        line1_trend = trend_tracker.get_committed_trend(symbol, timeframe, "line1")
+        line2_trend = trend_tracker.get_committed_trend(symbol, timeframe, "line2")
+        structure, structure_event_time = trend_tracker.update_structure(
+            symbol, timeframe, line1_trend, line2_trend, int(now))
+        atr_data["structure"] = structure
+        atr_data["structure_event_time"] = structure_event_time
+
+        # Legacy single-value key, unchanged shape from before this chart
+        # plotted two lines -- v3/algo_v2_tv_xauusd's reader.py still calls
+        # AtrStore.get(symbol, tf) with no atr_period, expecting one
+        # trend/trail_stop/event_time. Line 1 (fast) stands in for that: no
+        # more arbitrary than before this fix existed (the two old separate
+        # indicator copies both plotted as generic "Trailing Stop" with no
+        # principled way to prefer one either), and it un-freezes what's
+        # been stuck since 2026-08-20 instead of leaving it frozen.
+        if "line1" in atr_data and "trend" in atr_data["line1"]:
+            l1 = atr_data["line1"]
+            atr.apply(symbol, timeframe, {"trail_stop": l1["trail_stop"], "trend": l1["trend"],
+                                          "event_time": l1["event_time"]}, now)
 
     for direction, direction_zones in (("bull", parsed.bull_zones), ("bear", parsed.bear_zones)):
-        seen, streak, pending_retest, pending_formed = _apply_direction(
+        seen, streak, pending_retest, pending_formed, pending_pine_confirm = _apply_direction(
             zones, first_seen, retested, symbol, timeframe, direction, direction_zones,
             mitigation_track.get_last_seen(symbol, timeframe, direction),
             mitigation_track.get_missing_streak(symbol, timeframe, direction),
             mitigation_track.get_pending_retest(symbol, timeframe, direction),
-            mitigation_track.get_pending_formed(symbol, timeframe, direction), parsed.close,
+            mitigation_track.get_pending_formed(symbol, timeframe, direction),
+            mitigation_track.get_pending_pine_confirm(symbol, timeframe, direction), parsed.close,
             zone_history_log_path)
-        mitigation_track.update(symbol, timeframe, direction, seen, streak, pending_retest, pending_formed)
+        mitigation_track.update(symbol, timeframe, direction, seen, streak, pending_retest, pending_formed,
+                                 pending_pine_confirm)
 
     # Raw mirror -- exactly this poll's parsed Bull1-4/Bear1-4 (top/btm/
     # retested) and Close/ATR, no history, no interpretation. See

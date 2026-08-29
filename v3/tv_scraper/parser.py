@@ -40,7 +40,17 @@ def _normalize_timeframe(raw: str) -> str:
     m = _HOUR_TF_RE.match(raw)
     return str(int(m.group(1)) * 60) if m else raw
 
-_ATR_LABELS = {"Trailing Stop": "trail_stop", "Trend": "trend"}
+_ATR_LABELS = {"Line 1 Trailing Stop": "line1", "Line 2 Trailing Stop": "line2"}
+# Was a single {"Trailing Stop": "trail_stop"} label, matching the chart's
+# ATR indicator when it was two separate single-line copies (each plotted
+# generically as "Trailing Stop"). Broke silently (parsed.atr permanently
+# None, confirmed live via the scraper's own run log -- zero "REJECTED"
+# lines either, i.e. the label was never found at all) when pine/OBD_ATR.pine
+# was consolidated 2026-08-20 into one indicator plotting two named lines
+# ("Line 1 Trailing Stop" fast / "Line 2 Trailing Stop" slow) instead. See
+# atr_trend_tracker.py's docstring for how these two are combined into one
+# STRONG/WEAK/UNDECISIVE structure reading now that both are available
+# separately.
 # The symbol's own live Close, from the Data Window's own O/H/L/C block (not
 # an indicator plot) -- used as a stand-in for "price at detection", the
 # same live-price role OBD_Reversal.pine's `close` plays in the
@@ -95,7 +105,11 @@ def _to_number(raw: str) -> Optional[float]:
 
 @dataclass
 class ParsedState:
-    atr: Optional[dict]  # {"trail_stop": float, "trend": int} or None
+    atr: Optional[dict]  # {"line1": {"trail_stop": float}, "line2": {...}} or None
+    # -- either key can be present without the other (a slow chart redraw
+    # can leave one line's plot not yet rendered on a given poll); trend
+    # per line is derived live from trail_stop + Close downstream (see
+    # atr_trend_tracker.py), same as before this had two lines.
     bull_zones: list[dict]  # [{"top", "btm"}, ...] newest first -- no
     bear_zones: list[dict]  # start_time (see OBD_Reversal.pine)
     symbol: Optional[str]  # actual ticker read off the chart, e.g. "XAUUSD"
@@ -141,11 +155,12 @@ def parse_data_window(text: str) -> ParsedState:
         i += 1
 
     atr = None
-    if "trail_stop" in atr_fields:
-        atr = {
-            "trail_stop": atr_fields["trail_stop"],
-            "trend": int(atr_fields.get("trend", 0)),
-        }
+    if "line1" in atr_fields or "line2" in atr_fields:
+        atr = {}
+        if "line1" in atr_fields:
+            atr["line1"] = {"trail_stop": atr_fields["line1"]}
+        if "line2" in atr_fields:
+            atr["line2"] = {"trail_stop": atr_fields["line2"]}
 
     def _zones(direction: str) -> list[dict]:
         out = []

@@ -41,6 +41,14 @@ class MitigationTrackStore:
         self._missing_streak: dict[str, dict[int, int]] = {}
         self._pending_retest: dict[str, dict[int, int]] = {}
         self._pending_formed: dict[str, dict[int, int]] = {}
+        # 2-consecutive-poll confirmation gate for scraper.py's
+        # pine_retested_flag fallback (added 2026-08-28, same shape/reason
+        # as pending_retest/pending_formed -- see _apply_direction's own
+        # comment at that branch for the slot-reuse false-positive it
+        # guards against). Missing from an older state file just means
+        # "nothing was pending" -- same safe default every other dict here
+        # already gets via .get(section, {}) below.
+        self._pending_pine_confirm: dict[str, dict[int, int]] = {}
         self._load()
 
     @staticmethod
@@ -54,7 +62,7 @@ class MitigationTrackStore:
             raw = json.loads(self._path.read_text())
         except (json.JSONDecodeError, OSError):
             return
-        for attr in ("last_seen", "missing_streak", "pending_retest", "pending_formed"):
+        for attr in ("last_seen", "missing_streak", "pending_retest", "pending_formed", "pending_pine_confirm"):
             section = raw.get(attr, {})
             setattr(self, f"_{attr}", {
                 key: {int(pk): int(v) for pk, v in inner.items()}
@@ -67,6 +75,7 @@ class MitigationTrackStore:
             "missing_streak": self._missing_streak,
             "pending_retest": self._pending_retest,
             "pending_formed": self._pending_formed,
+            "pending_pine_confirm": self._pending_pine_confirm,
         }
         self._path.write_text(json.dumps(out))
 
@@ -82,17 +91,22 @@ class MitigationTrackStore:
     def get_pending_formed(self, symbol: str, timeframe: str, direction: str) -> dict[int, int]:
         return dict(self._pending_formed.get(self._key(symbol, timeframe, direction), {}))
 
+    def get_pending_pine_confirm(self, symbol: str, timeframe: str, direction: str) -> dict[int, int]:
+        return dict(self._pending_pine_confirm.get(self._key(symbol, timeframe, direction), {}))
+
     def update(self, symbol: str, timeframe: str, direction: str,
                last_seen: dict[int, int], missing_streak: dict[int, int],
-               pending_retest: dict[int, int], pending_formed: dict[int, int]) -> None:
-        """Writes all four values for this (symbol, timeframe, direction)
+               pending_retest: dict[int, int], pending_formed: dict[int, int],
+               pending_pine_confirm: dict[int, int]) -> None:
+        """Writes all five values for this (symbol, timeframe, direction)
         in one call and saves once -- matches exactly how
-        run_once_pane() already computes all four together per direction
-        per poll, so this never leaves the four out of sync with each
+        run_once_pane() already computes all five together per direction
+        per poll, so this never leaves them out of sync with each
         other on disk."""
         key = self._key(symbol, timeframe, direction)
         self._last_seen[key] = last_seen
         self._missing_streak[key] = missing_streak
         self._pending_retest[key] = pending_retest
         self._pending_formed[key] = pending_formed
+        self._pending_pine_confirm[key] = pending_pine_confirm
         self._save()
