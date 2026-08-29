@@ -164,10 +164,17 @@ def evaluate_symbol(state: EngineState, symbol: str, current_position_direction:
         return EvaluationResult(None, f"{winner.tag} {winner.direction} winning (et={winner.event_time}), "
                                        f"waiting for M5 confirmation (M5 structure={m5.state})")
 
-    if confirm.event_time <= winner.event_time:
+    if confirm.event_time < winner.event_time:
         return EvaluationResult(None, f"{winner.tag} {winner.direction} winning but M5's {confirm.kind} "
                                        f"confirmation (et={confirm.event_time}) predates the parent bias itself "
                                        f"(et={winner.event_time}) -- stale, waiting for a fresh M5 flip")
+    # Strictly-less-than only -- confirm.event_time == winner.event_time
+    # (parent and M5 both flipping in the exact same instant) is explicitly
+    # VALID per the user's own example, 2026-08-30 ("a bullish flip
+    # happened in M15 at 9:15, same time lowertimeframe also confirmed
+    # exactly at same time... both conditions meeting exactly at same time
+    # also works"). A strict > here would wrongly reject that simultaneous
+    # case as "stale."
 
     last_used = state.last_confirmation_event_time(symbol)
     if last_used is not None and confirm.event_time <= last_used:
