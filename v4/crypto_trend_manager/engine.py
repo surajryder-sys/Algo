@@ -69,8 +69,23 @@ class EngineState:
         self._path.write_text(json.dumps(self._data, indent=2))
 
     def _entry(self, symbol: str) -> dict:
-        return self._data.setdefault(symbol, {"candidate_key": None, "fired": False,
-                                               "last_confirmation_event_time": None})
+        """dict.setdefault only fills in the default when `symbol` is
+        missing ENTIRELY -- confirmed live bug, 2026-08-30: this state file
+        already had a "BTCUSD" entry from before last_confirmation_event_
+        time existed (old schema: just candidate_key/fired), so setdefault
+        silently returned that OLD, incomplete dict unchanged, and
+        .get("last_confirmation_event_time") on it always came back None
+        -- "never used before" -- for every check against a pre-existing
+        symbol, completely defeating the confirmation-reuse fix for any
+        state file that predated it. A stale 25-minute-old M5 confirmation
+        got reused to fire a real trade because of exactly this gap.
+        Backfilling missing keys onto the EXISTING dict (not just
+        inserting a fresh one when the whole entry is absent) closes it."""
+        entry = self._data.setdefault(symbol, {})
+        entry.setdefault("candidate_key", None)
+        entry.setdefault("fired", False)
+        entry.setdefault("last_confirmation_event_time", None)
+        return entry
 
     def current_key(self, symbol: str) -> Optional[list]:
         return self._entry(symbol)["candidate_key"]
