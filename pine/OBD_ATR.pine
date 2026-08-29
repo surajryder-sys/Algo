@@ -1,7 +1,11 @@
-//@version=4
-study(title="OBD_ATR v1.1", overlay = true)
+//@version=6
+indicator(title="OBD_ATR v1.1", overlay = true)
 //CREDITS to HPotter for the orginal ATR-trailing-stop code. The guy trying
 //to sell this as his own is a scammer lol.
+//
+//Ported to Pine v6 (2026-08-27) -- syntax-only (study->indicator,
+//atr->ta.atr, max/min/round->math.*, tostring->str.tostring, typed
+//input.*() instead of generic input()); no logic changed.
 //
 //Consolidated 2026-08-20 (v1.0, renamed from atr_trail_webhook.pine) --
 //was two separate copies of this indicator on the same chart (Key
@@ -29,7 +33,7 @@ study(title="OBD_ATR v1.1", overlay = true)
 //auto-indent (which just repeats the previous line's level) can't drift.
 src = close
 
-webhook_secret = input("", title="Webhook Secret")
+webhook_secret = input.string("", title="Webhook Secret")
 // Heartbeat interval (2026-08-24, v1.1) -- was firing every single bar
 // close unconditionally, which meant one webhook per 3-min bar forever
 // even when trend never changed (that volume is what prompted this).
@@ -42,17 +46,17 @@ webhook_secret = input("", title="Webhook Secret")
 // except total silence). event_time_N below still only updates on a
 // genuine flip either way, so a heartbeat resend never looks like a new
 // flip on the Python side.
-heartbeat_bars = input(10, title="Heartbeat every N bars", minval=1)
+heartbeat_bars = input.int(10, title="Heartbeat every N bars", minval=1)
 
 // --- Line 1 (fast, by default) ---
-keyvalue_1 = input(2, title = "Line 1 Key Value", step = .5, group = "Line 1")
-atrperiod_1 = input(2, title = "Line 1 ATR Period", group = "Line 1")
+keyvalue_1 = input.float(2, title = "Line 1 Key Value", step = .5, group = "Line 1")
+atrperiod_1 = input.int(2, title = "Line 1 ATR Period", group = "Line 1")
 
 // --- Line 2 (slow, by default) ---
-keyvalue_2 = input(2, title = "Line 2 Key Value", step = .5, group = "Line 2")
-atrperiod_2 = input(300, title = "Line 2 ATR Period", group = "Line 2")
+keyvalue_2 = input.float(2, title = "Line 2 Key Value", step = .5, group = "Line 2")
+atrperiod_2 = input.int(300, title = "Line 2 ATR Period", group = "Line 2")
 
-bar_time_sec = round(time / 1000)
+bar_time_sec = math.round(time / 1000)
 
 //Function to compute the ATR trailing stop + trend (1/-1) for one
 //(keyvalue, atrperiod) pair -- same logic the original single-line
@@ -60,13 +64,13 @@ bar_time_sec = round(time / 1000)
 //written as flat ternary chains instead of nested multi-line iff() calls
 //so every line stays at one indent level (see module header).
 compute_trail(keyvalue, atrperiod) =>
-    xATR = atr(atrperiod)
+    xATR = ta.atr(atrperiod)
     nLoss = keyvalue * xATR
     var float trail = 0.0
     above_prev = src > nz(trail[1], 0) and src[1] > nz(trail[1], 0)
     below_prev = src < nz(trail[1], 0) and src[1] < nz(trail[1], 0)
     still_above = src > nz(trail[1], 0)
-    trail := above_prev ? max(nz(trail[1]), src - nLoss) : below_prev ? min(nz(trail[1]), src + nLoss) : (still_above ? src - nLoss : src + nLoss)
+    trail := above_prev ? math.max(nz(trail[1]), src - nLoss) : below_prev ? math.min(nz(trail[1]), src + nLoss) : (still_above ? src - nLoss : src + nLoss)
     var int trend = 0
     crossed_up = src[1] < nz(trail[1], 0) and src > nz(trail[1], 0)
     crossed_dn = src[1] > nz(trail[1], 0) and src < nz(trail[1], 0)
@@ -76,11 +80,11 @@ compute_trail(keyvalue, atrperiod) =>
 [trail_1, trend_1] = compute_trail(keyvalue_1, atrperiod_1)
 [trail_2, trend_2] = compute_trail(keyvalue_2, atrperiod_2)
 
-color_1 = trend_1 == -1 ? color.red : trend_1 == 1 ? color.green : color.blue
-color_2 = trend_2 == -1 ? color.red : trend_2 == 1 ? color.green : color.blue
+line1_color = input.color(color.gray, title = "Line 1 Color", group = "Line 1")
+line2_color = input.color(color.gray, title = "Line 2 Color", group = "Line 2")
 
-plot(trail_1, color = color_1, title = "Line 1 Trailing Stop")
-plot(trail_2, color = color_2, title = "Line 2 Trailing Stop", style = plot.style_circles)
+plot(trail_1, color = line1_color, title = "Line 1 Trailing Stop", style = plot.style_line)
+plot(trail_2, color = line2_color, title = "Line 2 Trailing Stop", style = plot.style_line)
 
 //-----------------------------------------------------------------------------}
 //Webhook: fires per line, with that line's own trail/trend state --
@@ -106,10 +110,10 @@ var float event_time_1_ms = na
 flipped_1 = trend_1 != nz(trend_1[1], 0)
 if flipped_1
     event_time_1_ms := time
-event_time_1_sec = na(event_time_1_ms) ? 0 : round(event_time_1_ms / 1000)
+event_time_1_sec = na(event_time_1_ms) ? 0 : math.round(event_time_1_ms / 1000)
 send_1 = flipped_1 or bar_index % heartbeat_bars == 0
 
-atr_payload_1 = '{"secret":"' + webhook_secret + '","type":"atr_trail","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","atr_period":"' + tostring(atrperiod_1, '#') + '","trail_stop":' + tostring(trail_1) + ',"trend":' + tostring(trend_1, '#') + ',"event_time":' + tostring(event_time_1_sec, '#') + ',"bar_time":' + tostring(bar_time_sec, '#') + '}'
+atr_payload_1 = '{"secret":"' + webhook_secret + '","type":"atr_trail","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","atr_period":"' + str.tostring(atrperiod_1, '#') + '","trail_stop":' + str.tostring(trail_1) + ',"trend":' + str.tostring(trend_1, '#') + ',"event_time":' + str.tostring(event_time_1_sec, '#') + ',"bar_time":' + str.tostring(bar_time_sec, '#') + '}'
 if send_1
     alert(atr_payload_1, alert.freq_once_per_bar_close)
 
@@ -117,10 +121,10 @@ var float event_time_2_ms = na
 flipped_2 = trend_2 != nz(trend_2[1], 0)
 if flipped_2
     event_time_2_ms := time
-event_time_2_sec = na(event_time_2_ms) ? 0 : round(event_time_2_ms / 1000)
+event_time_2_sec = na(event_time_2_ms) ? 0 : math.round(event_time_2_ms / 1000)
 send_2 = flipped_2 or bar_index % heartbeat_bars == 0
 
-atr_payload_2 = '{"secret":"' + webhook_secret + '","type":"atr_trail","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","atr_period":"' + tostring(atrperiod_2, '#') + '","trail_stop":' + tostring(trail_2) + ',"trend":' + tostring(trend_2, '#') + ',"event_time":' + tostring(event_time_2_sec, '#') + ',"bar_time":' + tostring(bar_time_sec, '#') + '}'
+atr_payload_2 = '{"secret":"' + webhook_secret + '","type":"atr_trail","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","atr_period":"' + str.tostring(atrperiod_2, '#') + '","trail_stop":' + str.tostring(trail_2) + ',"trend":' + str.tostring(trend_2, '#') + ',"event_time":' + str.tostring(event_time_2_sec, '#') + ',"bar_time":' + str.tostring(bar_time_sec, '#') + '}'
 if send_2
     alert(atr_payload_2, alert.freq_once_per_bar_close)
 
