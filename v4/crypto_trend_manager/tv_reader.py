@@ -123,7 +123,23 @@ def read_latest_ob(symbol: str, tf_minutes: int) -> Optional[ObZone]:
     file every call -- once a zone is mitigated, ZoneStore deletes it (see
     v3/tv_scraper/zone_history_log.py's own docstring), so an invalidated
     ICT candidate simply stops being returned here on its own, with no
-    extra bookkeeping needed by callers."""
+    extra bookkeeping needed by callers.
+
+    Skips any zone with formed_time_confirmed=False -- confirmed live bug,
+    2026-08-30: that flag is False whenever Pine's own real formation
+    timestamp (FormedMinutesRef) read "na" that poll (see
+    v3/tv_scraper/scraper.py's own formed_hint handling), in which case
+    start_time is a FALLBACK (roughly "when the scraper first noticed
+    this zone"), not the zone's real historical formation time. A
+    genuinely ancient BTCUSD supply zone (top=86880, from BTCUSD's
+    ~January/May price era) had this fallback stamped recent, made it
+    look like the freshest event on the whole chart despite being over
+    8,700 points away from current price, and won the ICT recency race
+    purely on a misleading timestamp -- fired a real trade with an
+    essentially meaningless stop-loss. A zone whose real formation time
+    isn't known yet can't be trusted for recency at all; it simply
+    doesn't compete until Pine confirms it (or never does, in which case
+    it's correctly never eligible)."""
     raw = _read_json(_ZONE_FILES[symbol])
     if raw is None:
         return None
@@ -132,6 +148,8 @@ def read_latest_ob(symbol: str, tf_minutes: int) -> Optional[ObZone]:
     for direction, bull_bear in (("buy", "bull"), ("sell", "bear")):
         zones = raw.get(f"{symbol}|{tf_minutes}|{bull_bear}", {})
         for z in zones.values():
+            if not z.get("formed_time_confirmed", False):
+                continue
             if best is None or z["start_time"] > best.start_time:
                 best = ObZone(direction=direction, start_time=z["start_time"], top=z["top"], btm=z["btm"])
     return best
