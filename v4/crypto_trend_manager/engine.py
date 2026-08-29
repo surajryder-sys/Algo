@@ -40,7 +40,7 @@ class Decision:
     sl: float
     candidate: BiasCandidate
     confirm: Confirmation
-    comment_tag: str  # e.g. "M15-ICT-M5-STR"
+    comment_tag: str  # e.g. "V4S-M15-ICT-M5-STR" -- same V4S prefix as XAUUSD's own comments
 
 
 @dataclass
@@ -52,7 +52,8 @@ class EvaluationResult:
 class EngineState:
     def __init__(self, path: str):
         self._path = Path(path)
-        # symbol -> {"candidate_key": [parent, kind, direction, event_time] or None, "fired": bool}
+        # symbol -> {"candidate_key": [...] or None, "fired": bool,
+        #            "last_confirmation_event_time": int or None}
         self._data: dict[str, dict] = {}
         self._load()
 
@@ -68,7 +69,8 @@ class EngineState:
         self._path.write_text(json.dumps(self._data, indent=2))
 
     def _entry(self, symbol: str) -> dict:
-        return self._data.setdefault(symbol, {"candidate_key": None, "fired": False})
+        return self._data.setdefault(symbol, {"candidate_key": None, "fired": False,
+                                               "last_confirmation_event_time": None})
 
     def current_key(self, symbol: str) -> Optional[list]:
         return self._entry(symbol)["candidate_key"]
@@ -76,17 +78,46 @@ class EngineState:
     def is_fired(self, symbol: str) -> bool:
         return self._entry(symbol)["fired"]
 
+    def last_confirmation_event_time(self, symbol: str) -> Optional[int]:
+        """The event_time of whichever M5 confirmation last actually fired
+        a trade for this symbol -- confirmed live bug, 2026-08-29: a real
+        M5 flip correctly confirmed one parent candidate, then a SECOND,
+        different candidate (an OB whose real formation time predated the
+        first fire, but only became visible in the scraper's zone file
+        afterward -- normal OB-detection lag, see parent_bias.py's own
+        docstring) retroactively became "more recent" and reused that
+        SAME already-consumed M5 event to fire again, even though nothing
+        new had actually happened on the M5 chart -- "not a flip candle."
+        A confirmation can only ever fire ONE trade, ever, regardless of
+        how many different parent candidates it would technically satisfy
+        the ordering check for."""
+        return self._entry(symbol).get("last_confirmation_event_time")
+
     def adopt(self, symbol: str, key: Optional[tuple]) -> None:
         self._entry(symbol)["candidate_key"] = list(key) if key is not None else None
         self._entry(symbol)["fired"] = False
         self._save()
 
-    def mark_fired(self, symbol: str) -> None:
+    def mark_fired(self, symbol: str, confirmation_event_time: int) -> None:
+        self._entry(symbol)["last_confirmation_event_time"] = confirmation_event_time
         self._entry(symbol)["fired"] = True
         self._save()
 
 
-def evaluate_symbol(state: EngineState, symbol: str) -> EvaluationResult:
+def evaluate_symbol(state: EngineState, symbol: str, current_position_direction: Optional[str] = None) -> EvaluationResult:
+    """current_position_direction: this symbol's REAL current open position
+    direction from MT5 ("buy"/"sell"/None) -- confirmed live bug,
+    2026-08-29: without this, nothing stopped a second, independently-
+    confirmed candidate from stacking a DUPLICATE same-direction position
+    on top of an already-open one (this account is RETAIL_HEDGING, not
+    netting -- MT5 will not merge/reject a same-direction order on its
+    own). A same-direction winner while already positioned that way is
+    blocked WITHOUT being marked fired -- it isn't resolved, just
+    temporarily redundant, and should still be allowed to fire later if
+    the existing position closes first and this candidate is still
+    winning. An OPPOSITE-direction winner still fires normally here;
+    main.py is responsible for closing the existing position before
+    sending the new order (this module has no MT5 access)."""
     if not is_scraper_alive(symbol):
         return EvaluationResult(None, f"{symbol}'s tv_scraper looks dead/stale (no live snapshot update in the "
                                        f"last {MAX_SCRAPER_AGE_SECONDS:.0f}s) -- skipping this poll rather than "
@@ -104,6 +135,10 @@ def evaluate_symbol(state: EngineState, symbol: str) -> EvaluationResult:
     if state.is_fired(symbol):
         return EvaluationResult(None, f"{winner.tag} {winner.direction} already fired -- waiting for a new candidate")
 
+    if current_position_direction == winner.direction:
+        return EvaluationResult(None, f"{winner.tag} {winner.direction} winning but {symbol} is already "
+                                       f"positioned {winner.direction} -- not stacking a duplicate")
+
     m5 = read_structure(symbol, 5)
     if m5 is None:
         return EvaluationResult(None, f"{winner.tag} {winner.direction} winning (et={winner.event_time}) "
@@ -119,14 +154,20 @@ def evaluate_symbol(state: EngineState, symbol: str) -> EvaluationResult:
                                        f"confirmation (et={confirm.event_time}) predates the parent bias itself "
                                        f"(et={winner.event_time}) -- stale, waiting for a fresh M5 flip")
 
+    last_used = state.last_confirmation_event_time(symbol)
+    if last_used is not None and confirm.event_time <= last_used:
+        return EvaluationResult(None, f"{winner.tag} {winner.direction} winning but its M5 {confirm.kind} "
+                                       f"confirmation (et={confirm.event_time}) already fired an earlier trade "
+                                       f"(last used et={last_used}) -- not a fresh flip, waiting for a new one")
+
     sl = _compute_sl(symbol, winner)
     if sl is None:
         return EvaluationResult(None, f"{winner.tag} {winner.direction} confirmed by M5 ({confirm.kind}) but "
                                        f"SL inputs unavailable this poll (zone/trail data missing) -- waiting")
 
-    state.mark_fired(symbol)
+    state.mark_fired(symbol, confirm.event_time)
     decision = Decision(direction=winner.direction, sl=sl, candidate=winner, confirm=confirm,
-                         comment_tag=f"{winner.tag}-M5-STR")
+                         comment_tag=f"V4S-{winner.tag}-M5-STR")
     return EvaluationResult(decision, f"FIRING {winner.direction} via {winner.tag} -- M5 {confirm.kind} "
                                        f"confirmation (et={confirm.event_time}) after parent bias (et={winner.event_time})")
 

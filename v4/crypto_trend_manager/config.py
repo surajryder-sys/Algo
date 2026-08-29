@@ -30,6 +30,7 @@ PRIMARY_SYMBOL = "BTCUSD"
 class Config:
     poll_seconds: float
     state_file: str
+    exit_manager_state_file: str
     mt5_terminal_path: Optional[str]
     mt5_login: Optional[int]
     mt5_password: Optional[str]
@@ -44,6 +45,7 @@ def load_config() -> Config:
     return Config(
         poll_seconds=float(os.getenv("CRYPTO_TM_POLL_SECONDS", "2")),
         state_file=os.getenv("CRYPTO_TM_STATE_FILE", "v4_crypto_trend_manager_state.json"),
+        exit_manager_state_file=os.getenv("CRYPTO_TM_EXIT_MANAGER_STATE_FILE", "v4_crypto_exit_manager_state.json"),
         mt5_terminal_path=os.getenv("CRYPTO_TM_MT5_TERMINAL_PATH") or None,
         mt5_login=int(login) if login else None,
         mt5_password=os.getenv("CRYPTO_TM_MT5_PASSWORD") or None,

@@ -115,3 +115,49 @@ def close_position(cfg: Config, symbol: str, comment: str):
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
     return mt5.order_send(request)
+
+
+def modify_sl(cfg: Config, symbol: str, ticket: int, new_sl: float):
+    """Moves the SL on an existing open position -- TRADE_ACTION_SLTP, not
+    a new order. Caller (exit_manager.py, via main.py) is responsible for
+    only calling this when the new SL is actually tighter (never loosens)
+    -- that check lives at the call site, not buried here."""
+    position = mt5.positions_get(ticket=ticket)
+    if not position:
+        raise RuntimeError(f"No position found for ticket {ticket}")
+    p = position[0]
+    request = {
+        "action": mt5.TRADE_ACTION_SLTP,
+        "symbol": symbol,
+        "position": ticket,
+        "sl": new_sl,
+        "tp": p.tp,
+    }
+    return mt5.order_send(request)
+
+
+def partial_close(cfg: Config, symbol: str, ticket: int, direction: str, volume: float, comment: str):
+    """Closes PART of an existing position -- a real deal in the OPPOSITE
+    direction, same symbol, tagged to this position's ticket, for exactly
+    `volume` (less than the position's full size). Netting-account
+    mechanics do the rest, same as close_position above."""
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        raise RuntimeError(f"No tick for {symbol}: {mt5.last_error()}")
+
+    order_type = mt5.ORDER_TYPE_SELL if direction == "buy" else mt5.ORDER_TYPE_BUY
+    price = tick.bid if direction == "buy" else tick.ask
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": volume,
+        "type": order_type,
+        "position": ticket,
+        "price": price,
+        "magic": cfg.magic_number,
+        "comment": comment,
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    return mt5.order_send(request)
