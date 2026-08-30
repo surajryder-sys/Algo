@@ -181,12 +181,27 @@ def run_once(cfg, state: V4ExecutionState, exit_state: ExitManagerState) -> None
         return
     decision = result.decision
 
+    # Confirmed live, 2026-08-31: this account is RETAIL_HEDGING, not
+    # netting (same bug/fix as crypto_trend_manager's own _fire(), found
+    # one day earlier) -- a real BUY and a real SELL sat open
+    # simultaneously for 23 minutes because a valid opposite-direction
+    # signal just opened a second, separate hedged position instead of
+    # reversing the existing one. existing_direction is read BEFORE this
+    # poll's own actions (had_position/state.reconcile already ran above).
+    existing_direction = broker.position_direction(cfg) if had_position else None
+    reversing = existing_direction is not None and existing_direction != decision.direction
+
     comment = _comment(decision)
     if not cfg.enable_trading:
+        prefix = f"(would first CLOSE existing {existing_direction} position) " if reversing else ""
         _log(f"ENTRY SIGNAL (DRY-RUN, V4_ENABLE_TRADING is not true -- nothing sent): "
-             f"{decision.direction.upper()} {cfg.symbol} | initial_sl={decision.initial_sl:.3f} "
+             f"{prefix}{decision.direction.upper()} {cfg.symbol} | initial_sl={decision.initial_sl:.3f} "
              f"(far={decision.far_line}) | source={decision.source} | comment={comment!r}")
         return
+
+    if reversing:
+        close_result = broker.close_position(cfg, f"V4S-REVERSE-CLOSE-{int(time.time())}")
+        _log(f"CLOSED existing {existing_direction} position before reversing -- result={close_result}")
 
     order_result = broker.send_market_order(cfg, decision.direction, decision.initial_sl, comment)
     _log(f"ORDER SENT: {decision.direction.upper()} {cfg.symbol} "

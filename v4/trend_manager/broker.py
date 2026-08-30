@@ -90,13 +90,60 @@ def send_market_order(cfg: Config, direction: str, sl: float, comment: str) -> "
 
 def get_position(cfg: Config):
     """The single open V4 position (own magic number) for this symbol, or
-    None. V4 only ever holds one position at a time (netting account, one
-    direction) -- see has_open_position's own docstring."""
+    None. V4 only ever holds one position at a time -- see
+    close_position's own docstring for how that's actually enforced on
+    this account."""
     positions = mt5.positions_get(symbol=cfg.symbol) or ()
     for p in positions:
         if p.magic == cfg.magic_number:
             return p
     return None
+
+
+def position_direction(cfg: Config) -> Optional[str]:
+    p = get_position(cfg)
+    if p is None:
+        return None
+    return "buy" if p.type == mt5.ORDER_TYPE_BUY else "sell"
+
+
+def close_position(cfg: Config, comment: str) -> "mt5.OrderSendResult":
+    """Flattens the current position with an opposite-direction deal for
+    its FULL volume. Confirmed live, 2026-08-31: this repo's own
+    docstrings had assumed a NETTING account throughout (an opposite
+    order auto-closing/reversing the existing position) -- wrong for this
+    account (RETAIL_HEDGING, confirmed via mt5.account_info().margin_mode
+    while investigating the identical bug in crypto_trend_manager one day
+    earlier). Without this explicit close, a valid new opposite-direction
+    signal just opened a SECOND, separate hedged position instead of
+    reversing -- both a real BUY and a real SELL sat open simultaneously
+    for 23 minutes on 2026-08-31 until the newer one happened to hit its
+    own SL, rather than the older one being closed the moment the newer,
+    valid setup confirmed. No-op (returns None) if nothing is open."""
+    p = get_position(cfg)
+    if p is None:
+        return None
+
+    tick = mt5.symbol_info_tick(cfg.symbol)
+    if tick is None:
+        raise RuntimeError(f"No tick for {cfg.symbol}: {mt5.last_error()}")
+
+    closing_type = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+    price = tick.bid if closing_type == mt5.ORDER_TYPE_SELL else tick.ask
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": cfg.symbol,
+        "volume": p.volume,
+        "type": closing_type,
+        "position": p.ticket,
+        "price": price,
+        "magic": cfg.magic_number,
+        "comment": comment,
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    return mt5.order_send(request)
 
 
 def modify_sl(cfg: Config, ticket: int, new_sl: float) -> "mt5.OrderSendResult":
