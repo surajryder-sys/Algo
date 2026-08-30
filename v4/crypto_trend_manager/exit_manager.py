@@ -124,6 +124,19 @@ class ExitManagerState:
         self._save()
 
 
+# Confirmed live, 2026-08-31 (found while building USOIL/USTEC's own
+# exit_manager.py, which uses sub-1-point thresholds where this bites
+# immediately): entry=71.500 + favor=0.600 computes to
+# favor=0.5999999999999943 in real float64 arithmetic, so a bare
+# `favor >= threshold` can wrongly fail right at the boundary. BTCUSD/
+# ETHUSD's larger round-number thresholds are far less exposed to this in
+# practice (spot-checked against real recent entry prices, no failure
+# found), but not theoretically immune -- applying the same tolerance
+# here too rather than leaving this module as the one place in the repo
+# without it.
+_EPSILON = 1e-6
+
+
 def _favor_points(direction: Direction, entry_price: float, current_price: float) -> float:
     return (current_price - entry_price) if direction == "buy" else (entry_price - current_price)
 
@@ -146,9 +159,9 @@ def _trail_level(symbol: str, direction: Direction, entry_price: float, peak_fav
     docstring) is what protects the position in that gap."""
     step = TRAIL_STEP[symbol]
     gap = TRAIL_GAP[symbol]
-    if peak_favor < step:
+    if peak_favor < step - _EPSILON:
         return None
-    n = math.floor(peak_favor / step)
+    n = math.floor((peak_favor + _EPSILON) / step)
     offset = step * n - gap
     if offset < 0:
         return None
@@ -179,7 +192,7 @@ def evaluate_exit_actions(
     # subsumed by the trail formula's first level, or a symbol could wait
     # past its own explicit breakeven point before anything protects it.
     candidates = []
-    if peak >= BREAKEVEN_POINTS[symbol]:
+    if peak >= BREAKEVEN_POINTS[symbol] - _EPSILON:
         candidates.append(entry_price)
     trail_level = _trail_level(symbol, direction, entry_price, peak)
     if trail_level is not None:
@@ -192,10 +205,10 @@ def evaluate_exit_actions(
             sl_update = SLUpdate(new_sl=best)
 
     closes: list[PartialClose] = []
-    if peak >= TIER1_POINTS[symbol] and not state.tier_booked(symbol, ticket, "tier1"):
+    if peak >= TIER1_POINTS[symbol] - _EPSILON and not state.tier_booked(symbol, ticket, "tier1"):
         closes.append(PartialClose(tier="tier1", volume=TIER1_VOLUME[symbol]))
         state.mark_tier_booked(symbol, ticket, "tier1")
-    if peak >= TIER2_POINTS[symbol] and not state.tier_booked(symbol, ticket, "tier2"):
+    if peak >= TIER2_POINTS[symbol] - _EPSILON and not state.tier_booked(symbol, ticket, "tier2"):
         closes.append(PartialClose(tier="tier2", volume=TIER2_VOLUME[symbol]))
         state.mark_tier_booked(symbol, ticket, "tier2")
 
