@@ -38,7 +38,10 @@ of the entry logic above, per symbol, for whichever position is currently
 open -- breakeven + tiered partial-booking + a continuously trailing SL,
 own thresholds per symbol (see that module's own docstring). Applies
 identically to BOTH symbols regardless of which one (primary/secondary)
-opened the trade, or whether it fired via STR or ICT.
+opened the trade.
+
+Entries are structure-based only -- ICT (OB-zone-based) entries were
+removed entirely 2026-08-30, see parent_bias.py's own docstring for why.
 """
 from __future__ import annotations
 

@@ -20,14 +20,8 @@ from typing import Literal, Optional
 
 from v4.crypto_trend_manager.m5_confirm import Confirmation, check_confirmation
 from v4.crypto_trend_manager.parent_bias import BiasCandidate, winning_candidate
-from v4.crypto_trend_manager.sl import ict_sl, str_sl
-from v4.crypto_trend_manager.tv_reader import (
-    MAX_SCRAPER_AGE_SECONDS,
-    is_scraper_alive,
-    read_latest_ob,
-    read_structure,
-    read_trail_stops,
-)
+from v4.crypto_trend_manager.sl import str_sl
+from v4.crypto_trend_manager.tv_reader import MAX_SCRAPER_AGE_SECONDS, is_scraper_alive, read_structure, read_trail_stops
 
 Direction = Literal["buy", "sell"]
 
@@ -40,7 +34,7 @@ class Decision:
     sl: float
     candidate: BiasCandidate
     confirm: Confirmation
-    comment_tag: str  # e.g. "V4S-M15-ICT-M5-STR" -- same V4S prefix as XAUUSD's own comments
+    comment_tag: str  # e.g. "V4S-M15-STR-M5-STR" -- same V4S prefix as XAUUSD's own comments
 
 
 @dataclass
@@ -142,7 +136,7 @@ def evaluate_symbol(state: EngineState, symbol: str, current_position_direction:
     if winner is None:
         if state.current_key(symbol) is not None:
             state.adopt(symbol, None)
-        return EvaluationResult(None, "no parent bias candidate (M30/M15 both UNDECISIVE with no live OB zone)")
+        return EvaluationResult(None, "no parent bias candidate (M30/M15 both UNDECISIVE, no directional flip yet)")
 
     if list(winner.key) != state.current_key(symbol):
         state.adopt(symbol, winner.key)
@@ -196,17 +190,6 @@ def evaluate_symbol(state: EngineState, symbol: str, current_position_direction:
 
 def _compute_sl(symbol: str, candidate: BiasCandidate) -> Optional[float]:
     minutes = _PARENT_MINUTES[candidate.parent]
-    if candidate.kind == "ICT":
-        zone = read_latest_ob(symbol, minutes)
-        # Must still be the SAME zone the candidate was derived from -- if
-        # it's been mitigated (or superseded by an even newer one) since
-        # winning_candidate() last ran, there's nothing to base an ICT SL
-        # on; the caller's next poll will naturally pick up whatever the
-        # new winning candidate is instead.
-        if zone is None or zone.start_time != candidate.event_time:
-            return None
-        return ict_sl(symbol, candidate.direction, zone.top, zone.btm)
-
     trails = read_trail_stops(symbol, minutes)
     if trails is None:
         return None

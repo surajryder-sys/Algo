@@ -1,19 +1,19 @@
-"""Reads tv_scraper's own already-computed output for BTCUSD/ETHUSD --
-three separate files, each answering a different question this engine
-needs:
+"""Reads tv_scraper's own already-computed output for BTCUSD/ETHUSD -- two
+files, each answering a different question this engine needs:
   - trend.json  -- CONFIRMED (debounced) structure state + per-line trend,
                     each with its own event_time. This is what the M5
-                    confirmation state machine and the M30/M15 STR bias
+                    confirmation state machine and the M30/M15 bias
                     candidates key off -- see m5_confirm.py/parent_bias.py.
-  - zones.json  -- live OB zones per timeframe/direction. Used for the ICT
-                    bias candidates (most recent zone, either side) and
-                    for the ICT-initiated SL (that zone's own edge).
   - live.json   -- raw current-poll trail_stop VALUES (not just
                     trend/event_time -- trend.json deliberately never
                     persists these, see atr_trend_tracker.py's own
-                    _TrendState shape). Needed only for the STR-initiated
-                    SL calc ("far ATR trailing stop with buffer"), which
-                    needs the actual price level, not just direction.
+                    _TrendState shape). Needed for the SL calc ("far ATR
+                    trailing stop with buffer"), which needs the actual
+                    price level, not just direction.
+
+OB zones (zones.json) are deliberately NOT read here anymore -- ICT
+(OB-zone-based) entries were removed entirely 2026-08-30, see
+parent_bias.py's own docstring for why.
 
 Own dedicated small reader, not imported from v4/bridge or v3 -- same
 "each bot gets its own copy, no cross-bot imports for bot-specific
@@ -38,12 +38,9 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
-
-Direction = Literal["buy", "sell"]
+from typing import Optional
 
 _TREND_FILES = {"BTCUSD": "tv_scraper_trend.json", "ETHUSD": "tv_scraper_ethusd_trend.json"}
-_ZONE_FILES = {"BTCUSD": "tv_scraper_zones.json", "ETHUSD": "tv_scraper_ethusd_zones.json"}
 _LIVE_FILES = {"BTCUSD": "tv_scraper_live.json", "ETHUSD": "tv_scraper_ethusd_live.json"}
 
 # Scraper polls every TV_SCRAPER_POLL_SECONDS (5s default) but cycles all 6
@@ -106,53 +103,6 @@ def read_structure(symbol: str, tf_minutes: int) -> Optional[StructureReading]:
 
     return StructureReading(state=combined["state"], event_time=combined.get("event_time"),
                              line1=_line(1), line2=_line(2))
-
-
-@dataclass
-class ObZone:
-    direction: Direction
-    start_time: int
-    top: float
-    btm: float
-
-
-def read_latest_ob(symbol: str, tf_minutes: int) -> Optional[ObZone]:
-    """The single most recently FORMED (by start_time -- the zone's own
-    real bar timestamp, not the scraper's detected_time artifact) zone on
-    this timeframe, either direction. Re-derived fresh from the live zones
-    file every call -- once a zone is mitigated, ZoneStore deletes it (see
-    v3/tv_scraper/zone_history_log.py's own docstring), so an invalidated
-    ICT candidate simply stops being returned here on its own, with no
-    extra bookkeeping needed by callers.
-
-    Skips any zone with formed_time_confirmed=False -- confirmed live bug,
-    2026-08-30: that flag is False whenever Pine's own real formation
-    timestamp (FormedMinutesRef) read "na" that poll (see
-    v3/tv_scraper/scraper.py's own formed_hint handling), in which case
-    start_time is a FALLBACK (roughly "when the scraper first noticed
-    this zone"), not the zone's real historical formation time. A
-    genuinely ancient BTCUSD supply zone (top=86880, from BTCUSD's
-    ~January/May price era) had this fallback stamped recent, made it
-    look like the freshest event on the whole chart despite being over
-    8,700 points away from current price, and won the ICT recency race
-    purely on a misleading timestamp -- fired a real trade with an
-    essentially meaningless stop-loss. A zone whose real formation time
-    isn't known yet can't be trusted for recency at all; it simply
-    doesn't compete until Pine confirms it (or never does, in which case
-    it's correctly never eligible)."""
-    raw = _read_json(_ZONE_FILES[symbol])
-    if raw is None:
-        return None
-
-    best: Optional[ObZone] = None
-    for direction, bull_bear in (("buy", "bull"), ("sell", "bear")):
-        zones = raw.get(f"{symbol}|{tf_minutes}|{bull_bear}", {})
-        for z in zones.values():
-            if not z.get("formed_time_confirmed", False):
-                continue
-            if best is None or z["start_time"] > best.start_time:
-                best = ObZone(direction=direction, start_time=z["start_time"], top=z["top"], btm=z["btm"])
-    return best
 
 
 def read_trail_stops(symbol: str, tf_minutes: int) -> Optional[tuple[Optional[float], Optional[float]]]:

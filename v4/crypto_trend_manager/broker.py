@@ -121,7 +121,18 @@ def modify_sl(cfg: Config, symbol: str, ticket: int, new_sl: float):
     """Moves the SL on an existing open position -- TRADE_ACTION_SLTP, not
     a new order. Caller (exit_manager.py, via main.py) is responsible for
     only calling this when the new SL is actually tighter (never loosens)
-    -- that check lives at the call site, not buried here."""
+    -- that check lives at the call site, not buried here.
+
+    Explicitly re-sends the position's OWN current comment on every SLTP
+    request (2026-08-30, user's explicit request: "open position comment
+    should always remain same") -- this fires every poll once the
+    continuous step-trail is active (far more often than a one-time tier
+    partial-close), so if a broker/platform ever treats an omitted
+    comment field as "clear it" rather than "leave unchanged," this would
+    be the dominant, most frequent source of the open position's own
+    entry comment (e.g. V4S-M30-STR-M5-STR-<ts>) getting overwritten --
+    passing it back unchanged on every call removes that risk entirely,
+    regardless of which specific behavior the broker actually has."""
     position = mt5.positions_get(ticket=ticket)
     if not position:
         raise RuntimeError(f"No position found for ticket {ticket}")
@@ -132,6 +143,7 @@ def modify_sl(cfg: Config, symbol: str, ticket: int, new_sl: float):
         "position": ticket,
         "sl": new_sl,
         "tp": p.tp,
+        "comment": p.comment,
     }
     return mt5.order_send(request)
 

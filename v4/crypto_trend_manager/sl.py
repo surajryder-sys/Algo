@@ -1,11 +1,9 @@
-"""Initial SL calculation -- depends on which kind of setup actually fired
-(see parent_bias.BiasCandidate.kind):
-  - ICT (OB-initiated): the OB zone's own OPPOSITE edge from entry, with a
-    buffer -- buy: zone low minus buffer, sell: zone high plus buffer.
-  - STR (structure-initiated): the parent timeframe's own FAR ATR trail
-    line (whichever of line1/line2 sits further from current price, same
-    "far line = safer/wider stop" concept v4/trend_manager/m1_execution.py
-    already uses for XAUUSD's M1), with the same buffer.
+"""Initial SL calculation -- the parent timeframe's own FAR ATR trail line
+(whichever of line1/line2 sits further from current price, same "far line
+= safer/wider stop" concept v4/trend_manager/m1_execution.py already uses
+for XAUUSD's M1), with a buffer. Every entry is structure-initiated now --
+ICT (OB-zone-initiated) entries and their own zone-edge SL calc were
+removed entirely 2026-08-30, see parent_bias.py's own docstring for why.
 
 SL_BUFFER values are the exact ones already proven for these two symbols
 by the old (now-stopped) v3 crypto Trend Manager -- see
@@ -23,11 +21,6 @@ from typing import Literal, Optional
 Direction = Literal["buy", "sell"]
 
 SL_BUFFER = {"BTCUSD": 20.0, "ETHUSD": 2.0}
-
-
-def ict_sl(symbol: str, direction: Direction, zone_top: float, zone_btm: float) -> float:
-    buffer = SL_BUFFER[symbol]
-    return (zone_btm - buffer) if direction == "buy" else (zone_top + buffer)
 
 
 def str_sl(symbol: str, direction: Direction, line1_trail: Optional[float],
