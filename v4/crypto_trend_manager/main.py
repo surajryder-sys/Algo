@@ -105,13 +105,16 @@ def _manage_open_position(cfg, exit_state: ExitManagerState, symbol: str) -> Non
     if position is None:
         return
 
+    entry_comment = position.comment  # captured BEFORE any action this poll touches it
     direction = "buy" if position.type == mt5.ORDER_TYPE_BUY else "sell"
     sl_update, closes = evaluate_exit_actions(
         exit_state, symbol, position.ticket, direction, position.price_open,
         position.price_current, position.sl,
     )
 
+    current_sl = position.sl  # tracked so a same-poll comment-restore (below) never reverts a same-poll SL move
     if sl_update is not None:
+        current_sl = sl_update.new_sl
         if cfg.enable_trading:
             r = broker.modify_sl(cfg, symbol, position.ticket, sl_update.new_sl)
             _log(f"[{symbol}] EXIT MANAGER: SL -> {sl_update.new_sl:.2f} on ticket {position.ticket} -- result={r}")
@@ -120,14 +123,31 @@ def _manage_open_position(cfg, exit_state: ExitManagerState, symbol: str) -> Non
                  f"on ticket {position.ticket}")
 
     for close in closes:
+        # Confirmed live, 2026-08-30: on this broker, a partial-close
+        # deal's own comment also becomes the LEFTOVER open position's
+        # displayed comment -- there's no separate MT5 request field for
+        # "deal comment but don't touch the position." Resolution: send
+        # the tier-specific comment on the CLOSE itself (so the real deal
+        # record shows the actual reason -- "close reason should be
+        # visible in real deal"), then immediately issue a follow-up
+        # SLTP call restoring the leftover position's comment back to its
+        # original entry tag -- "leftover open position should still say
+        # our logic in comment". Uses current_sl (tracks this SAME poll's
+        # own sl_update if one happened above), not the stale position.sl
+        # read at the top -- passing the pre-update value here would
+        # silently UNDO a same-poll SL move (e.g. a price gap crossing
+        # both a trail step and a tier threshold at once).
         comment = f"V4S-EXIT-{close.tier.upper()}-{int(time.time())}"
         if cfg.enable_trading:
             r = broker.partial_close(cfg, symbol, position.ticket, direction, close.volume, comment)
             _log(f"[{symbol}] EXIT MANAGER: partial close {close.tier} vol={close.volume} "
                  f"on ticket {position.ticket} -- result={r}")
+            restore = broker.modify_sl(cfg, symbol, position.ticket, current_sl, comment=entry_comment)
+            _log(f"[{symbol}] EXIT MANAGER: restored leftover position's comment to {entry_comment!r} "
+                 f"on ticket {position.ticket} -- result={restore}")
         else:
             _log(f"[{symbol}] EXIT MANAGER (DRY-RUN): would partial close {close.tier} "
-                 f"vol={close.volume} on ticket {position.ticket}")
+                 f"vol={close.volume} on ticket {position.ticket}, then restore its comment to {entry_comment!r}")
 
 
 def run_once(cfg, state: EngineState, exit_state: ExitManagerState) -> None:

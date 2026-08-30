@@ -117,22 +117,23 @@ def close_position(cfg: Config, symbol: str, comment: str):
     return mt5.order_send(request)
 
 
-def modify_sl(cfg: Config, symbol: str, ticket: int, new_sl: float):
+def modify_sl(cfg: Config, symbol: str, ticket: int, new_sl: float, comment: Optional[str] = None):
     """Moves the SL on an existing open position -- TRADE_ACTION_SLTP, not
     a new order. Caller (exit_manager.py, via main.py) is responsible for
     only calling this when the new SL is actually tighter (never loosens)
     -- that check lives at the call site, not buried here.
 
-    Explicitly re-sends the position's OWN current comment on every SLTP
-    request (2026-08-30, user's explicit request: "open position comment
-    should always remain same") -- this fires every poll once the
-    continuous step-trail is active (far more often than a one-time tier
-    partial-close), so if a broker/platform ever treats an omitted
-    comment field as "clear it" rather than "leave unchanged," this would
-    be the dominant, most frequent source of the open position's own
-    entry comment (e.g. V4S-M30-STR-M5-STR-<ts>) getting overwritten --
-    passing it back unchanged on every call removes that risk entirely,
-    regardless of which specific behavior the broker actually has."""
+    Explicitly sends a comment on every SLTP request rather than omitting
+    the field -- 2026-08-30, user's explicit request: "open position
+    comment should always remain same". Defaults to the position's OWN
+    current comment (used for ordinary trailing-SL updates, which fire
+    every poll once the step-trail is active); callers doing a same-poll
+    comment RESTORE after a partial close (see main.py's own use of this)
+    pass the entry's original comment explicitly instead, since by that
+    point the position's own .comment has already been overwritten by the
+    partial-close deal's comment (confirmed live: this broker propagates
+    a partial-close deal's comment onto the leftover open position) and
+    re-reading it here would just re-send the wrong value."""
     position = mt5.positions_get(ticket=ticket)
     if not position:
         raise RuntimeError(f"No position found for ticket {ticket}")
@@ -143,7 +144,7 @@ def modify_sl(cfg: Config, symbol: str, ticket: int, new_sl: float):
         "position": ticket,
         "sl": new_sl,
         "tp": p.tp,
-        "comment": p.comment,
+        "comment": comment if comment is not None else p.comment,
     }
     return mt5.order_send(request)
 
