@@ -133,11 +133,33 @@ def modify_sl(cfg: Config, symbol: str, ticket: int, new_sl: float, comment: Opt
     point the position's own .comment has already been overwritten by the
     partial-close deal's comment (confirmed live: this broker propagates
     a partial-close deal's comment onto the leftover open position) and
-    re-reading it here would just re-send the wrong value."""
+    re-reading it here would just re-send the wrong value.
+
+    Confirmed live, 2026-08-31: every single comment-restore call up to
+    this fix had SILENTLY FAILED (retcode 10025, "No changes") -- MT5
+    rejects a TRADE_ACTION_SLTP request outright when neither sl nor tp
+    numerically differs from the position's current values, REGARDLESS of
+    the comment field differing. This bites constantly in practice: the
+    continuous step-trail routinely reaches a tier's SL level before that
+    tier's own partial close fires, so by the time the restore call runs,
+    SL is already exactly where it needs to be -- "nothing to change" as
+    far as MT5 is concerned, comment included. If new_sl would be a pure
+    no-op, nudge it by one symbol point (the smallest real price
+    increment MT5 will accept as an actual change) in the FAVORABLE
+    direction -- still never loosens (a tighter-by-one-tick SL is, if
+    anything, marginally MORE protective, never less), but is now a
+    genuine numeric change MT5 will actually process, comment included."""
     position = mt5.positions_get(ticket=ticket)
     if not position:
         raise RuntimeError(f"No position found for ticket {ticket}")
     p = position[0]
+
+    if new_sl == p.sl:
+        info = mt5.symbol_info(symbol)
+        point = info.point if info is not None else 0.0
+        if point:
+            new_sl = new_sl + point if p.type == mt5.ORDER_TYPE_BUY else new_sl - point
+
     request = {
         "action": mt5.TRADE_ACTION_SLTP,
         "symbol": symbol,

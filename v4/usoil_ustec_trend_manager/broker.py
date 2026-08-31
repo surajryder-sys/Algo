@@ -121,11 +121,30 @@ def modify_sl(cfg: Config, symbol: str, ticket: int, new_sl: float, comment: Opt
     position's own current one) rather than omitting the field, same
     fix crypto_trend_manager's own modify_sl applies -- confirmed live
     there that omitting it, or letting a partial-close deal's comment
-    propagate, can overwrite the open position's displayed comment."""
+    propagate, can overwrite the open position's displayed comment.
+
+    Confirmed live, 2026-08-31 (same incident, found via USTEC): every
+    comment-restore call up to this fix had SILENTLY FAILED (retcode
+    10025, "No changes") -- MT5 rejects TRADE_ACTION_SLTP outright when
+    neither sl nor tp numerically differs from the position's current
+    values, regardless of the comment differing. The continuous step-
+    trail routinely reaches a tier's SL level before that tier's own
+    partial close fires, so the restore call's SL is often already a
+    no-op by the time it runs. If new_sl would be a pure no-op, nudge it
+    by one symbol point (the smallest real price increment) in the
+    FAVORABLE direction -- still never loosens, but is now a genuine
+    numeric change MT5 will actually process, comment included."""
     position = mt5.positions_get(ticket=ticket)
     if not position:
         raise RuntimeError(f"No position found for ticket {ticket}")
     p = position[0]
+
+    if new_sl == p.sl:
+        info = mt5.symbol_info(symbol)
+        point = info.point if info is not None else 0.0
+        if point:
+            new_sl = new_sl + point if p.type == mt5.ORDER_TYPE_BUY else new_sl - point
+
     request = {
         "action": mt5.TRADE_ACTION_SLTP,
         "symbol": symbol,
