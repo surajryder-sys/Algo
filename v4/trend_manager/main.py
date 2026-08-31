@@ -241,12 +241,6 @@ def run_once(cfg, state: V4ExecutionState, exit_state: ExitManagerState, trap_st
     else:
         _log("MT5-native M5 OB bridge missing/stale -- no M5(MT5) zone data this poll")
 
-    previous_close = broker.find_previous_candle_close(cfg.symbol, mt5_atr.structure_event_time)
-    if previous_close is None:
-        _log(f"could not find the flip candle (structure_event_time={mt5_atr.structure_event_time}) "
-             f"in MT5 history -- skipping this poll")
-        return
-
     current_price = broker.get_mid_price(cfg.symbol)
     all_zones = m1_zones + m5_mt5_zones + _buffer_zones(cfg.symbol)
     support, resistance = _nearest_support_resistance(all_zones, current_price)
@@ -258,7 +252,13 @@ def run_once(cfg, state: V4ExecutionState, exit_state: ExitManagerState, trap_st
     # filter, per the user's explicit design 2026-08-31/09-01 (see
     # trap_watch.py's own docstring for the full mechanism: touch a
     # M3/M5 trail line, wait for M1's own reaction, close the trade and
-    # trap that price level on confirmed rejection).
+    # trap that price level on confirmed rejection). Deliberately runs
+    # BEFORE the flip-candle lookup below -- confirmed live 2026-09-01:
+    # that lookup can fail (M1 structure unchanged for a long quiet
+    # stretch, its flip candle aged out of history) and used to abort
+    # the whole poll early, silently skipping trap-watch monitoring
+    # entirely for however long that stretch lasted, even with a real
+    # position open. Trap watch must run every poll regardless.
     trap_result = evaluate_trap_watch(trap_state, cfg.symbol, current_price, mt5_atr)
     for rejection in trap_result.rejections:
         _log(f"TRAP WATCH: {rejection.side} rejection confirmed at {rejection.level:.3f} "
@@ -271,6 +271,12 @@ def run_once(cfg, state: V4ExecutionState, exit_state: ExitManagerState, trap_st
                      f"position(s) -- results={close_results}")
             else:
                 _log(f"TRAP WATCH (DRY-RUN): would close existing {rejection.close_direction} position(s)")
+
+    previous_close = broker.find_previous_candle_close(cfg.symbol, mt5_atr.structure_event_time)
+    if previous_close is None:
+        _log(f"could not find the flip candle (structure_event_time={mt5_atr.structure_event_time}) "
+             f"in MT5 history -- skipping entry evaluation this poll (trap watch above still ran)")
+        return
 
     result = evaluate_entry(state, mt5_atr, tv_structure, previous_close, current_price)
     decision = result.decision

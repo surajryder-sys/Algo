@@ -12,9 +12,17 @@ import MetaTrader5 as mt5
 
 from v4.trend_manager.config import Config
 
-# Generous enough to find "the bar before" a flip even if a few polls'
-# worth of delay passed before this ran -- cheap, one bounded fetch.
-_M1_HISTORY_BARS = 30
+# Confirmed live 2026-09-01: 30 (30 minutes of M1 bars) was NOT generous
+# enough -- M1's structure can genuinely stay unchanged (no fresh flip)
+# for well over 30 minutes during a quiet/ranging stretch, and once the
+# flip candle's own bar ages out of this window, find_previous_candle_
+# close() starts returning None every poll, aborting run_once() early
+# BEFORE it even reaches the trap-watch evaluation or the main summary
+# log line -- a real, silent coverage gap (trap_watch wouldn't be
+# running at all during that stretch, even with a position open).
+# Raised to 200 (200 minutes, ~3.3 hours) -- still a cheap, single
+# bounded fetch, comfortably wider than any observed quiet stretch.
+_M1_HISTORY_BARS = 200
 
 
 def connect(cfg: Config) -> None:
