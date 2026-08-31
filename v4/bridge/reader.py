@@ -24,9 +24,13 @@ from typing import Optional
 
 from ob_bridge.reader import bridge_root
 
-# V4's execution engine only ever needs these three -- see this package's
-# own docstring / CLAUDE.md for why (M5+M3 = structure, M3+M1 = execution).
-EXECUTION_TIMEFRAMES: dict[str, int] = {"M5": 5, "M3": 3, "M1": 1}
+# V4's execution engine's five MT5-native charts -- see this package's own
+# docstring / CLAUDE.md for why (M5+M3 = structure, M3+M1 = execution). M2
+# and M4 added 2026-08-31, user's explicit request, read/store-only for
+# now -- "M2's ATR structure ... no decision impact yet" -- not yet wired
+# into any entry/buffer logic, see v4/trend_manager/main.py's own use of
+# them.
+EXECUTION_TIMEFRAMES: dict[str, int] = {"M5": 5, "M4": 4, "M3": 3, "M2": 2, "M1": 1}
 
 
 @dataclass

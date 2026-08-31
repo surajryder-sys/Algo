@@ -18,7 +18,9 @@ Wires m1_execution.evaluate_entry to REAL, LIVE data:
     mql5/OB_Zone_Bridge_Lite.mq5's bridge (v4.bridge.reader.read_zone_lite),
     M1's own bull/bear zones -- MT5-native, not the TV scraper (M5/M3
     parent-bias gating was considered and explicitly dropped the same
-    day -- "no need of m3 and m5 now" -- this is M1-only end to end).
+    day -- "no need of m3 and m5 now" -- this is M1-only end to end for
+    ENTRY-TIMEFRAME purposes; the same MT5-native bridge is also read a
+    second time at M5 purely for its zones, see below).
   - Previous candle close and current price: MT5 directly
     (v4.trend_manager.broker), not any bridge file. SL is anchored to
     MT5's own trail values specifically (see m1_execution.py).
@@ -29,7 +31,26 @@ Wires m1_execution.evaluate_entry to REAL, LIVE data:
     2026-08-28 ("ob zones to watch only H4, H2, H1, M30, M15, M5") -- the
     one place this module still depends on TradingView data, since only
     it publishes that many timeframes at once; MT5's own bridges only
-    cover M5/M3/M1.
+    natively cover M5/M3/M1.
+  - MT5-native M5 zones, ALSO folded into the same edge-gap filter,
+    labeled "M5(MT5)" to distinguish from the TV-scraper "M5" above --
+    added 2026-08-31, user's explicit request: "sometimes zones in
+    tradingview dont form but mt5 forms soon". Same
+    OB_Zone_Bridge_Lite.mq5 bridge/schema as M1's own read, just called a
+    second time with tf_minutes=5 (mql5/OB_Zone_Bridge_Lite.mq5 was
+    already attached to an M5 XAUUSD chart from V4's original bridge
+    build -- OBSTATE_LITE_XAUUSD_5.json already existed, just unread
+    until now). Two independent M5 zone sources now feed the same
+    filter; a rejection log line's edge label tells you which one
+    actually blocked the entry.
+  - MT5-native M2 and M4 ATR (dual-trail structure only, not zones) --
+    added 2026-08-31 alongside two new XAUUSD charts (M2, then M4 once
+    the user filled in every chart from M1 to M5) the user attached the
+    same indicators to. READ/STORE ONLY per explicit instruction ("no
+    decision impact yet") -- logged every poll (see run_once's own
+    "(store-only)" lines) but never passed into evaluate_entry,
+    tv_structure, or the edge-gap buffer list above. Revisit if/when
+    either is given an actual role.
 
 Safety: V4_ENABLE_TRADING must be explicitly set to true in .env for any
 order to actually be sent -- left unset (default false), every resolved
@@ -167,6 +188,24 @@ def run_once(cfg, state: V4ExecutionState, exit_state: ExitManagerState) -> None
         _log(f"M1 MT5 ATR bridge missing/stale -- skipping this poll (position_open={had_position})")
         return
 
+    # M2/M4 ATR -- added 2026-08-31, user's explicit request: read/store
+    # only for now, no decision impact ("M2's ATR structure ... no
+    # decision impact yet") -- M4 added the same day once the user
+    # attached the same indicators to a 5th chart ("added m1 to m5, 5
+    # charts on mt5"), same store-only treatment, no instruction given to
+    # do otherwise. Logged every poll purely so it's in the record; not
+    # passed into evaluate_entry and not part of tv_structure/mt5_atr
+    # above. Revisit if/when either gets an actual role in the entry
+    # logic.
+    for label, minutes in (("M2", 2), ("M4", 4)):
+        snap = read_atr_dual(cfg.symbol, minutes)
+        if snap is not None and not snap.is_stale():
+            _log(f"{label} (store-only) structure={snap.structure} "
+                 f"line1={snap.line1.trend:+d}@{snap.line1.trail_stop:.3f} "
+                 f"line2={snap.line2.trend:+d}@{snap.line2.trail_stop:.3f}")
+        else:
+            _log(f"{label} MT5 ATR bridge missing/stale -- nothing to store this poll")
+
     # MT5-only for M1 execution -- TradingView's own flip is deliberately
     # not read here anymore (see this module's own docstring).
     tv_structure = None
@@ -179,6 +218,24 @@ def run_once(cfg, state: V4ExecutionState, exit_state: ExitManagerState) -> None
     else:
         _log("M1 OB bridge missing/stale -- proceeding with no M1 edge-gap zones known")
 
+    # MT5-native M5 zones -- added 2026-08-31, user's explicit request:
+    # "sometimes zones in tradingview dont form but mt5 forms soon". The
+    # TV-scraper's own "M5" buffer (see _buffer_zones/_BUFFER_TIMEFRAMES
+    # below) reads TradingView's OBD_SecretTrader.pine, which can lag or
+    # simply not print a zone the MT5-native OB_Zone_Bridge_Lite indicator
+    # already sees on the same bar. Labeled "M5(MT5)" (not "M5") so a
+    # rejection log line always shows which of the two independent M5
+    # sources actually blocked the entry. Same bridge/schema as M1's own
+    # read above (OBSTATE_LITE_XAUUSD_5.json) -- just a different
+    # tf_minutes argument, no new MQL5 work needed.
+    mt5_m5_zones: list[LabeledZone] = []
+    ob_m5 = read_zone_lite(cfg.symbol, 5)
+    if ob_m5 is not None and not ob_m5.is_stale():
+        raw_m5 = ob_m5.bear if mt5_atr.structure == "STRONG" else ob_m5.bull
+        mt5_m5_zones = [LabeledZone(high=z.high, low=z.low, label="M5(MT5)") for z in raw_m5]
+    else:
+        _log("MT5-native M5 OB bridge missing/stale -- proceeding with no M5(MT5) edge-gap zones known")
+
     previous_close = broker.find_previous_candle_close(cfg.symbol, mt5_atr.structure_event_time)
     if previous_close is None:
         _log(f"could not find the flip candle (structure_event_time={mt5_atr.structure_event_time}) "
@@ -186,7 +243,7 @@ def run_once(cfg, state: V4ExecutionState, exit_state: ExitManagerState) -> None
         return
 
     current_price = broker.get_mid_price(cfg.symbol)
-    buffer_zones = _buffer_zones(cfg.symbol, mt5_atr.structure)
+    buffer_zones = _buffer_zones(cfg.symbol, mt5_atr.structure) + mt5_m5_zones
 
     result = evaluate_entry(state, mt5_atr, tv_structure, previous_close, current_price,
                              opposing_zones, buffer_zones)
