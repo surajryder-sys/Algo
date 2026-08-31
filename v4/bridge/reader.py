@@ -24,13 +24,15 @@ from typing import Optional
 
 from ob_bridge.reader import bridge_root
 
-# V4's execution engine's five MT5-native charts -- see this package's own
-# docstring / CLAUDE.md for why (M5+M3 = structure, M3+M1 = execution). M2
-# and M4 added 2026-08-31, user's explicit request, read/store-only for
-# now -- "M2's ATR structure ... no decision impact yet" -- not yet wired
-# into any entry/buffer logic, see v4/trend_manager/main.py's own use of
-# them.
-EXECUTION_TIMEFRAMES: dict[str, int] = {"M5": 5, "M4": 4, "M3": 3, "M2": 2, "M1": 1}
+# V4's execution engine only ever needs these three -- see this package's
+# own docstring / CLAUDE.md for why (M5+M3 = structure, M3+M1 = execution).
+# M2 and M4 were briefly added 2026-08-31 (read/store-only, never wired
+# into any entry/buffer logic) alongside two new charts the user attached
+# indicators to, then REMOVED the same day once those charts were closed
+# again -- "closed m4 and m2 charts as there is a candle lag if i open
+# too many charts on mt5" -- matches this repo's own standing rule that
+# MT5 indicator load must stay light (see CLAUDE.md).
+EXECUTION_TIMEFRAMES: dict[str, int] = {"M5": 5, "M3": 3, "M1": 1}
 
 
 @dataclass

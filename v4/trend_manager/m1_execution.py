@@ -13,18 +13,18 @@ Rule, in full:
     a conflict, just redundant confirmation of the same move; if they
     actively disagree (one STRONG, one WEAK at the same poll) this
     deliberately does nothing rather than guess.
-  - Entry is gated on a minimum 5-point gap between the PREVIOUS candle's
-    close and the near EDGE (never baseline -- explicitly ignored
-    throughout, corrected 2026-08-28 after briefly and mistakenly
-    reintroducing baseline for the wider buffer set below: "you are
-    mentioning baseline, i'm saying ob edge") of the nearest OPPOSING OB
-    zone: a bear zone's low for a buy, a bull zone's high for a sell.
-    This applies uniformly to BOTH zone sources -- M1's own zones and the
-    wider H4/H2/H1/M30/M15/M5 buffer zones ("ob zones to watch only H4,
-    H2, H1, M30, M15, M5") -- combined into one nearest-edge check, not
-    two separately-thresholded ones. M3/M1 zones are never buffers
-    themselves (only M1's own immediate zones count on that side), only
-    the six buffer timeframes plus M1's own.
+  - The zone-based edge-gap filter (a minimum 5-point gap between the
+    flip candle's close and the nearest opposing OB zone edge) was
+    REMOVED ENTIRELY 2026-08-31, user's explicit request -- "remove zone
+    block technique entirely, i wanna deploy a new technique for
+    blocking orders." Zone data (M1's own, the MT5-native M5 zones, and
+    the wider TV-scraper H4-M5 buffer zones) is still read and logged by
+    main.py for support/resistance visibility -- "have the zone data to
+    identify resistance and support of order blocks" -- but is no longer
+    passed into this module or used to gate entries in any way. A fresh,
+    non-stale flip now fires unconditionally (subject only to the
+    one-shot-per-phase and staleness rules below) until a replacement
+    blocking technique is built.
   - Initial SL = whichever MT5 ATR trail line is FARTHER from current
     price (the more conservative one), +2.0-point buffer. SL is anchored
     to MT5's own trail values specifically (not TradingView's) since the
@@ -60,7 +60,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional, Protocol
+from typing import Literal, Optional
 
 from v4.bridge.reader import ATRDualSnapshot
 from v4.bridge.tv_atr import TVStructure
@@ -69,7 +69,6 @@ Direction = Literal["buy", "sell"]
 Source = Literal["mt5", "tv", "both"]
 
 SL_BUFFER_POINTS = 2.0
-MIN_EDGE_GAP_POINTS = 5.0
 # A flip must be acted on within this many seconds of its own bar closing
 # -- confirmed live 2026-08-28: resetting active_direction to clear a bug
 # made a ~10-minute-old (704s) WEAK flip look "brand new" to this module,
@@ -98,30 +97,6 @@ MIN_EDGE_GAP_POINTS = 5.0
 # "same candle, not one bar later" intent (still well under 2 bars) while
 # leaving ~28-30s of real margin instead of a negative one.
 MAX_FLIP_AGE_SECONDS = 90.0
-
-
-class _EdgedZone(Protocol):
-    """Structural type -- matches any wrapper carrying high/low plus a
-    `label` identifying which timeframe it came from (see
-    v4.trend_manager.main.LabeledZone, which wraps BOTH
-    v4.bridge.reader.Zone -- MT5-native OB lite, M1's own zones -- and
-    v4.bridge.tv_zones.Zone -- TV scraper, the wider H4-M5 buffer zones --
-    neither of which carries a timeframe label on its own). Added
-    2026-08-31, user's explicit request ("give me the reason as well,
-    which timeframe edge") -- the combined nearest-edge check across both
-    zone sources previously reported only the winning edge's PRICE, with
-    no way to say which timeframe (M1, or which of H4/H2/H1/M30/M15/M5)
-    it actually came from. Extended 2026-08-31, user's explicit request
-    ("have all the values") after a rejection's zone had already rolled
-    off the live bridge's rolling history by the time it was asked
-    about -- the rejection message itself now carries the FULL zone
-    (high, low, virgin, start_time), not just the single edge price, so
-    nothing needs to be reconstructed after the fact."""
-    high: float
-    low: float
-    label: str
-    virgin: bool
-    start_time: int
 
 
 @dataclass
@@ -278,43 +253,12 @@ def _initial_sl(direction: Direction, far_trail_stop: float) -> float:
     return far_trail_stop - SL_BUFFER_POINTS if direction == "buy" else far_trail_stop + SL_BUFFER_POINTS
 
 
-def _nearest_opposing_edge(
-    direction: Direction, opposing_zones: list[_EdgedZone], reference_price: float,
-) -> Optional[tuple[_EdgedZone, float]]:
-    """(zone, edge) for the nearest opposing zone actually in the way of
-    this move -- a bear zone's LOW for a buy, a bull zone's HIGH for a
-    sell -- filtered to only zones on the RELEVANT side of reference_price
-    first. Returns the WHOLE winning zone object (not just its edge price)
-    -- extended 2026-08-31, "have all the values" -- so a rejection can
-    log the zone's full high/low/virgin/start_time, not just the single
-    boundary price, since the live bridge's rolling zone history can move
-    on and lose the zone by the time anyone asks about it after the fact.
-    label identifies which timeframe that winning zone came from ("M1",
-    or one of the H4/H2/H1/M30/M15/M5 buffer labels). Fixed 2026-08-28:
-    a bare min()/max() across ALL opposing zones (including ones already
-    behind price, on the wrong side entirely) let a far-away, irrelevant
-    zone win the pick -- confirmed live, an H4 bull zone sitting ~30
-    points ABOVE price produced a nonsensical negative "gap" for a SELL
-    check (previous_close - that zone's high), which trivially failed the
-    < 5-point test and blocked an otherwise perfectly clear sell. Only a
-    bear zone actually above price (buy) or a bull zone actually below
-    price (sell) can ever really be "in the way," so those are the only
-    candidates now."""
-    if direction == "buy":
-        candidates = [(z, z.low) for z in opposing_zones if z.low > reference_price]
-        return min(candidates, key=lambda c: c[1]) if candidates else None
-    candidates = [(z, z.high) for z in opposing_zones if z.high < reference_price]
-    return max(candidates, key=lambda c: c[1]) if candidates else None
-
-
 def evaluate_entry(
     state: V4ExecutionState,
     mt5_atr: ATRDualSnapshot,
     tv_structure: Optional[TVStructure],
     previous_candle_close: float,
     current_price: float,
-    opposing_zones: list[_EdgedZone],
-    buffer_zones: list[_EdgedZone] = (),
     now: Optional[float] = None,
 ) -> EvaluationResult:
     """Call once per poll. `now` defaults to the real wall clock; only
@@ -324,13 +268,9 @@ def evaluate_entry(
     NEW directional phase (a) is confirmed by at least one of the two ATR
     sources AND that source's flip is no older than MAX_FLIP_AGE_SECONDS
     (agreeing sources, not conflicting; a stale source is treated as if
-    it hadn't confirmed at all), (b) hasn't been resolved yet, and (c)
-    passes the 5-point edge-gap filter against the nearest opposing zone
-    from EITHER source -- M1's own zones (opposing_zones) or the wider
-    H4-M5 buffer zones (buffer_zones), combined into one nearest-edge
-    check, never baseline. A filter failure still marks the phase
-    resolved -- one evaluation per flip, never a rolling re-check on
-    later polls.
+    it hadn't confirmed at all), and (b) hasn't been resolved yet. No
+    zone-based filter applies anymore -- removed entirely 2026-08-31, see
+    this module's own top docstring.
 
     result.reason is ALWAYS populated, on every single code path
     (including a genuine entry) -- see EvaluationResult's own docstring
@@ -349,6 +289,22 @@ def evaluate_entry(
     tv_dir = tv_dir_raw if (tv_structure is not None and tv_fresh) else None
 
     if mt5_dir_raw is not None and not mt5_fresh:
+        # Still resolves the phase lock to THIS direction even though
+        # nothing fires -- fixed 2026-08-31, confirmed live: this used to
+        # return without ever touching active_direction, so a flip that
+        # arrived already dead-on-arrival (born >90s stale -- a real
+        # incident: 376s old on its very first poll) left the OPPOSITE,
+        # much older direction's lock in place indefinitely. The market
+        # then genuinely reversed again, TWICE, and both fresh, otherwise
+        # valid flips were silently swallowed as "already active this
+        # phase" -- leftovers from a resolution that happened hours
+        # earlier in the opposite direction, because nothing had ever
+        # released it. A stale flip is still a REAL, confirmed change of
+        # direction on the chart even if it's too old to act on -- so it
+        # resolves this phase (skipped, not entered) the same way an
+        # edge-gap rejection or a successful entry already does,
+        # correctly clearing the way for the next genuinely fresh flip.
+        state.set_active_direction(mt5_dir_raw)
         return EvaluationResult(None, f"mt5 {mt5_dir_raw} flip is stale ({mt5_age:.0f}s old, "
                                        f"limit {MAX_FLIP_AGE_SECONDS:.0f}s) -- ignored")
 
@@ -368,23 +324,10 @@ def evaluate_entry(
         state.set_active_direction(direction)
         return EvaluationResult(None, f"{direction} blocked (manually closed previously) -- skipped")
 
-    edge_result = _nearest_opposing_edge(direction, list(opposing_zones) + list(buffer_zones), previous_candle_close)
-    edge_zone, edge = edge_result if edge_result is not None else (None, None)
-    if edge is not None:
-        gap = (edge - previous_candle_close) if direction == "buy" else (previous_candle_close - edge)
-        if gap < MIN_EDGE_GAP_POINTS:
-            state.set_active_direction(direction)
-            # Full zone logged here (not just the boundary price) --
-            # 2026-08-31, "have all the values": the live bridge's
-            # rolling zone history moves on and can drop this exact zone
-            # before anyone asks about it after the fact, so the log
-            # line itself has to be the permanent record.
-            return EvaluationResult(None, f"{direction} rejected: nearest opposing edge {edge:.3f} "
-                                           f"({edge_zone.label}) is only {gap:.2f}pt away "
-                                           f"(need {MIN_EDGE_GAP_POINTS:.0f}pt minimum) -- zone: "
-                                           f"high={edge_zone.high:.3f} low={edge_zone.low:.3f} "
-                                           f"virgin={edge_zone.virgin} start_time={edge_zone.start_time}")
-
+    # Zone-based edge-gap filter removed entirely here -- 2026-08-31, see
+    # this module's own top docstring. No blocking check between this
+    # point and the decision below; a fresh, non-stale, unresolved flip
+    # always enters.
     far_line, far_trail_stop = _far_line(mt5_atr, current_price)
     decision = EntryDecision(
         direction=direction,
@@ -393,11 +336,8 @@ def evaluate_entry(
         source=source,
     )
     state.set_active_direction(direction)
-    edge_note = (f", nearest opposing edge {edge:.3f} ({edge_zone.label}, "
-                 f"high={edge_zone.high:.3f} low={edge_zone.low:.3f} virgin={edge_zone.virgin} "
-                 f"start_time={edge_zone.start_time})") if edge is not None else ", no opposing zone in the way"
     return EvaluationResult(
         decision,
         f"{direction} ENTERED: source={source}, flip confirmed by "
-        f"{'both feeds' if source == 'both' else source}{edge_note}, sl anchored to {far_line}",
+        f"{'both feeds' if source == 'both' else source}, sl anchored to {far_line}",
     )

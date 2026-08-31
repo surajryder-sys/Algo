@@ -89,15 +89,31 @@ def send_market_order(cfg: Config, direction: str, sl: float, comment: str) -> "
 
 
 def get_position(cfg: Config):
-    """The single open V4 position (own magic number) for this symbol, or
-    None. V4 only ever holds one position at a time -- see
-    close_position's own docstring for how that's actually enforced on
-    this account."""
+    """The FIRST open V4 position (own magic number) found for this
+    symbol, or None. Historically documented as "V4 only ever holds one
+    position at a time" -- confirmed FALSE live, 2026-08-31: a tier2
+    partial-close leaves a leftover ticket that keeps its own id, and a
+    later SAME-direction fire opens an entirely separate new ticket
+    alongside it (same-direction fires never close anything first, only
+    opposite-direction reversals do) -- so two tickets legitimately
+    coexisted for hours on a real account. This function still only
+    returns one (used by exit_manager-style per-ticket tracking, which
+    isn't yet multi-ticket aware) -- see get_all_positions() below for
+    the reversal-close path, which now IS."""
     positions = mt5.positions_get(symbol=cfg.symbol) or ()
     for p in positions:
         if p.magic == cfg.magic_number:
             return p
     return None
+
+
+def get_all_positions(cfg: Config) -> list:
+    """EVERY open V4 position (own magic number) for this symbol -- plural,
+    unlike get_position() above. Added 2026-08-31 alongside the
+    close_position() fix below -- see get_position's own docstring for
+    why this can legitimately be more than one ticket."""
+    positions = mt5.positions_get(symbol=cfg.symbol) or ()
+    return [p for p in positions if p.magic == cfg.magic_number]
 
 
 def position_direction(cfg: Config) -> Optional[str]:
@@ -107,43 +123,62 @@ def position_direction(cfg: Config) -> Optional[str]:
     return "buy" if p.type == mt5.ORDER_TYPE_BUY else "sell"
 
 
-def close_position(cfg: Config, comment: str) -> "mt5.OrderSendResult":
-    """Flattens the current position with an opposite-direction deal for
-    its FULL volume. Confirmed live, 2026-08-31: this repo's own
-    docstrings had assumed a NETTING account throughout (an opposite
-    order auto-closing/reversing the existing position) -- wrong for this
-    account (RETAIL_HEDGING, confirmed via mt5.account_info().margin_mode
-    while investigating the identical bug in crypto_trend_manager one day
-    earlier). Without this explicit close, a valid new opposite-direction
-    signal just opened a SECOND, separate hedged position instead of
-    reversing -- both a real BUY and a real SELL sat open simultaneously
-    for 23 minutes on 2026-08-31 until the newer one happened to hit its
-    own SL, rather than the older one being closed the moment the newer,
-    valid setup confirmed. No-op (returns None) if nothing is open."""
-    p = get_position(cfg)
-    if p is None:
-        return None
+def close_position(cfg: Config, comment: str) -> list:
+    """Flattens EVERY open V4 position (own magic number) for this symbol,
+    each with its own opposite-direction deal for its FULL volume --
+    fixed 2026-08-31, confirmed live: this used to close only ONE
+    position (via get_position()'s first-match-only behavior), which
+    silently assumed at most one ticket could ever be open. That
+    assumption is false -- see get_position's own docstring -- a real
+    leftover ticket (0.01, from a tier2 partial-close) sat open for
+    hours alongside a freshly-fired SAME-direction ticket; had a genuine
+    opposite-direction reversal fired in that window, the old code would
+    have closed only whichever one positions_get() happened to return
+    first, stranding the other one open in the wrong direction relative
+    to the new trade.
+
+    Confirmed live earlier, 2026-08-31 (still the reason this function
+    exists at all): this repo's own docstrings had assumed a NETTING
+    account throughout (an opposite order auto-closing/reversing the
+    existing position) -- wrong for this account (RETAIL_HEDGING,
+    confirmed via mt5.account_info().margin_mode while investigating the
+    identical bug in crypto_trend_manager one day earlier). Without this
+    explicit close, a valid new opposite-direction signal just opened a
+    SECOND, separate hedged position instead of reversing -- both a real
+    BUY and a real SELL sat open simultaneously for 23 minutes on
+    2026-08-31 until the newer one happened to hit its own SL, rather
+    than the older one being closed the moment the newer, valid setup
+    confirmed.
+
+    Returns a list of OrderSendResult, one per ticket closed -- empty
+    list if nothing was open."""
+    positions = get_all_positions(cfg)
+    if not positions:
+        return []
 
     tick = mt5.symbol_info_tick(cfg.symbol)
     if tick is None:
         raise RuntimeError(f"No tick for {cfg.symbol}: {mt5.last_error()}")
 
-    closing_type = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
-    price = tick.bid if closing_type == mt5.ORDER_TYPE_SELL else tick.ask
+    results = []
+    for p in positions:
+        closing_type = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        price = tick.bid if closing_type == mt5.ORDER_TYPE_SELL else tick.ask
 
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": cfg.symbol,
-        "volume": p.volume,
-        "type": closing_type,
-        "position": p.ticket,
-        "price": price,
-        "magic": cfg.magic_number,
-        "comment": comment,
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
-    }
-    return mt5.order_send(request)
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": cfg.symbol,
+            "volume": p.volume,
+            "type": closing_type,
+            "position": p.ticket,
+            "price": price,
+            "magic": cfg.magic_number,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        results.append(mt5.order_send(request))
+    return results
 
 
 def modify_sl(cfg: Config, ticket: int, new_sl: float) -> "mt5.OrderSendResult":

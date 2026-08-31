@@ -18,6 +18,7 @@ class Config:
     poll_seconds: float
     m1_execution_state_file: str
     exit_manager_state_file: str
+    trap_watch_state_file: str
     mt5_terminal_path: Optional[str]
     mt5_login: Optional[int]
     mt5_password: Optional[str]
@@ -34,6 +35,7 @@ def load_config() -> Config:
         poll_seconds=float(os.getenv("V4_POLL_SECONDS", "2")),
         m1_execution_state_file=os.getenv("V4_M1_EXECUTION_STATE_FILE", "v4_m1_execution_state.json"),
         exit_manager_state_file=os.getenv("V4_EXIT_MANAGER_STATE_FILE", "v4_exit_manager_state.json"),
+        trap_watch_state_file=os.getenv("V4_TRAP_WATCH_STATE_FILE", "v4_trap_watch_state.json"),
         mt5_terminal_path=os.getenv("V4_MT5_TERMINAL_PATH") or None,
         mt5_login=int(login) if login else None,
         mt5_password=os.getenv("V4_MT5_PASSWORD") or None,

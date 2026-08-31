@@ -57,20 +57,29 @@ class PartialClose:
 
 
 class ExitManagerState:
-    """Persists per-position (keyed by MT5 ticket, since a fresh position
-    needs fresh tracking) peak favor and which one-time actions have
-    already fired. A ticket different from the tracked one means a new
-    position -- state resets automatically rather than needing an
-    explicit "position closed" signal, since main.py only ever calls
-    this module when a real position currently exists."""
+    """Persists PER-TICKET (a dict keyed by MT5 ticket id, one entry per
+    currently/recently open position) peak favor and which one-time
+    actions have already fired for that specific ticket.
+
+    Rewritten 2026-08-31 from a single-ticket-scalar design -- confirmed
+    live that "V4 only ever holds one position at a time" is FALSE (see
+    broker.get_position's own docstring): a tier2 partial-close leaves a
+    leftover ticket that keeps its own id, and a later same-direction
+    fire opens an entirely separate new ticket alongside it, so TWO real
+    tickets legitimately coexisted for hours. The old single-scalar
+    design could only ever track one of them -- whichever ticket
+    main.py's caller happened to look at -- so the other silently got
+    NO breakeven/tier management at all. main.py now loops over EVERY
+    open ticket (broker.get_all_positions) and calls this per-ticket.
+
+    Old single-ticket schema ({"ticket": ..., "peak_favor": ...} with no
+    per-ticket nesting) is migrated on load into the new dict keyed by
+    that one ticket, so an in-flight state file isn't lost across this
+    change."""
 
     def __init__(self, path: str):
         self._path = Path(path)
-        self._ticket: Optional[int] = None
-        self._peak_favor: float = 0.0
-        self._breakeven_applied: bool = False
-        self._tier1_booked: bool = False
-        self._tier2_booked: bool = False
+        self._tickets: dict[int, dict] = {}
         self._load()
 
     def _load(self) -> None:
@@ -78,61 +87,71 @@ class ExitManagerState:
             return
         try:
             raw = json.loads(self._path.read_text())
-            self._ticket = raw.get("ticket")
-            self._peak_favor = float(raw.get("peak_favor", 0.0))
-            self._breakeven_applied = bool(raw.get("breakeven_applied", False))
-            self._tier1_booked = bool(raw.get("tier1_booked", False))
-            self._tier2_booked = bool(raw.get("tier2_booked", False))
-        except (json.JSONDecodeError, OSError, TypeError, ValueError):
-            pass
+        except (json.JSONDecodeError, OSError):
+            return
+
+        if "tickets" in raw:
+            # New schema: {"tickets": {"<ticket>": {...}, ...}}
+            try:
+                self._tickets = {int(k): v for k, v in raw["tickets"].items()}
+            except (TypeError, ValueError, AttributeError):
+                self._tickets = {}
+        elif raw.get("ticket") is not None:
+            # Old single-ticket schema -- migrate in place.
+            ticket = raw["ticket"]
+            self._tickets = {ticket: {
+                "peak_favor": float(raw.get("peak_favor", 0.0)),
+                "breakeven_applied": bool(raw.get("breakeven_applied", False)),
+                "tier1_booked": bool(raw.get("tier1_booked", False)),
+                "tier2_booked": bool(raw.get("tier2_booked", False)),
+            }}
 
     def _save(self) -> None:
-        self._path.write_text(json.dumps({
-            "ticket": self._ticket,
-            "peak_favor": self._peak_favor,
-            "breakeven_applied": self._breakeven_applied,
-            "tier1_booked": self._tier1_booked,
-            "tier2_booked": self._tier2_booked,
-        }))
+        self._path.write_text(json.dumps({"tickets": {str(k): v for k, v in self._tickets.items()}}, indent=2))
 
-    def _ensure_ticket(self, ticket: int) -> None:
-        if ticket != self._ticket:
-            self._ticket = ticket
-            self._peak_favor = 0.0
-            self._breakeven_applied = False
-            self._tier1_booked = False
-            self._tier2_booked = False
+    def _entry(self, ticket: int) -> dict:
+        entry = self._tickets.setdefault(ticket, {})
+        entry.setdefault("peak_favor", 0.0)
+        entry.setdefault("breakeven_applied", False)
+        entry.setdefault("tier1_booked", False)
+        entry.setdefault("tier2_booked", False)
+        return entry
+
+    def prune(self, open_tickets: set) -> None:
+        """Drop tracking for any ticket no longer open -- called once per
+        poll with the full set of currently open tickets, so closed
+        positions don't accumulate in this file forever. Safe/idempotent
+        if nothing needs pruning."""
+        stale = [t for t in self._tickets if t not in open_tickets]
+        if stale:
+            for t in stale:
+                del self._tickets[t]
             self._save()
 
     def update_peak_favor(self, ticket: int, favor: float) -> float:
-        self._ensure_ticket(ticket)
-        if favor > self._peak_favor:
-            self._peak_favor = favor
+        entry = self._entry(ticket)
+        if favor > entry["peak_favor"]:
+            entry["peak_favor"] = favor
             self._save()
-        return self._peak_favor
+        return entry["peak_favor"]
 
-    def mark_breakeven_applied(self) -> None:
-        self._breakeven_applied = True
+    def mark_breakeven_applied(self, ticket: int) -> None:
+        self._entry(ticket)["breakeven_applied"] = True
         self._save()
 
-    def mark_tier_booked(self, tier: Literal["tier1", "tier2"]) -> None:
-        if tier == "tier1":
-            self._tier1_booked = True
-        else:
-            self._tier2_booked = True
+    def mark_tier_booked(self, ticket: int, tier: Literal["tier1", "tier2"]) -> None:
+        key = "tier1_booked" if tier == "tier1" else "tier2_booked"
+        self._entry(ticket)[key] = True
         self._save()
 
-    @property
-    def breakeven_applied(self) -> bool:
-        return self._breakeven_applied
+    def breakeven_applied(self, ticket: int) -> bool:
+        return self._entry(ticket)["breakeven_applied"]
 
-    @property
-    def tier1_booked(self) -> bool:
-        return self._tier1_booked
+    def tier1_booked(self, ticket: int) -> bool:
+        return self._entry(ticket)["tier1_booked"]
 
-    @property
-    def tier2_booked(self) -> bool:
-        return self._tier2_booked
+    def tier2_booked(self, ticket: int) -> bool:
+        return self._entry(ticket)["tier2_booked"]
 
 
 def _favor_points(direction: Direction, entry_price: float, current_price: float) -> float:
@@ -163,17 +182,17 @@ def evaluate_exit_actions(
     peak = state.update_peak_favor(ticket, favor)
 
     sl_update: Optional[SLUpdate] = None
-    if peak >= BREAKEVEN_POINTS and not state.breakeven_applied:
+    if peak >= BREAKEVEN_POINTS and not state.breakeven_applied(ticket):
         if _tighter(direction, entry_price, current_sl):
             sl_update = SLUpdate(new_sl=entry_price)
-        state.mark_breakeven_applied()
+        state.mark_breakeven_applied(ticket)
 
     closes: list[PartialClose] = []
-    if peak >= TIER1_POINTS and not state.tier1_booked:
+    if peak >= TIER1_POINTS and not state.tier1_booked(ticket):
         closes.append(PartialClose(tier="tier1", volume=round(fixed_lot_size * TIER1_FRACTION, 2)))
-        state.mark_tier_booked("tier1")
-    if peak >= TIER2_POINTS and not state.tier2_booked:
+        state.mark_tier_booked(ticket, "tier1")
+    if peak >= TIER2_POINTS and not state.tier2_booked(ticket):
         closes.append(PartialClose(tier="tier2", volume=round(fixed_lot_size * TIER2_FRACTION, 2)))
-        state.mark_tier_booked("tier2")
+        state.mark_tier_booked(ticket, "tier2")
 
     return sl_update, closes
