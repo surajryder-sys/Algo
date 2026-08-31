@@ -101,13 +101,20 @@ MAX_FLIP_AGE_SECONDS = 90.0
 
 
 class _EdgedZone(Protocol):
-    """Structural type -- matches BOTH v4.bridge.reader.Zone (MT5-native
-    OB lite bridge, M1's own zones) and v4.bridge.tv_zones.Zone (TV
-    scraper, the wider H4-M5 buffer zones) without importing either by
-    name, since only high/low are used here -- both zone classes carry
-    those fields regardless of source."""
+    """Structural type -- matches any wrapper carrying high/low plus a
+    `label` identifying which timeframe it came from (see
+    v4.trend_manager.main.LabeledZone, which wraps BOTH
+    v4.bridge.reader.Zone -- MT5-native OB lite, M1's own zones -- and
+    v4.bridge.tv_zones.Zone -- TV scraper, the wider H4-M5 buffer zones --
+    neither of which carries a timeframe label on its own). Added
+    2026-08-31, user's explicit request ("give me the reason as well,
+    which timeframe edge") -- the combined nearest-edge check across both
+    zone sources previously reported only the winning edge's PRICE, with
+    no way to say which timeframe (M1, or which of H4/H2/H1/M30/M15/M5)
+    it actually came from."""
     high: float
     low: float
+    label: str
 
 
 @dataclass
@@ -266,24 +273,27 @@ def _initial_sl(direction: Direction, far_trail_stop: float) -> float:
 
 def _nearest_opposing_edge(
     direction: Direction, opposing_zones: list[_EdgedZone], reference_price: float,
-) -> Optional[float]:
-    """Near edge of the nearest opposing zone actually in the way of this
-    move -- a bear zone's LOW for a buy, a bull zone's HIGH for a sell --
-    filtered to only zones on the RELEVANT side of reference_price first.
-    Fixed 2026-08-28: a bare min()/max() across ALL opposing zones
-    (including ones already behind price, on the wrong side entirely)
-    let a far-away, irrelevant zone win the pick -- confirmed live, an H4
-    bull zone sitting ~30 points ABOVE price produced a nonsensical
-    negative "gap" for a SELL check (previous_close - that zone's high),
-    which trivially failed the < 5-point test and blocked an otherwise
-    perfectly clear sell. Only a bear zone actually above price (buy) or
-    a bull zone actually below price (sell) can ever really be "in the
-    way," so those are the only candidates now."""
+) -> Optional[tuple[float, str]]:
+    """(edge, label) for the nearest opposing zone actually in the way of
+    this move -- a bear zone's LOW for a buy, a bull zone's HIGH for a
+    sell -- filtered to only zones on the RELEVANT side of reference_price
+    first. label identifies which timeframe that winning zone came from
+    ("M1", or one of the H4/H2/H1/M30/M15/M5 buffer labels) -- added
+    2026-08-31, see _EdgedZone's own docstring for why. Fixed 2026-08-28:
+    a bare min()/max() across ALL opposing zones (including ones already
+    behind price, on the wrong side entirely) let a far-away, irrelevant
+    zone win the pick -- confirmed live, an H4 bull zone sitting ~30
+    points ABOVE price produced a nonsensical negative "gap" for a SELL
+    check (previous_close - that zone's high), which trivially failed the
+    < 5-point test and blocked an otherwise perfectly clear sell. Only a
+    bear zone actually above price (buy) or a bull zone actually below
+    price (sell) can ever really be "in the way," so those are the only
+    candidates now."""
     if direction == "buy":
-        candidates = [z.low for z in opposing_zones if z.low > reference_price]
-        return min(candidates) if candidates else None
-    candidates = [z.high for z in opposing_zones if z.high < reference_price]
-    return max(candidates) if candidates else None
+        candidates = [(z.low, z.label) for z in opposing_zones if z.low > reference_price]
+        return min(candidates, key=lambda c: c[0]) if candidates else None
+    candidates = [(z.high, z.label) for z in opposing_zones if z.high < reference_price]
+    return max(candidates, key=lambda c: c[0]) if candidates else None
 
 
 def evaluate_entry(
@@ -347,13 +357,15 @@ def evaluate_entry(
         state.set_active_direction(direction)
         return EvaluationResult(None, f"{direction} blocked (manually closed previously) -- skipped")
 
-    edge = _nearest_opposing_edge(direction, list(opposing_zones) + list(buffer_zones), previous_candle_close)
+    edge_result = _nearest_opposing_edge(direction, list(opposing_zones) + list(buffer_zones), previous_candle_close)
+    edge, edge_label = edge_result if edge_result is not None else (None, None)
     if edge is not None:
         gap = (edge - previous_candle_close) if direction == "buy" else (previous_candle_close - edge)
         if gap < MIN_EDGE_GAP_POINTS:
             state.set_active_direction(direction)
-            return EvaluationResult(None, f"{direction} rejected: nearest opposing edge {edge:.3f} is only "
-                                           f"{gap:.2f}pt away (need {MIN_EDGE_GAP_POINTS:.0f}pt minimum)")
+            return EvaluationResult(None, f"{direction} rejected: nearest opposing edge {edge:.3f} "
+                                           f"({edge_label}) is only {gap:.2f}pt away "
+                                           f"(need {MIN_EDGE_GAP_POINTS:.0f}pt minimum)")
 
     far_line, far_trail_stop = _far_line(mt5_atr, current_price)
     decision = EntryDecision(
@@ -363,7 +375,7 @@ def evaluate_entry(
         source=source,
     )
     state.set_active_direction(direction)
-    edge_note = f", nearest opposing edge {edge:.3f}" if edge is not None else ", no opposing zone in the way"
+    edge_note = f", nearest opposing edge {edge:.3f} ({edge_label})" if edge is not None else ", no opposing zone in the way"
     return EvaluationResult(
         decision,
         f"{direction} ENTERED: source={source}, flip confirmed by "

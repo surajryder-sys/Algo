@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import datetime
 import time
+from dataclasses import dataclass
 
 from v4.bridge.reader import read_atr_dual, read_zone_lite
 from v4.bridge.tv_zones import read_all_zones
@@ -53,6 +54,21 @@ from v4.trend_manager.m1_execution import V4ExecutionState, evaluate_entry
 
 _SOURCE_CODE = {"mt5": "MT", "tv": "TV", "both": "BT"}
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+
+@dataclass
+class LabeledZone:
+    """Wraps a raw zone (either v4.bridge.reader.Zone -- M1's own -- or
+    v4.bridge.tv_zones.Zone -- a buffer timeframe) with which timeframe it
+    came from, since neither underlying Zone class carries that itself.
+    Added 2026-08-31, user's explicit request ("give me the reason as
+    well, which timeframe edge") -- the combined M1+buffer edge-gap check
+    previously reported only the winning edge's price, with no way to
+    tell whether it came from M1's own zones or one of the H4-M5 buffer
+    timeframes."""
+    high: float
+    low: float
+    label: str
 
 
 def _log(msg: str) -> None:
@@ -69,21 +85,23 @@ def _log(msg: str) -> None:
 _BUFFER_TIMEFRAMES = ("H4", "H2", "H1", "M30", "M15", "M5")
 
 
-def _buffer_zones(symbol: str, structure: str) -> list:
+def _buffer_zones(symbol: str, structure: str) -> list[LabeledZone]:
     """All opposing-direction zones across the six buffer timeframes --
     bear zones (no_long) when the flip is bullish (STRONG), bull zones
     (no_short) when it's bearish (WEAK). Returns [] (fails open, not
     closed) if the scraper's zone file is missing/mid-write this poll --
-    same transient-failure tolerance as every other bridge read here."""
+    same transient-failure tolerance as every other bridge read here.
+    Each zone is tagged with its own timeframe label (see LabeledZone)."""
     zones = read_all_zones(symbol)
     if zones is None:
         return []
-    out = []
+    out: list[LabeledZone] = []
     for label in _BUFFER_TIMEFRAMES:
         tf = zones.get(label)
         if tf is None:
             continue
-        out.extend(tf.bear if structure == "STRONG" else tf.bull)
+        raw = tf.bear if structure == "STRONG" else tf.bull
+        out.extend(LabeledZone(high=z.high, low=z.low, label=label) for z in raw)
     return out
 
 
@@ -154,9 +172,10 @@ def run_once(cfg, state: V4ExecutionState, exit_state: ExitManagerState) -> None
     tv_structure = None
 
     ob = read_zone_lite(cfg.symbol, 1)
-    opposing_zones = []
+    opposing_zones: list[LabeledZone] = []
     if ob is not None and not ob.is_stale():
-        opposing_zones = ob.bear if mt5_atr.structure == "STRONG" else ob.bull
+        raw = ob.bear if mt5_atr.structure == "STRONG" else ob.bull
+        opposing_zones = [LabeledZone(high=z.high, low=z.low, label="M1") for z in raw]
     else:
         _log("M1 OB bridge missing/stale -- proceeding with no M1 edge-gap zones known")
 
