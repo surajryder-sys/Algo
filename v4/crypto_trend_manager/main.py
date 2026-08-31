@@ -68,7 +68,7 @@ def _comment(decision) -> str:
     return f"{decision.comment_tag}-{int(time.time())}"
 
 
-def _fire(cfg, symbol: str, decision, reason: str, existing_direction) -> None:
+def _fire(cfg, symbol: str, decision, reason: str, existing_direction) -> bool:
     """existing_direction: this symbol's REAL position direction before
     this poll's actions, or None if flat. Confirmed live bug, 2026-08-29:
     this account is RETAIL_HEDGING, not netting -- MT5 will NOT
@@ -77,7 +77,19 @@ def _fire(cfg, symbol: str, decision, reason: str, existing_direction) -> None:
     position instead. So an opposite-direction fire must explicitly close
     the old position here FIRST, replicating netting manually -- same
     fix applied to V4/XAUUSD's broker, which had the identical unverified
-    assumption."""
+    assumption.
+
+    Returns whether the caller should commit this M5 confirmation as
+    "used" (state.mark_fired) and treat `decision.direction` as this
+    symbol's new effective direction for cross-symbol gating -- ported
+    2026-08-31 from the same fix confirmed live in
+    usoil_ustec_trend_manager's own main.py: this used to be committed
+    unconditionally in engine.py BEFORE the order was even attempted, so
+    a broker-side rejection still burned the confirmation AND could have
+    fed a phantom direction into the BTCUSD/ETHUSD gating below. Dry-run
+    has no real fill to check, so it still counts as "used" (matches the
+    old behavior); live mode only returns True on a confirmed
+    TRADE_RETCODE_DONE."""
     comment = _comment(decision)
     reversing = existing_direction is not None and existing_direction != decision.direction
 
@@ -85,7 +97,7 @@ def _fire(cfg, symbol: str, decision, reason: str, existing_direction) -> None:
         prefix = f"(would first CLOSE existing {existing_direction} position) " if reversing else ""
         _log(f"[{symbol}] ENTRY SIGNAL (DRY-RUN): {prefix}{decision.direction.upper()} | sl={decision.sl:.2f} | "
              f"{reason} | comment={comment!r}")
-        return
+        return True
 
     if reversing:
         close_result = broker.close_position(cfg, symbol, f"V4S-REVERSE-CLOSE-{int(time.time())}")
@@ -94,6 +106,11 @@ def _fire(cfg, symbol: str, decision, reason: str, existing_direction) -> None:
     result = broker.send_market_order(cfg, symbol, decision.direction, decision.sl, comment)
     _log(f"[{symbol}] ORDER SENT: {decision.direction.upper()} lot={cfg.lot_sizes[symbol]} "
          f"sl={decision.sl:.2f} comment={comment!r} -- result={result}")
+    ok = result is not None and result.retcode == 10009  # TRADE_RETCODE_DONE
+    if not ok:
+        _log(f"[{symbol}] order did NOT go through -- NOT marking this M5 confirmation as used, "
+             f"will retry next poll")
+    return ok
 
 
 def _manage_open_position(cfg, exit_state: ExitManagerState, symbol: str) -> None:
@@ -159,23 +176,41 @@ def run_once(cfg, state: EngineState, exit_state: ExitManagerState) -> None:
     if eth_pos_dir is not None:
         _manage_open_position(cfg, exit_state, _SECONDARY_SYMBOL)
 
-    btc_result = evaluate_symbol(state, PRIMARY_SYMBOL, btc_pos_dir)
+    # Live price per symbol -- 2026-08-31, feeds engine.py's SL-vs-live-
+    # price sanity check (see its own docstring). Transient tick outages
+    # fail open (None) rather than skipping the whole poll.
+    try:
+        btc_price = broker.get_mid_price(PRIMARY_SYMBOL)
+    except RuntimeError:
+        btc_price = None
+    try:
+        eth_price = broker.get_mid_price(_SECONDARY_SYMBOL)
+    except RuntimeError:
+        eth_price = None
+
+    btc_result = evaluate_symbol(state, PRIMARY_SYMBOL, btc_pos_dir, btc_price)
     _log(f"[{PRIMARY_SYMBOL}] {btc_result.reason}")
+    btc_fired_direction = None
     if btc_result.decision is not None:
-        _fire(cfg, PRIMARY_SYMBOL, btc_result.decision, btc_result.reason, btc_pos_dir)
+        btc_ok = _fire(cfg, PRIMARY_SYMBOL, btc_result.decision, btc_result.reason, btc_pos_dir)
+        if btc_ok:
+            state.mark_fired(PRIMARY_SYMBOL, btc_result.decision.confirm.event_time)
+            btc_fired_direction = btc_result.decision.direction
 
     # Most current view of each symbol's direction for this poll's gating
-    # -- use the fresh decision if it just fired (more responsive than
-    # waiting a full poll cycle for MT5 to reflect the new position), else
-    # whatever was already open at the start of this poll. Confirmed live
-    # bug, 2026-08-29: using the STALE pre-poll eth_pos_dir for the
+    # -- use the fresh decision's direction ONLY if it actually fired
+    # (2026-08-31 fix: a decision that failed at the broker must NOT feed
+    # a phantom direction into the gating below -- ported from the same
+    # class of bug fixed in usoil_ustec_trend_manager), else whatever was
+    # already open at the start of this poll. Confirmed live bug,
+    # 2026-08-29: using the STALE pre-poll eth_pos_dir for the
     # follow-close check below (instead of tracking ETHUSD's own
     # just-fired reversal here) could wrongly re-close a position ETHUSD's
     # own engine had correctly just reversed into agreement with BTCUSD
     # this same poll.
-    effective_btc_dir = btc_result.decision.direction if btc_result.decision is not None else btc_pos_dir
+    effective_btc_dir = btc_fired_direction if btc_fired_direction is not None else btc_pos_dir
 
-    eth_result = evaluate_symbol(state, _SECONDARY_SYMBOL, eth_pos_dir)
+    eth_result = evaluate_symbol(state, _SECONDARY_SYMBOL, eth_pos_dir, eth_price)
     eth_fired_direction = None
     if eth_result.decision is not None and effective_btc_dir is not None \
             and eth_result.decision.direction != effective_btc_dir:
@@ -184,8 +219,10 @@ def run_once(cfg, state: EngineState, exit_state: ExitManagerState) -> None:
     else:
         _log(f"[{_SECONDARY_SYMBOL}] {eth_result.reason}")
         if eth_result.decision is not None:
-            _fire(cfg, _SECONDARY_SYMBOL, eth_result.decision, eth_result.reason, eth_pos_dir)
-            eth_fired_direction = eth_result.decision.direction
+            eth_ok = _fire(cfg, _SECONDARY_SYMBOL, eth_result.decision, eth_result.reason, eth_pos_dir)
+            if eth_ok:
+                state.mark_fired(_SECONDARY_SYMBOL, eth_result.decision.confirm.event_time)
+                eth_fired_direction = eth_result.decision.direction
 
     effective_eth_dir = eth_fired_direction if eth_fired_direction is not None else eth_pos_dir
 

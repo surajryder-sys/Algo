@@ -113,7 +113,8 @@ class EngineState:
         self._save()
 
 
-def evaluate_symbol(state: EngineState, symbol: str, current_position_direction: Optional[str] = None) -> EvaluationResult:
+def evaluate_symbol(state: EngineState, symbol: str, current_position_direction: Optional[str] = None,
+                     current_price: Optional[float] = None) -> EvaluationResult:
     """current_position_direction: this symbol's REAL current open position
     direction from MT5 ("buy"/"sell"/None) -- confirmed live bug,
     2026-08-29: without this, nothing stopped a second, independently-
@@ -176,21 +177,50 @@ def evaluate_symbol(state: EngineState, symbol: str, current_position_direction:
                                        f"confirmation (et={confirm.event_time}) already fired an earlier trade "
                                        f"(last used et={last_used}) -- not a fresh flip, waiting for a new one")
 
-    sl = _compute_sl(symbol, winner)
+    sl, sl_reject_reason = _compute_sl(symbol, winner, current_price)
     if sl is None:
         return EvaluationResult(None, f"{winner.tag} {winner.direction} confirmed by M5 ({confirm.kind}) but "
-                                       f"SL inputs unavailable this poll (zone/trail data missing) -- waiting")
+                                       f"{sl_reject_reason} -- waiting")
 
-    state.mark_fired(symbol, confirm.event_time)
+    # NOT marked fired here anymore -- ported 2026-08-31 from the same fix
+    # confirmed live in usoil_ustec_trend_manager's own engine.py: this
+    # used to commit "fired" the instant a decision was built, before the
+    # order was even attempted, so a broker-side rejection still burned
+    # the confirmation and left the account flat with no retry. The
+    # caller (main.py's own fire function) now only calls
+    # state.mark_fired() after confirming the order actually went
+    # through -- see that module's own docstring/comment for the full
+    # incident (found on USOIL, same shared engine shape as here).
     decision = Decision(direction=winner.direction, sl=sl, candidate=winner, confirm=confirm,
                          comment_tag=f"V4S-{winner.tag}-M5-STR")
     return EvaluationResult(decision, f"FIRING {winner.direction} via {winner.tag} -- M5 {confirm.kind} "
                                        f"confirmation (et={confirm.event_time}) after parent bias (et={winner.event_time})")
 
 
-def _compute_sl(symbol: str, candidate: BiasCandidate) -> Optional[float]:
+def _compute_sl(symbol: str, candidate: BiasCandidate,
+                 current_price: Optional[float]) -> tuple[Optional[float], Optional[str]]:
+    """(sl, reject_reason) -- reject_reason is only ever non-None alongside
+    sl=None, and always explains exactly why. Ported 2026-08-31 from the
+    same fix confirmed live in usoil_ustec_trend_manager's own engine.py:
+    str_sl() computes SL from the parent timeframe's OWN live trail lines
+    at the exact instant of firing, not from a stable snapshot taken when
+    the candidate first formed -- if the parent's lines have flickered
+    back toward the opposite direction in the gap between candidate
+    formation and M5 confirmation, the computed SL can land on the wrong
+    side of live price entirely (a real USOIL incident: SL above price
+    for a buy), which MT5 rejects outright. Now explicitly checked
+    against the real live price before ever returning a decision."""
     minutes = _PARENT_MINUTES[candidate.parent]
     trails = read_trail_stops(symbol, minutes)
     if trails is None:
-        return None
-    return str_sl(symbol, candidate.direction, trails[0], trails[1])
+        return None, "SL inputs unavailable this poll (zone/trail data missing)"
+    sl = str_sl(symbol, candidate.direction, trails[0], trails[1])
+    if sl is None:
+        return None, "SL inputs unavailable this poll (zone/trail data missing)"
+    if current_price is not None:
+        wrong_side = (sl >= current_price) if candidate.direction == "buy" else (sl <= current_price)
+        if wrong_side:
+            return None, (f"computed SL {sl:.3f} is on the wrong side of live price {current_price:.3f} -- "
+                           f"{candidate.parent}'s own trail lines have moved since the {candidate.direction} "
+                           f"candidate formed (et={candidate.event_time})")
+    return sl, None

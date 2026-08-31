@@ -38,11 +38,21 @@ def _comment(decision) -> str:
     return f"{decision.comment_tag}-{int(time.time())}"
 
 
-def _fire(cfg, symbol: str, decision, reason: str, existing_direction) -> None:
+def _fire(cfg, symbol: str, decision, reason: str, existing_direction) -> bool:
     """existing_direction: this symbol's REAL position direction before
     this poll's actions, or None if flat. This account is RETAIL_HEDGING
     -- an opposite-direction fire must explicitly close the old position
-    first, same fix already confirmed live in crypto_trend_manager."""
+    first, same fix already confirmed live in crypto_trend_manager.
+
+    Returns whether the caller should commit this M5 confirmation as
+    "used" (state.mark_fired) -- added 2026-08-31, confirmed live: this
+    used to be committed unconditionally in engine.py BEFORE the order
+    was even attempted, so a broker-side rejection (retcode 10016
+    "Invalid stops", a real USOIL buy) still burned the confirmation and
+    left the account flat with no retry. Dry-run has no real fill to
+    check, so it still counts as "used" (matches the old behavior, avoids
+    reprinting the same signal every poll); live mode only returns True
+    on a confirmed TRADE_RETCODE_DONE."""
     comment = _comment(decision)
     reversing = existing_direction is not None and existing_direction != decision.direction
 
@@ -50,7 +60,7 @@ def _fire(cfg, symbol: str, decision, reason: str, existing_direction) -> None:
         prefix = f"(would first CLOSE existing {existing_direction} position) " if reversing else ""
         _log(f"[{symbol}] ENTRY SIGNAL (DRY-RUN): {prefix}{decision.direction.upper()} | sl={decision.sl:.3f} | "
              f"{reason} | comment={comment!r}")
-        return
+        return True
 
     if reversing:
         close_result = broker.close_position(cfg, symbol, f"V4S-REVERSE-CLOSE-{int(time.time())}")
@@ -59,6 +69,11 @@ def _fire(cfg, symbol: str, decision, reason: str, existing_direction) -> None:
     result = broker.send_market_order(cfg, symbol, decision.direction, decision.sl, comment)
     _log(f"[{symbol}] ORDER SENT: {decision.direction.upper()} lot={cfg.lot_sizes[symbol]} "
          f"sl={decision.sl:.3f} comment={comment!r} -- result={result}")
+    ok = result is not None and result.retcode == 10009  # TRADE_RETCODE_DONE
+    if not ok:
+        _log(f"[{symbol}] order did NOT go through -- NOT marking this M5 confirmation as used, "
+             f"will retry next poll")
+    return ok
 
 
 def _manage_open_position(cfg, exit_state: ExitManagerState, symbol: str) -> None:
@@ -111,10 +126,22 @@ def run_once(cfg, state: EngineState, exit_state: ExitManagerState) -> None:
         if pos_dir is not None:
             _manage_open_position(cfg, exit_state, symbol)
 
-        result = evaluate_symbol(state, symbol, pos_dir)
+        # Live price fetched every poll now -- 2026-08-31, feeds engine.py's
+        # SL-vs-live-price sanity check (see its own docstring). Transient
+        # tick outages fail open (None) rather than skipping the whole
+        # poll -- evaluate_symbol already tolerates current_price=None by
+        # just not running that check, same as before this fix existed.
+        try:
+            current_price = broker.get_mid_price(symbol)
+        except RuntimeError:
+            current_price = None
+
+        result = evaluate_symbol(state, symbol, pos_dir, current_price)
         _log(f"[{symbol}] {result.reason}")
         if result.decision is not None:
-            _fire(cfg, symbol, result.decision, result.reason, pos_dir)
+            fired_ok = _fire(cfg, symbol, result.decision, result.reason, pos_dir)
+            if fired_ok:
+                state.mark_fired(symbol, result.decision.confirm.event_time)
 
 
 def main() -> None:

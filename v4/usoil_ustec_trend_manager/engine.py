@@ -87,7 +87,8 @@ class EngineState:
         self._save()
 
 
-def evaluate_symbol(state: EngineState, symbol: str, current_position_direction: Optional[str] = None) -> EvaluationResult:
+def evaluate_symbol(state: EngineState, symbol: str, current_position_direction: Optional[str] = None,
+                     current_price: Optional[float] = None) -> EvaluationResult:
     if not is_scraper_alive():
         return EvaluationResult(None, f"USOIL/USTEC's shared tv_scraper looks dead/stale (no live snapshot "
                                        f"update in the last {MAX_SCRAPER_AGE_SECONDS:.0f}s) -- skipping this poll")
@@ -129,21 +130,55 @@ def evaluate_symbol(state: EngineState, symbol: str, current_position_direction:
                                        f"confirmation (et={confirm.event_time}) already fired an earlier trade "
                                        f"(last used et={last_used}) -- not a fresh flip, waiting for a new one")
 
-    sl = _compute_sl(symbol, winner)
+    sl, sl_reject_reason = _compute_sl(symbol, winner, current_price)
     if sl is None:
         return EvaluationResult(None, f"{winner.tag} {winner.direction} confirmed by M5 ({confirm.kind}) but "
-                                       f"SL inputs unavailable this poll (trail data missing) -- waiting")
+                                       f"{sl_reject_reason} -- waiting")
 
-    state.mark_fired(symbol, confirm.event_time)
+    # NOT marked fired here anymore -- fixed 2026-08-31, confirmed live:
+    # this used to commit "fired" the instant a decision was built, before
+    # the order was even attempted. A real USOIL buy then failed at the
+    # broker (retcode 10016 "Invalid stops") and the state was already
+    # burned -- the account sat flat with the engine believing this M5
+    # confirmation had been used, permanently skipping any retry. Now the
+    # caller (main.py's run_once) only calls state.mark_fired() after
+    # confirming the order actually went through -- see its own
+    # docstring/comment for the full incident.
     decision = Decision(direction=winner.direction, sl=sl, candidate=winner, confirm=confirm,
                          comment_tag=f"V4S-{winner.tag}-M5-STR")
     return EvaluationResult(decision, f"FIRING {winner.direction} via {winner.tag} -- M5 {confirm.kind} "
                                        f"confirmation (et={confirm.event_time}) after parent bias (et={winner.event_time})")
 
 
-def _compute_sl(symbol: str, candidate: BiasCandidate) -> Optional[float]:
+def _compute_sl(symbol: str, candidate: BiasCandidate,
+                 current_price: Optional[float]) -> tuple[Optional[float], Optional[str]]:
+    """(sl, reject_reason) -- reject_reason is only ever non-None alongside
+    sl=None, and always explains exactly why. Extended 2026-08-31,
+    confirmed live: str_sl() computes SL from the parent timeframe's OWN
+    live trail lines at the exact instant of firing, not from a stable
+    snapshot taken when the candidate first formed. A real USOIL buy
+    candidate (M15 partial-bullish at 19:15 IST) wasn't actually fired
+    until M5 confirmed 10 minutes later at 19:25 -- by then M15's own
+    lines had flickered back toward bearish, so str_sl's usual "far line
+    minus a small buffer" landed ABOVE the live price (85.500 vs a live
+    ask of 85.379), which is nonsensical for a buy SL and got rejected
+    outright by MT5. Now explicitly checked against the real live price
+    before ever returning a decision -- if the computed SL is on the
+    wrong side, this is treated as "the parent's own structure has moved
+    since the candidate formed" and the engine waits for a poll where
+    M15's lines are back in a state that produces a genuinely valid SL,
+    rather than sending a broken order and burning the confirmation."""
     minutes = _PARENT_MINUTES[candidate.parent]
     trails = read_trail_stops(symbol, minutes)
     if trails is None:
-        return None
-    return str_sl(symbol, candidate.direction, trails[0], trails[1])
+        return None, "SL inputs unavailable this poll (trail data missing)"
+    sl = str_sl(symbol, candidate.direction, trails[0], trails[1])
+    if sl is None:
+        return None, "SL inputs unavailable this poll (trail data missing)"
+    if current_price is not None:
+        wrong_side = (sl >= current_price) if candidate.direction == "buy" else (sl <= current_price)
+        if wrong_side:
+            return None, (f"computed SL {sl:.3f} is on the wrong side of live price {current_price:.3f} -- "
+                           f"{candidate.parent}'s own trail lines have moved since the {candidate.direction} "
+                           f"candidate formed (et={candidate.event_time})")
+    return sl, None
