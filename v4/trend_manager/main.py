@@ -86,10 +86,17 @@ class LabeledZone:
     well, which timeframe edge") -- the combined M1+buffer edge-gap check
     previously reported only the winning edge's price, with no way to
     tell whether it came from M1's own zones or one of the H4-M5 buffer
-    timeframes."""
+    timeframes. Extended 2026-08-31, user's explicit request ("have all
+    the values") -- carries virgin/start_time too now, not just
+    high/low/label, so a rejection log line can record the FULL zone
+    (see m1_execution.py's _EdgedZone/evaluate_entry) since the live
+    bridge's own rolling zone history can move on and lose the exact
+    zone before anyone asks about it after the fact."""
     high: float
     low: float
     label: str
+    virgin: bool
+    start_time: int
 
 
 def _log(msg: str) -> None:
@@ -122,7 +129,7 @@ def _buffer_zones(symbol: str, structure: str) -> list[LabeledZone]:
         if tf is None:
             continue
         raw = tf.bear if structure == "STRONG" else tf.bull
-        out.extend(LabeledZone(high=z.high, low=z.low, label=label) for z in raw)
+        out.extend(LabeledZone(high=z.high, low=z.low, label=label, virgin=z.virgin, start_time=z.start_time) for z in raw)
     return out
 
 
@@ -214,7 +221,7 @@ def run_once(cfg, state: V4ExecutionState, exit_state: ExitManagerState) -> None
     opposing_zones: list[LabeledZone] = []
     if ob is not None and not ob.is_stale():
         raw = ob.bear if mt5_atr.structure == "STRONG" else ob.bull
-        opposing_zones = [LabeledZone(high=z.high, low=z.low, label="M1") for z in raw]
+        opposing_zones = [LabeledZone(high=z.high, low=z.low, label="M1", virgin=z.virgin, start_time=z.start_time) for z in raw]
     else:
         _log("M1 OB bridge missing/stale -- proceeding with no M1 edge-gap zones known")
 
@@ -232,7 +239,7 @@ def run_once(cfg, state: V4ExecutionState, exit_state: ExitManagerState) -> None
     ob_m5 = read_zone_lite(cfg.symbol, 5)
     if ob_m5 is not None and not ob_m5.is_stale():
         raw_m5 = ob_m5.bear if mt5_atr.structure == "STRONG" else ob_m5.bull
-        mt5_m5_zones = [LabeledZone(high=z.high, low=z.low, label="M5(MT5)") for z in raw_m5]
+        mt5_m5_zones = [LabeledZone(high=z.high, low=z.low, label="M5(MT5)", virgin=z.virgin, start_time=z.start_time) for z in raw_m5]
     else:
         _log("MT5-native M5 OB bridge missing/stale -- proceeding with no M5(MT5) edge-gap zones known")
 

@@ -111,10 +111,17 @@ class _EdgedZone(Protocol):
     which timeframe edge") -- the combined nearest-edge check across both
     zone sources previously reported only the winning edge's PRICE, with
     no way to say which timeframe (M1, or which of H4/H2/H1/M30/M15/M5)
-    it actually came from."""
+    it actually came from. Extended 2026-08-31, user's explicit request
+    ("have all the values") after a rejection's zone had already rolled
+    off the live bridge's rolling history by the time it was asked
+    about -- the rejection message itself now carries the FULL zone
+    (high, low, virgin, start_time), not just the single edge price, so
+    nothing needs to be reconstructed after the fact."""
     high: float
     low: float
     label: str
+    virgin: bool
+    start_time: int
 
 
 @dataclass
@@ -273,13 +280,17 @@ def _initial_sl(direction: Direction, far_trail_stop: float) -> float:
 
 def _nearest_opposing_edge(
     direction: Direction, opposing_zones: list[_EdgedZone], reference_price: float,
-) -> Optional[tuple[float, str]]:
-    """(edge, label) for the nearest opposing zone actually in the way of
+) -> Optional[tuple[_EdgedZone, float]]:
+    """(zone, edge) for the nearest opposing zone actually in the way of
     this move -- a bear zone's LOW for a buy, a bull zone's HIGH for a
     sell -- filtered to only zones on the RELEVANT side of reference_price
-    first. label identifies which timeframe that winning zone came from
-    ("M1", or one of the H4/H2/H1/M30/M15/M5 buffer labels) -- added
-    2026-08-31, see _EdgedZone's own docstring for why. Fixed 2026-08-28:
+    first. Returns the WHOLE winning zone object (not just its edge price)
+    -- extended 2026-08-31, "have all the values" -- so a rejection can
+    log the zone's full high/low/virgin/start_time, not just the single
+    boundary price, since the live bridge's rolling zone history can move
+    on and lose the zone by the time anyone asks about it after the fact.
+    label identifies which timeframe that winning zone came from ("M1",
+    or one of the H4/H2/H1/M30/M15/M5 buffer labels). Fixed 2026-08-28:
     a bare min()/max() across ALL opposing zones (including ones already
     behind price, on the wrong side entirely) let a far-away, irrelevant
     zone win the pick -- confirmed live, an H4 bull zone sitting ~30
@@ -290,10 +301,10 @@ def _nearest_opposing_edge(
     price (sell) can ever really be "in the way," so those are the only
     candidates now."""
     if direction == "buy":
-        candidates = [(z.low, z.label) for z in opposing_zones if z.low > reference_price]
-        return min(candidates, key=lambda c: c[0]) if candidates else None
-    candidates = [(z.high, z.label) for z in opposing_zones if z.high < reference_price]
-    return max(candidates, key=lambda c: c[0]) if candidates else None
+        candidates = [(z, z.low) for z in opposing_zones if z.low > reference_price]
+        return min(candidates, key=lambda c: c[1]) if candidates else None
+    candidates = [(z, z.high) for z in opposing_zones if z.high < reference_price]
+    return max(candidates, key=lambda c: c[1]) if candidates else None
 
 
 def evaluate_entry(
@@ -358,14 +369,21 @@ def evaluate_entry(
         return EvaluationResult(None, f"{direction} blocked (manually closed previously) -- skipped")
 
     edge_result = _nearest_opposing_edge(direction, list(opposing_zones) + list(buffer_zones), previous_candle_close)
-    edge, edge_label = edge_result if edge_result is not None else (None, None)
+    edge_zone, edge = edge_result if edge_result is not None else (None, None)
     if edge is not None:
         gap = (edge - previous_candle_close) if direction == "buy" else (previous_candle_close - edge)
         if gap < MIN_EDGE_GAP_POINTS:
             state.set_active_direction(direction)
+            # Full zone logged here (not just the boundary price) --
+            # 2026-08-31, "have all the values": the live bridge's
+            # rolling zone history moves on and can drop this exact zone
+            # before anyone asks about it after the fact, so the log
+            # line itself has to be the permanent record.
             return EvaluationResult(None, f"{direction} rejected: nearest opposing edge {edge:.3f} "
-                                           f"({edge_label}) is only {gap:.2f}pt away "
-                                           f"(need {MIN_EDGE_GAP_POINTS:.0f}pt minimum)")
+                                           f"({edge_zone.label}) is only {gap:.2f}pt away "
+                                           f"(need {MIN_EDGE_GAP_POINTS:.0f}pt minimum) -- zone: "
+                                           f"high={edge_zone.high:.3f} low={edge_zone.low:.3f} "
+                                           f"virgin={edge_zone.virgin} start_time={edge_zone.start_time}")
 
     far_line, far_trail_stop = _far_line(mt5_atr, current_price)
     decision = EntryDecision(
@@ -375,7 +393,9 @@ def evaluate_entry(
         source=source,
     )
     state.set_active_direction(direction)
-    edge_note = f", nearest opposing edge {edge:.3f} ({edge_label})" if edge is not None else ", no opposing zone in the way"
+    edge_note = (f", nearest opposing edge {edge:.3f} ({edge_zone.label}, "
+                 f"high={edge_zone.high:.3f} low={edge_zone.low:.3f} virgin={edge_zone.virgin} "
+                 f"start_time={edge_zone.start_time})") if edge is not None else ", no opposing zone in the way"
     return EvaluationResult(
         decision,
         f"{direction} ENTERED: source={source}, flip confirmed by "
