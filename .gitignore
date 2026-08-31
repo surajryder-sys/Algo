@@ -100,6 +100,7 @@ smc_v2_bot_direction_blocks.json
 smc_v2_bot_zone_cooldown.json
 v4_m1_execution_state.json
 v4_exit_manager_state.json
+v4_trap_watch_state.json
 v4_atr_flip_race_state.json
 v4_crypto_trend_manager_state.json
 v4_crypto_exit_manager_state.json
