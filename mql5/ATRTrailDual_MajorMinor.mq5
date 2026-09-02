@@ -939,8 +939,27 @@ void PublishATRBridgeFile(const int rates_total, const datetime &time[])
    FileWriteString(handle, j);
    FileClose(handle);
 
-   if(!FileMove(tmp_name, FILE_COMMON, final_name, FILE_COMMON | FILE_REWRITE))
-      Print("ATR dual bridge file publish failed to finalize: ", final_name, " | error=", GetLastError());
+   // Retried a few times -- confirmed live, error 5004 (cannot open
+   // file) on this exact FileMove: a Python reader (this bridge is read
+   // continuously, sometimes by more than one process at once) can have
+   // final_name open for reading at the exact instant this tries to
+   // replace it, and Windows throws a sharing violation on the rename.
+   // These windows are only ever as long as a single file read (a few
+   // ms), so a handful of immediate retries clears the vast majority of
+   // them without meaningfully delaying the publish (this whole function
+   // is already throttled to once every PublishEverySeconds).
+   bool moved = false;
+   int last_error = 0;
+   for(int attempt = 0; attempt < 5 && !moved; attempt++)
+     {
+      if(attempt > 0)
+         Sleep(10);
+      moved = FileMove(tmp_name, FILE_COMMON, final_name, FILE_COMMON | FILE_REWRITE);
+      if(!moved)
+         last_error = GetLastError();
+     }
+   if(!moved)
+      Print("ATR dual bridge file publish failed to finalize after retries: ", final_name, " | error=", last_error);
 }
 
 //+------------------------------------------------------------------+
