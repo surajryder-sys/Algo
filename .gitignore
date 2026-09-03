@@ -106,4 +106,7 @@ v4_crypto_trend_manager_state.json
 v4_crypto_exit_manager_state.json
 v4_usoil_ustec_trend_manager_state.json
 v4_usoil_ustec_exit_manager_state.json
+v5s_trend_manager_state.json
+v5s_trend_manager_sl_state.json
+v5s_trend_manager_runtime_state.json
 v4_profit_alerts_state.json
