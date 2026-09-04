@@ -1,8 +1,12 @@
 """Profit-milestone alert loop for V5-Sentinel -- reads V5-Sentinel's
 own open MT5 positions (V5S_MAGIC_NUMBER) and fires one Telegram
 message, to every APPROVED subscriber (see profit_alerts_subscribers.py),
-the first time each position's floating profit reaches each configured
-points milestone. Read-only -- never touches an order.
+the first time each position's floating profit reaches each milestone
+in an OPEN-ENDED ladder: 10, 15, 20, 25, 30, ... (step 5 throughout,
+including the 10->15 leg) -- user's explicit rule 2026-09-04, "one alert
+at 10 points gain, then again at 15 from entry and subsequent each 5
+points until the trade gets closed." Continues indefinitely, no upper
+bound -- see _milestones_up_to. Read-only -- never touches an order.
 
 Run alongside profit_alerts_listener.py (separate process, handles
 subscriber approval commands -- see that module's own docstring for why
@@ -29,6 +33,21 @@ def _profit_points(position) -> float:
     return position.price_open - position.price_current
 
 
+def _milestones_up_to(profit_points: float, start: float, step: float) -> list[float]:
+    """Expands the open-ended ladder (10, 15, 20, 25, ... -- a single
+    uniform step-5 sequence starting at 10, see Config.milestone_start/
+    step's own docstring) on demand, up to and including whatever
+    milestone the CURRENT profit has actually reached. Cheap even after
+    a huge favorable move -- this is a handful of iterations, not
+    thousands, for any realistic XAUUSD point count."""
+    milestones = []
+    m = start
+    while m <= profit_points:
+        milestones.append(m)
+        m += step
+    return milestones
+
+
 def _format_alert(position, milestone: float, profit_points: float) -> str:
     direction_label = "BUY" if position.type == mt5.POSITION_TYPE_BUY else "SELL"
     return (
@@ -51,9 +70,7 @@ def run_once(cfg: Config, state: ProfitState, subscribers: SubscriberStore) -> N
         open_tickets.add(position.ticket)
         profit_points = _profit_points(position)
 
-        for milestone in cfg.milestones:
-            if profit_points < milestone:
-                continue
+        for milestone in _milestones_up_to(profit_points, cfg.milestone_start, cfg.milestone_step):
             if state.already_alerted(position.ticket, milestone):
                 continue
 

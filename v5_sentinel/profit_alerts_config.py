@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -32,7 +32,16 @@ class Config:
     owner_chat_id: str
     poll_seconds: float
     symbol: str
-    milestones: List[float]
+    # Open-ended milestone ladder, replacing the old fixed [12, 25] list
+    # -- user's explicit rule 2026-09-04: "one alert at 10 points gain,
+    # then again at 15 from entry and subsequent each 5 points until the
+    # trade gets closed." That's a single arithmetic sequence, no special
+    # case needed: 10, 15, 20, 25, 30, ... (step 5 throughout, including
+    # the 10->15 leg) -- see profit_alerts_watcher._milestones_up_to for
+    # where this actually gets expanded, on demand, up to whatever the
+    # CURRENT profit is (an unbounded list can't be precomputed).
+    milestone_start: float
+    milestone_step: float
     magic_number: int
     state_file: str
     subscribers_file: str
@@ -49,9 +58,8 @@ def load_config() -> Config:
         owner_chat_id=os.getenv("PROFIT_ALERTS_TELEGRAM_CHAT_ID", ""),
         poll_seconds=float(os.getenv("V5S_PROFIT_ALERTS_POLL_SECONDS", "5.0")),
         symbol=os.getenv("V5S_SYMBOL", "XAUUSD"),
-        # Unchanged from V3/V4, user's explicit confirmation ("same as
-        # before"): 12/25 points, each its own separate alert.
-        milestones=[12.0, 25.0],
+        milestone_start=10.0,
+        milestone_step=5.0,
         magic_number=int(os.getenv("V5S_MAGIC_NUMBER", "26090201")),
         state_file=os.getenv("V5S_PROFIT_ALERTS_STATE_FILE", "v5_sentinel_profit_alerts_state.json"),
         subscribers_file=os.getenv("V5S_PROFIT_ALERTS_SUBSCRIBERS_FILE", "v5_sentinel_profit_alerts_subscribers.json"),
