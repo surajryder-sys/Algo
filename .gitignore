@@ -109,4 +109,7 @@ v4_usoil_ustec_exit_manager_state.json
 v5s_trend_manager_state.json
 v5s_trend_manager_sl_state.json
 v5s_trend_manager_runtime_state.json
+v5_sentinel_profit_alerts_state.json
+v5_sentinel_profit_alerts_subscribers.json
+v5_sentinel_profit_alerts_command_offset.json
 v4_profit_alerts_state.json
