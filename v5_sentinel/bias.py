@@ -26,13 +26,18 @@ watching/ambiguous phase (FlipStateResult.watching is not None) --
 regardless of what its `confirmed` value still reads, since a trapped
 parent's confirmed direction is exactly the stale value under question,
 not a reliable vote.
+
+2026-09-04: both M5 and M15's own flip_state are now reconciled against
+the live MQL5 bridge (bridge.reconcile()) before any of the above table
+logic runs -- see bridge.py's own docstring for why and when that
+overrides our independent recompute.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
-from v5_sentinel import rates
+from v5_sentinel import bridge, rates
 from v5_sentinel.flip_state import Confirmed, FlipStateResult, compute as compute_flip_state
 
 
@@ -52,6 +57,7 @@ def compute_m5_bias(symbol: str) -> Optional[BiasResult]:
     fs = compute_flip_state(series)
     if fs is None:
         return None
+    fs = bridge.reconcile(fs, series)
     return BiasResult(direction=fs.confirmed.value, since_time=fs.confirmed_since_time, flip_state=fs)
 
 
@@ -76,6 +82,12 @@ def compute_parent_bias(symbol: str) -> Optional[ParentBiasResult]:
     fs15 = compute_flip_state(m15_series)
     if fs5 is None or fs15 is None:
         return None
+
+    # Trust the live MQL5 chart over our own recompute when they disagree
+    # -- see bridge.py's own docstring. No-op (returns fs unchanged) if
+    # the bridge has nothing reliable to offer for this timeframe.
+    fs5 = bridge.reconcile(fs5, m5_series)
+    fs15 = bridge.reconcile(fs15, m15_series)
 
     m5_trapped = fs5.watching is not None
     m15_trapped = fs15.watching is not None

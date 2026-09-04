@@ -1,9 +1,15 @@
 """V5-Sentinel Trend Manager -- main loop.
 
-Data path: MT5 bar history only (mt5.copy_rates_from_pos via
-v5_sentinel/rates.py) -- no chart, no MQL5 indicator, no bridge JSON file
-anywhere in this bot. M5/ICT and M15/ICT (OB-formation bias) are NOT
-implemented yet; both parents are STR-only for now (see bias.py).
+Data path: MT5 bar history (mt5.copy_rates_from_pos via v5_sentinel/
+rates.py) is PRIMARY for M5/M15/M3 alike -- no chart or indicator is
+required for this bot to run. As of 2026-09-04, the live MQL5 ATR Trail
+Dual bridge is additionally consulted (bridge.py) purely as a tie-breaker
+whenever it disagrees with that recompute (XAUUSD is volatile enough
+that this happens for real -- see bridge.py's docstring); the bridge
+itself is never a hard dependency, everything falls back to pure
+copy_rates the moment it's missing or stale. M5/ICT and M15/ICT
+(OB-formation bias) are NOT implemented yet; both parents are STR-only
+for now (see bias.py).
 
 Run with: python -m v5_sentinel.main
 
@@ -50,7 +56,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bias, broker, flip_state, rates, sl_manager, trade_manager
+from v5_sentinel import bias, bridge, broker, flip_state, rates, sl_manager, trade_manager
 from v5_sentinel.config import Config, load_config
 
 _M3_MINUTES = 3
@@ -94,16 +100,6 @@ def _far_line_for(direction: int, m3_series: rates.TrailSeries) -> float:
     return far
 
 
-def _comment(action: str, code: str = "") -> str:
-    """"V5S" = V5-Sentinel -- same pattern v4/trend_manager/main.py's own
-    _comment() uses: no L/S direction field (the position's own buy/sell
-    type already shows that), just a unix timestamp for uniqueness. e.g.
-    "V5S-ENTRY-FLIP-1788373080" -- well under MT5's real 31-char comment
-    limit (confirmed on this same account by V4's own comment testing)."""
-    parts = ["V5S", action] + ([code] if code else []) + [str(int(time.time()))]
-    return "-".join(parts)
-
-
 def _parent_tag(parent: "bias.ParentBiasResult", direction: int) -> str:
     """Which parent to credit in the entry comment (2026-09-04 naming
     convention, confirmed with the user). M5_ONLY/M15_ONLY are literal --
@@ -125,14 +121,41 @@ def _parent_tag(parent: "bias.ParentBiasResult", direction: int) -> str:
     return "M5"  # AGREE
 
 
+def _tag(parent: "bias.ParentBiasResult", direction: int, label: str) -> str:
+    """"{parent}/3{F|T}" -- e.g. "M5/3F", "M15M5/3T". The core identity
+    piece shared by every comment this bot writes."""
+    event_code = "F" if label == "FLIP" else "T"
+    return f"{_parent_tag(parent, direction)}/3{event_code}"
+
+
+def _extract_tag(comment: str) -> str:
+    """Pulls the "{parent}/3{F|T}" tag back out of one of our own past
+    comments (V5S-TM-{tag}-...) -- used to carry an ENTRY's own tag
+    forward onto its later partial-booking comments, so a partial-close
+    deal can be traced back to what opened the position by comment alone
+    (2026-09-04, confirmed with the user). Falls back to "UNK" if the
+    given comment isn't in our own format (predates this scheme, missing,
+    etc.) -- never raises."""
+    parts = comment.split("-") if comment else []
+    if len(parts) >= 3 and parts[0] == "V5S" and parts[1] == "TM":
+        return parts[2]
+    return "UNK"
+
+
 def _entry_comment(parent: "bias.ParentBiasResult", direction: int, label: str) -> str:
     """"V5S-TM-{parent}/3{F|T}-<unix ts>" -- e.g. "V5S-TM-M5/3F-1788528601"
-    or "V5S-TM-M15M5/3T-1788528601". TM = Trend Manager. Confirmed with
-    the user this replaces the old "V5S-ENTRY-FLIP/TRAP-<ts>" shape for
-    OPEN trades specifically -- exits (SQOFF/REFRESH/PARTIAL1/PARTIAL2)
-    keep their existing _comment() format, unchanged."""
-    event_code = "F" if label == "FLIP" else "T"
-    return f"V5S-TM-{_parent_tag(parent, direction)}/3{event_code}-{int(time.time())}"
+    or "V5S-TM-M15M5/3T-1788528601". TM = Trend Manager."""
+    return f"V5S-TM-{_tag(parent, direction, label)}-{int(time.time())}"
+
+
+def _action_comment(tag: str, action_code: str) -> str:
+    """"V5S-TM-{tag}-{action_code}-<unix ts>" -- the shared shape for
+    every non-entry comment (P1/P2/SQ/RF). action_code is kept to 2
+    letters deliberately: the worst-case tag ("M15M5/3F") plus a longer
+    word like "SQOFF" would exceed MT5's real 31-char comment limit on
+    this account (confirmed: "V5S-TM-M15M5/3F-SQOFF-<10 digit ts>" comes
+    to 32 chars) -- P1/P2/SQ/RF all stay comfortably under it instead."""
+    return f"V5S-TM-{tag}-{action_code}-{int(time.time())}"
 
 
 def _open_position(cfg: Config, direction: int, m3_series: rates.TrailSeries, label: str,
@@ -154,13 +177,19 @@ def _open_position(cfg: Config, direction: int, m3_series: rates.TrailSeries, la
         print(f"[V5S-ENTRY] filled, ticket={result.ticket}")
 
 
-def _close_position(cfg: Config, position, action: str) -> bool:
-    print(f"[V5S-EXIT] closing #{position.ticket} ({action}), volume={position.volume}")
+def _close_position(cfg: Config, position, action_label: str, tag: str, action_code: str) -> bool:
+    """action_label is the human-readable log word (e.g. "SQOFF"); tag is
+    the "{parent}/3{F|T}" of whatever NEW event triggered this close (not
+    the position's own entry tag -- SQOFF/REFRESH are about why it's
+    closing now, unlike P1/P2 which trace back to the entry instead, see
+    _run_trade_manager); action_code is the short comment code (SQ/RF)."""
+    print(f"[V5S-EXIT] closing #{position.ticket} ({action_label}), volume={position.volume}")
     if not cfg.enable_trading:
         print("[V5S-EXIT] enable_trading is false -- decision only, no order sent")
         return True
 
-    result = broker.close_position(cfg.symbol, position, cfg.deviation_points, comment=_comment(action))
+    result = broker.close_position(cfg.symbol, position, cfg.deviation_points,
+                                   comment=_action_comment(tag, action_code))
     if not result.ok:
         print(f"[V5S-EXIT] close failed: retcode={result.retcode} comment={result.comment}")
         return False
@@ -205,13 +234,20 @@ def _run_trade_manager(cfg: Config, mgr: trade_manager.TradeManager, position) -
         return
 
     volume, label = outcome
+    action_code = "P1" if label == "partial1" else "P2"
+    # Traces back to the ENTRY's own tag (not any current event) -- this
+    # is a pure profit-threshold booking, nothing new "happened" on M3 to
+    # tag it with. get_entry_comment() is the position's comment as it
+    # read at first sighting, before MT5 overwrote it on the broker side.
+    entry_tag = _extract_tag(mgr.get_entry_comment(position.ticket) or "")
+
     print(f"[V5S-TM] #{position.ticket} booking {label}: {volume} lots")
     if not cfg.enable_trading:
         print("[V5S-TM] enable_trading is false -- decision only, no close sent")
         return
 
     result = broker.close_position(cfg.symbol, position, cfg.deviation_points, volume=volume,
-                                   comment=_comment(label.upper()))
+                                   comment=_action_comment(entry_tag, action_code))
     if not result.ok:
         print(f"[V5S-TM] partial close failed: retcode={result.retcode} comment={result.comment}")
 
@@ -227,6 +263,7 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
     if fs_m3 is None:
         print("[V5S] waiting for enough M3 bar history for flip_state")
         return
+    fs_m3 = bridge.reconcile(fs_m3, m3_series)
 
     positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     position = positions[0] if positions else None  # one position at a time, enforced by construction below
@@ -256,16 +293,17 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
                 position = positions[0] if positions else None
             else:
                 pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+                new_event_tag = _tag(parent, new_dir, label)
                 if new_dir != pos_direction:
                     # valid opposite setup -- square off, then open fresh opposite
-                    if _close_position(cfg, position, "SQOFF"):
+                    if _close_position(cfg, position, "SQOFF", new_event_tag, "SQ"):
                         _open_position(cfg, new_dir, m3_series, label, parent)
                         positions = broker.get_positions(cfg.symbol, cfg.magic_number)
                         position = positions[0] if positions else None
                 elif tm_mgr.is_partially_cut(position.ticket):
                     # same-direction fresh signal on an already-cut-down
                     # position -- refresh to full size
-                    if _close_position(cfg, position, "REFRESH"):
+                    if _close_position(cfg, position, "REFRESH", new_event_tag, "RF"):
                         _open_position(cfg, new_dir, m3_series, label, parent)
                         positions = broker.get_positions(cfg.symbol, cfg.magic_number)
                         position = positions[0] if positions else None

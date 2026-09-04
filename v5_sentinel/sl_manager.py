@@ -2,7 +2,7 @@
 position. Persisted to disk (keyed by ticket) so a bot restart doesn't
 lose entry price / manual-override state mid-trade.
 
-Rule (confirmed in design discussion):
+Rule (confirmed in design discussion, resume behavior refined 2026-09-04):
   - Untouched until the trade is `breakeven_trigger_points` in favor.
   - At that point, SL -> breakeven (entry price), and from that exact
     moment on, SL continuously follows M3's own FAR trail line (whichever
@@ -10,11 +10,21 @@ Rule (confirmed in design discussion):
     minus/plus `sl_buffer`, on the trade's own direction.
   - SL only ever tightens -- never loosens, even if the far line itself
     retraces.
-  - A manual SL change (broker SL differs from what this manager itself
-    last set) permanently pauses auto-trailing for THAT ticket -- unlike
-    algo_v2's sl_manager.py, there is no auto-release condition within
-    the same trade's lifetime; only a brand new ticket gets normal
-    auto-trailing again.
+  - A manual SL EDIT (broker SL differs from what this manager itself
+    last set, but is still a real value) pauses auto-trailing for that
+    ticket.
+  - The resume signal is specifically CLEARING the SL entirely (broker SL
+    goes to None/0), not just changing it to some other value -- and
+    clearing hands control back IMMEDIATELY, not on the next natural
+    trigger (Option A, confirmed with the user over Option B): if the
+    position is currently pre-breakeven, this manager re-establishes the
+    same initial-SL formula fresh (current far line ∓ buffer) the very
+    same cycle it notices the clear, rather than leaving the position
+    with zero protection until +7 points arrives on its own. If already
+    past breakeven, normal breakeven/far-line trailing just resumes.
+  - This pause/resume cycle repeats indefinitely for the life of one
+    trade -- change it again, it pauses again; clear it again, it
+    resumes and re-protects again.
 """
 from __future__ import annotations
 
@@ -36,7 +46,7 @@ def _differs(a: Optional[float], b: Optional[float]) -> bool:
 class PositionSLState:
     entry_price: float
     last_bot_sl: Optional[float]   # what this manager itself last confirmed set on the broker
-    override_active: bool = False   # permanent once tripped, for this ticket only
+    override_active: bool = False   # True while paused by a manual edit; cleared by a manual CLEAR
 
 
 class SLManager:
@@ -83,11 +93,19 @@ class SLManager:
             self._save()
             return None
 
-        if _differs(current_broker_sl, state.last_bot_sl):
+        if current_broker_sl is None:
+            # SL manually cleared -- the resume signal. Hands control back
+            # immediately (Option A): fall through to the protection logic
+            # below instead of waiting for the next natural trigger.
+            if state.override_active:
+                print(f"[V5S-SL] #{ticket} SL manually cleared -- resuming auto-trail control")
+            state.override_active = False
+            state.last_bot_sl = None
+        elif _differs(current_broker_sl, state.last_bot_sl):
             if not state.override_active:
                 print(f"[V5S-SL] #{ticket} manual SL change detected "
                       f"({state.last_bot_sl} -> {current_broker_sl}) -- "
-                      f"auto-trail permanently paused for this trade")
+                      f"auto-trail paused until this SL is cleared entirely")
                 state.override_active = True
             state.last_bot_sl = current_broker_sl  # track the human's value, don't fight it
             self._save()
@@ -98,12 +116,22 @@ class SLManager:
             return None
 
         favor = (current_price - entry_price) if direction == 1 else (entry_price - current_price)
+
         if favor < self._breakeven_trigger_points:
+            if current_broker_sl is None:
+                # Just resumed from a clear, still pre-breakeven -- the
+                # position currently has ZERO protection. Re-establish the
+                # same initial-SL formula fresh off the current far line
+                # rather than leaving it bare until +7 points arrives.
+                proposed = far_line - self._sl_buffer if direction == 1 else far_line + self._sl_buffer
+                self._save()
+                return proposed
             self._save()
             return None
 
-        # Breakeven has triggered -- from here on, follow the far line
-        # (never proposing worse than breakeven itself).
+        # Breakeven has triggered (or already had, e.g. right after a
+        # resume) -- follow the far line, never proposing worse than
+        # breakeven itself.
         far_side_sl = far_line - self._sl_buffer if direction == 1 else far_line + self._sl_buffer
         proposed = max(far_side_sl, entry_price) if direction == 1 else min(far_side_sl, entry_price)
 
