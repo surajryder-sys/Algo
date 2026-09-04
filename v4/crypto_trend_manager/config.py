@@ -38,6 +38,7 @@ class Config:
     magic_number: int
     lot_sizes: dict[str, float]
     enable_trading: bool
+    fatal_retry_cooldown_seconds: float
 
 
 def load_config() -> Config:
@@ -62,4 +63,9 @@ def load_config() -> Config:
             "ETHUSD": float(os.getenv("CRYPTO_TM_ETHUSD_LOTS", "1.0")),
         },
         enable_trading=os.getenv("CRYPTO_TM_ENABLE_TRADING", "false").strip().lower() == "true",
+        # 2026-09-02 fix -- see engine.py's FATAL_RETCODES/fatal_failure_active:
+        # cooldown before the SAME confirmation is retried again after a
+        # non-retryable rejection (no money, market closed). A genuinely
+        # new signal is never held back by it.
+        fatal_retry_cooldown_seconds=float(os.getenv("CRYPTO_TM_FATAL_RETRY_COOLDOWN_SECONDS", "300")),
     )

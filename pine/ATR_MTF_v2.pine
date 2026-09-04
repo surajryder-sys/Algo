@@ -1,5 +1,5 @@
 //@version=6
-indicator(title="OBD_ATR v1.1", overlay = true)
+indicator(title="ATR MTF V2", overlay = true)
 //CREDITS to HPotter for the orginal ATR-trailing-stop code. The guy trying
 //to sell this as his own is a scammer lol.
 //
@@ -31,6 +31,31 @@ indicator(title="OBD_ATR v1.1", overlay = true)
 //live 2026-08-20). One statement per line sidesteps that entirely: every
 //line inside a block sits at the exact same single indent level, so
 //auto-indent (which just repeats the previous line's level) can't drift.
+//
+//v1.2 (2026-09-01) -- added up to 4 higher-timeframe readings for BOTH
+//periods, on top of the chart's own (native) timeframe. Each HTF is a
+//menu-selectable input.timeframe() (renders as TradingView's own
+//timeframe picker dropdown in the indicator's Inputs tab) instead of a
+//hardcoded value, plus its own enable toggle so unused slots can be
+//switched off without deleting them. Fetched via request.security()
+//calling the SAME recursive compute_trail_full() used for the native
+//timeframe -- request.security() runs a UDF's var/[1] recursion in its
+//own independent per-(symbol,timeframe) context, so each HTF tracks its
+//own trail/trend state correctly, no cross-contamination between HTFs or
+//with the native line.
+//
+//Repaint note: HTF results are deliberately delayed by one HTF-closed-bar
+//(compute_trail_confirmed()'s trailing [1] indexing) before being sent.
+//Without that, request.security() on the currently-forming realtime bar
+//returns the STILL-FORMING higher-timeframe value, which can change
+//intrabar -- since alert.freq_once_per_bar_close gates on the chart's own
+//(native) bar close, not the HTF's, that would risk firing a webhook on a
+//value that flips back before the real HTF bar actually closes. Using the
+//last CONFIRMED HTF bar avoids that at the cost of up to one HTF bar of
+//latency on HTF flips -- consistent with this project's general bias
+//toward avoiding false/premature signals (see v3/v4 retest-staleness
+//fixes). The native (chart-timeframe) line is untouched by this and keeps
+//its original zero-added-latency behavior.
 src = close
 
 webhook_secret = input.string("", title="Webhook Secret")
@@ -45,7 +70,10 @@ webhook_secret = input.string("", title="Webhook Secret")
 // week (tv_bridge.receiver was down for hours with nothing to show it
 // except total silence). event_time_N below still only updates on a
 // genuine flip either way, so a heartbeat resend never looks like a new
-// flip on the Python side.
+// flip on the Python side. Heartbeat cadence is tied to the CHART's own
+// bar_index for every line below, HTFs included -- its whole job is
+// "prove the pipeline is alive," not "resend on every HTF close," so it
+// deliberately stays decoupled from each line's own timeframe.
 heartbeat_bars = input.int(10, title="Heartbeat every N bars", minval=1)
 
 // --- Line 1 (fast, by default) ---
@@ -56,14 +84,30 @@ atrperiod_1 = input.int(2, title = "Line 1 ATR Period", group = "Line 1")
 keyvalue_2 = input.float(2, title = "Line 2 Key Value", step = .5, group = "Line 2")
 atrperiod_2 = input.int(300, title = "Line 2 ATR Period", group = "Line 2")
 
+// --- Higher timeframes (v1.2) -- each is a menu-selectable timeframe
+// picker with its own on/off switch, applied to BOTH periods above. ---
+enable_htf1 = input.bool(true, title = "Enable HTF 1", group = "Higher Timeframes")
+htf1 = input.timeframe("15", title = "HTF 1", group = "Higher Timeframes")
+enable_htf2 = input.bool(true, title = "Enable HTF 2", group = "Higher Timeframes")
+htf2 = input.timeframe("60", title = "HTF 2", group = "Higher Timeframes")
+enable_htf3 = input.bool(true, title = "Enable HTF 3", group = "Higher Timeframes")
+htf3 = input.timeframe("240", title = "HTF 3", group = "Higher Timeframes")
+enable_htf4 = input.bool(true, title = "Enable HTF 4", group = "Higher Timeframes")
+htf4 = input.timeframe("D", title = "HTF 4", group = "Higher Timeframes")
+show_htf_plots = input.bool(false, title = "Plot HTF trail lines on chart", group = "Higher Timeframes")
+
 bar_time_sec = math.round(time / 1000)
 
 //Function to compute the ATR trailing stop + trend (1/-1) for one
 //(keyvalue, atrperiod) pair -- same logic the original single-line
 //script used (ratcheted trailing stop, trend flips on a cross), just
 //written as flat ternary chains instead of nested multi-line iff() calls
-//so every line stays at one indent level (see module header).
-compute_trail(keyvalue, atrperiod) =>
+//so every line stays at one indent level (see module header). Also
+//returns this pair's own flip flag + flip event time (moved in here in
+//v1.2 so the SAME function can be reused verbatim for HTF readings via
+//request.security() below -- time/close inside resolve to whichever
+//context the function is evaluated in, native or requested).
+compute_trail_full(keyvalue, atrperiod) =>
     xATR = ta.atr(atrperiod)
     nLoss = keyvalue * xATR
     var float trail = 0.0
@@ -75,16 +119,104 @@ compute_trail(keyvalue, atrperiod) =>
     crossed_up = src[1] < nz(trail[1], 0) and src > nz(trail[1], 0)
     crossed_dn = src[1] > nz(trail[1], 0) and src < nz(trail[1], 0)
     trend := crossed_up ? 1 : crossed_dn ? -1 : nz(trend[1], 0)
-    [trail, trend]
+    var float event_time_ms = na
+    flipped = trend != nz(trend[1], 0)
+    if flipped
+        event_time_ms := time
+    event_time_sec = na(event_time_ms) ? 0 : math.round(event_time_ms / 1000)
+    [trail, trend, event_time_sec, flipped]
 
-[trail_1, trend_1] = compute_trail(keyvalue_1, atrperiod_1)
-[trail_2, trend_2] = compute_trail(keyvalue_2, atrperiod_2)
+//HTF-only wrapper: same computation, but returns the previous (already
+//CONFIRMED) bar's values instead of the current, still-forming one -- see
+//the v1.2 repaint note in the module header for why. Only used inside the
+//request.security() calls below; the native lines call compute_trail_full()
+//directly and keep their original zero-added-latency behavior.
+compute_trail_confirmed(keyvalue, atrperiod) =>
+    [trail, trend, event_time_sec, flipped] = compute_trail_full(keyvalue, atrperiod)
+    [trail[1], trend[1], event_time_sec[1], flipped[1]]
+
+[trail_1, trend_1, event_time_1_sec, flipped_1] = compute_trail_full(keyvalue_1, atrperiod_1)
+[trail_2, trend_2, event_time_2_sec, flipped_2] = compute_trail_full(keyvalue_2, atrperiod_2)
+
+[trail_1_htf1, trend_1_htf1, event_time_1_htf1_sec, flipped_1_htf1] = request.security(syminfo.tickerid, htf1, compute_trail_confirmed(keyvalue_1, atrperiod_1), lookahead = barmerge.lookahead_off)
+[trail_2_htf1, trend_2_htf1, event_time_2_htf1_sec, flipped_2_htf1] = request.security(syminfo.tickerid, htf1, compute_trail_confirmed(keyvalue_2, atrperiod_2), lookahead = barmerge.lookahead_off)
+[trail_1_htf2, trend_1_htf2, event_time_1_htf2_sec, flipped_1_htf2] = request.security(syminfo.tickerid, htf2, compute_trail_confirmed(keyvalue_1, atrperiod_1), lookahead = barmerge.lookahead_off)
+[trail_2_htf2, trend_2_htf2, event_time_2_htf2_sec, flipped_2_htf2] = request.security(syminfo.tickerid, htf2, compute_trail_confirmed(keyvalue_2, atrperiod_2), lookahead = barmerge.lookahead_off)
+[trail_1_htf3, trend_1_htf3, event_time_1_htf3_sec, flipped_1_htf3] = request.security(syminfo.tickerid, htf3, compute_trail_confirmed(keyvalue_1, atrperiod_1), lookahead = barmerge.lookahead_off)
+[trail_2_htf3, trend_2_htf3, event_time_2_htf3_sec, flipped_2_htf3] = request.security(syminfo.tickerid, htf3, compute_trail_confirmed(keyvalue_2, atrperiod_2), lookahead = barmerge.lookahead_off)
+[trail_1_htf4, trend_1_htf4, event_time_1_htf4_sec, flipped_1_htf4] = request.security(syminfo.tickerid, htf4, compute_trail_confirmed(keyvalue_1, atrperiod_1), lookahead = barmerge.lookahead_off)
+[trail_2_htf4, trend_2_htf4, event_time_2_htf4_sec, flipped_2_htf4] = request.security(syminfo.tickerid, htf4, compute_trail_confirmed(keyvalue_2, atrperiod_2), lookahead = barmerge.lookahead_off)
 
 line1_color = input.color(color.gray, title = "Line 1 Color", group = "Line 1")
 line2_color = input.color(color.gray, title = "Line 2 Color", group = "Line 2")
 
-plot(trail_1, color = line1_color, title = "Line 1 Trailing Stop", style = plot.style_line)
-plot(trail_2, color = line2_color, title = "Line 2 Trailing Stop", style = plot.style_line)
+//v1.2 cut-on-flip: plotting trail_N directly as one continuous series
+//draws a connecting diagonal straight through the flip bar, from the old
+//trend's last value to the new trend's first (usually a big jump, since
+//trail resets close to price right after a flip) -- reads as the line
+//"sliding across" instead of cutting.
+//
+//First attempt at this (splitting into an up-only/down-only series with
+//na on the other side, still using plot.style_line) did NOT fix it --
+//plot.style_line is documented to bridge straight across na gaps with a
+//connecting line, same as if the na wasn't there at all, so the diagonal
+//kept showing. The actual fix (confirmed against a reference Supertrend
+//script that does the same up/down-cut plot, v4 study("Supertrend")) is
+//plot.style_linebr -- "line with breaks": identical to style_line except
+//it genuinely breaks/discontinues the line at na instead of bridging it.
+//Combined with the up/down split below, the up series now really ends at
+//the last uptrend bar and the down series starts fresh at the flip bar,
+//with nothing drawn connecting them -- same color as before per line,
+//just cut instead of joined.
+trail_1_up = trend_1 == 1 ? trail_1 : na
+trail_1_dn = trend_1 == -1 ? trail_1 : na
+trail_2_up = trend_2 == 1 ? trail_2 : na
+trail_2_dn = trend_2 == -1 ? trail_2 : na
+
+plot(trail_1_up, color = line1_color, title = "Line 1 Trailing Stop (Up)", style = plot.style_linebr)
+plot(trail_1_dn, color = line1_color, title = "Line 1 Trailing Stop (Down)", style = plot.style_linebr)
+plot(trail_2_up, color = line2_color, title = "Line 2 Trailing Stop (Up)", style = plot.style_linebr)
+plot(trail_2_dn, color = line2_color, title = "Line 2 Trailing Stop (Down)", style = plot.style_linebr)
+
+// HTF trail plots are OFF by default (show_htf_plots) -- 16 extra lines
+// on top of the native 4 is chart clutter most of the time, and this
+// bot's own conventions favor keeping indicators lightweight (see
+// MT5-side equivalents). Same up/down split + na-hide technique as
+// above, gated by show_htf_plots too so both are na (nothing drawn) when
+// off.
+trail_1_htf1_up = show_htf_plots and trend_1_htf1 == 1 ? trail_1_htf1 : na
+trail_1_htf1_dn = show_htf_plots and trend_1_htf1 == -1 ? trail_1_htf1 : na
+trail_2_htf1_up = show_htf_plots and trend_2_htf1 == 1 ? trail_2_htf1 : na
+trail_2_htf1_dn = show_htf_plots and trend_2_htf1 == -1 ? trail_2_htf1 : na
+trail_1_htf2_up = show_htf_plots and trend_1_htf2 == 1 ? trail_1_htf2 : na
+trail_1_htf2_dn = show_htf_plots and trend_1_htf2 == -1 ? trail_1_htf2 : na
+trail_2_htf2_up = show_htf_plots and trend_2_htf2 == 1 ? trail_2_htf2 : na
+trail_2_htf2_dn = show_htf_plots and trend_2_htf2 == -1 ? trail_2_htf2 : na
+trail_1_htf3_up = show_htf_plots and trend_1_htf3 == 1 ? trail_1_htf3 : na
+trail_1_htf3_dn = show_htf_plots and trend_1_htf3 == -1 ? trail_1_htf3 : na
+trail_2_htf3_up = show_htf_plots and trend_2_htf3 == 1 ? trail_2_htf3 : na
+trail_2_htf3_dn = show_htf_plots and trend_2_htf3 == -1 ? trail_2_htf3 : na
+trail_1_htf4_up = show_htf_plots and trend_1_htf4 == 1 ? trail_1_htf4 : na
+trail_1_htf4_dn = show_htf_plots and trend_1_htf4 == -1 ? trail_1_htf4 : na
+trail_2_htf4_up = show_htf_plots and trend_2_htf4 == 1 ? trail_2_htf4 : na
+trail_2_htf4_dn = show_htf_plots and trend_2_htf4 == -1 ? trail_2_htf4 : na
+
+plot(trail_1_htf1_up, color = line1_color, title = "Line 1 Trailing Stop HTF1 (Up)", style = plot.style_linebr)
+plot(trail_1_htf1_dn, color = line1_color, title = "Line 1 Trailing Stop HTF1 (Down)", style = plot.style_linebr)
+plot(trail_2_htf1_up, color = line2_color, title = "Line 2 Trailing Stop HTF1 (Up)", style = plot.style_linebr)
+plot(trail_2_htf1_dn, color = line2_color, title = "Line 2 Trailing Stop HTF1 (Down)", style = plot.style_linebr)
+plot(trail_1_htf2_up, color = line1_color, title = "Line 1 Trailing Stop HTF2 (Up)", style = plot.style_linebr)
+plot(trail_1_htf2_dn, color = line1_color, title = "Line 1 Trailing Stop HTF2 (Down)", style = plot.style_linebr)
+plot(trail_2_htf2_up, color = line2_color, title = "Line 2 Trailing Stop HTF2 (Up)", style = plot.style_linebr)
+plot(trail_2_htf2_dn, color = line2_color, title = "Line 2 Trailing Stop HTF2 (Down)", style = plot.style_linebr)
+plot(trail_1_htf3_up, color = line1_color, title = "Line 1 Trailing Stop HTF3 (Up)", style = plot.style_linebr)
+plot(trail_1_htf3_dn, color = line1_color, title = "Line 1 Trailing Stop HTF3 (Down)", style = plot.style_linebr)
+plot(trail_2_htf3_up, color = line2_color, title = "Line 2 Trailing Stop HTF3 (Up)", style = plot.style_linebr)
+plot(trail_2_htf3_dn, color = line2_color, title = "Line 2 Trailing Stop HTF3 (Down)", style = plot.style_linebr)
+plot(trail_1_htf4_up, color = line1_color, title = "Line 1 Trailing Stop HTF4 (Up)", style = plot.style_linebr)
+plot(trail_1_htf4_dn, color = line1_color, title = "Line 1 Trailing Stop HTF4 (Down)", style = plot.style_linebr)
+plot(trail_2_htf4_up, color = line2_color, title = "Line 2 Trailing Stop HTF4 (Up)", style = plot.style_linebr)
+plot(trail_2_htf4_dn, color = line2_color, title = "Line 2 Trailing Stop HTF4 (Down)", style = plot.style_linebr)
 
 //-----------------------------------------------------------------------------}
 //Webhook: fires per line, with that line's own trail/trend state --
@@ -105,28 +237,49 @@ plot(trail_2, color = line2_color, title = "Line 2 Trailing Stop", style = plot.
 //resend of an unchanged trend carries the SAME event_time as the flip
 //that started it, not a fresh one -- the Python side can always tell
 //"still the same trend since X" from "just flipped."
+//
+//v1.2 (2026-09-01): payload building + the send-gate/alert() call are now
+//one shared function (send_atr_alert()) instead of being duplicated per
+//line, since there are 10 lines total (native x2 + 4 HTFs x2) instead of
+//2. Each HTF payload's "timeframe" field carries that HTF's own
+//input.timeframe() string (e.g. "60", "D") instead of the chart's
+//timeframe.period, so the Python side (AtrStore) can key/store each HTF
+//reading independently from the native one and from each other.
 //-----------------------------------------------------------------------------{
-var float event_time_1_ms = na
-flipped_1 = trend_1 != nz(trend_1[1], 0)
-if flipped_1
-    event_time_1_ms := time
-event_time_1_sec = na(event_time_1_ms) ? 0 : math.round(event_time_1_ms / 1000)
+send_atr_alert(secret, sym, tf_label, atrperiod, trail, trend, event_time_sec, bartime_sec, do_send) =>
+    payload = '{"secret":"' + secret + '","type":"atr_trail","symbol":"' + sym + '","timeframe":"' + tf_label + '","atr_period":"' + str.tostring(atrperiod, '#') + '","trail_stop":' + str.tostring(trail) + ',"trend":' + str.tostring(trend, '#') + ',"event_time":' + str.tostring(event_time_sec, '#') + ',"bar_time":' + str.tostring(bartime_sec, '#') + '}'
+    if do_send
+        alert(payload, alert.freq_once_per_bar_close)
+
 send_1 = flipped_1 or bar_index % heartbeat_bars == 0
+send_atr_alert(webhook_secret, syminfo.ticker, timeframe.period, atrperiod_1, trail_1, trend_1, event_time_1_sec, bar_time_sec, send_1)
 
-atr_payload_1 = '{"secret":"' + webhook_secret + '","type":"atr_trail","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","atr_period":"' + str.tostring(atrperiod_1, '#') + '","trail_stop":' + str.tostring(trail_1) + ',"trend":' + str.tostring(trend_1, '#') + ',"event_time":' + str.tostring(event_time_1_sec, '#') + ',"bar_time":' + str.tostring(bar_time_sec, '#') + '}'
-if send_1
-    alert(atr_payload_1, alert.freq_once_per_bar_close)
-
-var float event_time_2_ms = na
-flipped_2 = trend_2 != nz(trend_2[1], 0)
-if flipped_2
-    event_time_2_ms := time
-event_time_2_sec = na(event_time_2_ms) ? 0 : math.round(event_time_2_ms / 1000)
 send_2 = flipped_2 or bar_index % heartbeat_bars == 0
+send_atr_alert(webhook_secret, syminfo.ticker, timeframe.period, atrperiod_2, trail_2, trend_2, event_time_2_sec, bar_time_sec, send_2)
 
-atr_payload_2 = '{"secret":"' + webhook_secret + '","type":"atr_trail","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","atr_period":"' + str.tostring(atrperiod_2, '#') + '","trail_stop":' + str.tostring(trail_2) + ',"trend":' + str.tostring(trend_2, '#') + ',"event_time":' + str.tostring(event_time_2_sec, '#') + ',"bar_time":' + str.tostring(bar_time_sec, '#') + '}'
-if send_2
-    alert(atr_payload_2, alert.freq_once_per_bar_close)
+send_1_htf1 = enable_htf1 and (flipped_1_htf1 or bar_index % heartbeat_bars == 0)
+send_atr_alert(webhook_secret, syminfo.ticker, htf1, atrperiod_1, trail_1_htf1, trend_1_htf1, event_time_1_htf1_sec, bar_time_sec, send_1_htf1)
+
+send_2_htf1 = enable_htf1 and (flipped_2_htf1 or bar_index % heartbeat_bars == 0)
+send_atr_alert(webhook_secret, syminfo.ticker, htf1, atrperiod_2, trail_2_htf1, trend_2_htf1, event_time_2_htf1_sec, bar_time_sec, send_2_htf1)
+
+send_1_htf2 = enable_htf2 and (flipped_1_htf2 or bar_index % heartbeat_bars == 0)
+send_atr_alert(webhook_secret, syminfo.ticker, htf2, atrperiod_1, trail_1_htf2, trend_1_htf2, event_time_1_htf2_sec, bar_time_sec, send_1_htf2)
+
+send_2_htf2 = enable_htf2 and (flipped_2_htf2 or bar_index % heartbeat_bars == 0)
+send_atr_alert(webhook_secret, syminfo.ticker, htf2, atrperiod_2, trail_2_htf2, trend_2_htf2, event_time_2_htf2_sec, bar_time_sec, send_2_htf2)
+
+send_1_htf3 = enable_htf3 and (flipped_1_htf3 or bar_index % heartbeat_bars == 0)
+send_atr_alert(webhook_secret, syminfo.ticker, htf3, atrperiod_1, trail_1_htf3, trend_1_htf3, event_time_1_htf3_sec, bar_time_sec, send_1_htf3)
+
+send_2_htf3 = enable_htf3 and (flipped_2_htf3 or bar_index % heartbeat_bars == 0)
+send_atr_alert(webhook_secret, syminfo.ticker, htf3, atrperiod_2, trail_2_htf3, trend_2_htf3, event_time_2_htf3_sec, bar_time_sec, send_2_htf3)
+
+send_1_htf4 = enable_htf4 and (flipped_1_htf4 or bar_index % heartbeat_bars == 0)
+send_atr_alert(webhook_secret, syminfo.ticker, htf4, atrperiod_1, trail_1_htf4, trend_1_htf4, event_time_1_htf4_sec, bar_time_sec, send_1_htf4)
+
+send_2_htf4 = enable_htf4 and (flipped_2_htf4 or bar_index % heartbeat_bars == 0)
+send_atr_alert(webhook_secret, syminfo.ticker, htf4, atrperiod_2, trail_2_htf4, trend_2_htf4, event_time_2_htf4_sec, bar_time_sec, send_2_htf4)
 
 //-----------------------------------------------------------------------------}
 //NOT plotting trend_1/trend_2 (deliberately, 2026-08-20) -- the original
@@ -139,12 +292,17 @@ if send_2
 //gets squeezed on reset/load." Also confirmed unnecessary: tv_scraper's
 //own atr_trend_tracker.py derives trend from trail_stop + live Close
 //directly, specifically INSTEAD OF needing this plot (a separate, older
-//fix for missed-flip polling gaps) -- nothing downstream reads it.
+//fix for missed-flip polling gaps) -- nothing downstream reads it. Same
+//reasoning applies to every HTF trend_*_htf* value -- none of them are
+//plotted either.
 //-----------------------------------------------------------------------------{
 alertcondition(trend_1 != nz(trend_1[1], 0), 'Line 1 Trend Flip', 'OBD_ATR Line 1 trend flipped')
 alertcondition(trend_2 != nz(trend_2[1], 0), 'Line 2 Trend Flip', 'OBD_ATR Line 2 trend flipped')
 
 // NOTE: as with OBD_Reversal, these alertcondition() entries are for the
 // alert dialog's dropdown discoverability only -- the actual TradingView
-// alert must use "Any alert() function call" as its condition, or neither
-// atr_payload_1 nor atr_payload_2's JSON ever gets sent.
+// alert must use "Any alert() function call" as its condition, or none of
+// the atr_payload_* JSON (native or HTF) ever gets sent. HTF flips
+// deliberately don't get their own alertcondition() entries here -- same
+// reason: purely cosmetic dropdown sugar, unused once the alert is
+// actually configured with "Any alert() function call".

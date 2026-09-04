@@ -35,6 +35,13 @@ class PositionTMState:
     original_volume: float
     partial1_done: bool = False
     partial2_done: bool = False
+    entry_comment: str = ""   # captured at first sighting -- MT5 overwrites the
+                               # position's own comment field on every partial
+                               # close (confirmed live, no order_send action can
+                               # override that on this broker), so this is the
+                               # only place the original entry rationale survives.
+                               # Default "" keeps old persisted records (from
+                               # before this field existed) loading without error.
 
 
 def _round_volume(volume: float, volume_step: float) -> float:
@@ -89,18 +96,31 @@ class TradeManager:
         state = self._state.get(ticket)
         return state is not None and (state.partial1_done or state.partial2_done)
 
+    def get_entry_comment(self, ticket: int) -> Optional[str]:
+        """The position's own comment as it read at first sighting -- i.e.
+        before any partial close could have overwritten it on the broker
+        side. None if this ticket was never seen (or seen before this
+        field existed)."""
+        state = self._state.get(ticket)
+        return (state.entry_comment or None) if state is not None else None
+
     def evaluate(self, ticket: int, direction: int, entry_price: float, current_price: float,
-                current_volume: float, has_manual_tp: bool, volume_step: float) -> Optional[tuple[float, str]]:
+                current_volume: float, has_manual_tp: bool, volume_step: float,
+                entry_comment: str = "") -> Optional[tuple[float, str]]:
         """Returns (volume_to_close, label) for THIS cycle's partial close,
         or None if nothing to do. label is "partial1"/"partial2", purely
-        for logging/comments."""
+        for logging/comments. entry_comment is only ever used on first
+        sighting (see get_entry_comment) -- passing it on later calls is
+        harmless, it's just ignored once the state already exists."""
         state = self._state.get(ticket)
         if state is None:
             # First sighting -- original_volume is whatever's open right
             # now (assumes this is caught before any partial close has
             # ever happened for this ticket, i.e. polled at least once
-            # between fill and the first possible +10pt threshold).
-            state = PositionTMState(entry_price=entry_price, original_volume=current_volume)
+            # between fill and the first possible +10pt threshold). Same
+            # assumption already applies to entry_comment.
+            state = PositionTMState(entry_price=entry_price, original_volume=current_volume,
+                                    entry_comment=entry_comment)
             self._state[ticket] = state
             self._save()
 

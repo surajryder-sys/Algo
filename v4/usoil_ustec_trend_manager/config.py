@@ -35,6 +35,7 @@ class Config:
     magic_number: int
     lot_sizes: dict[str, float]
     enable_trading: bool
+    fatal_retry_cooldown_seconds: float
 
 
 def load_config() -> Config:
@@ -60,4 +61,13 @@ def load_config() -> Config:
             "USTEC": float(os.getenv("USOIL_USTEC_TM_USTEC_LOTS", "0.25")),
         },
         enable_trading=os.getenv("USOIL_USTEC_TM_ENABLE_TRADING", "false").strip().lower() == "true",
+        # 2026-09-02 fix: a broker rejection that will NEVER succeed on an
+        # identical immediate retry (e.g. no money) used to get retried
+        # every poll_seconds forever -- confirmed live, one stuck USOIL
+        # signal generated ~20,000 failed order-send calls in a single day.
+        # This is the cooldown before the SAME confirmation is attempted
+        # again after a non-retryable rejection; a genuinely new signal is
+        # never held back by it. See engine.py's FATAL_RETCODES/
+        # fatal_failure_active.
+        fatal_retry_cooldown_seconds=float(os.getenv("USOIL_USTEC_TM_FATAL_RETRY_COOLDOWN_SECONDS", "300")),
     )

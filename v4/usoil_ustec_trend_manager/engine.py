@@ -9,6 +9,7 @@ ETHUSD's primary/secondary relationship).
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
@@ -26,6 +27,20 @@ from v4.usoil_ustec_trend_manager.tv_reader import (
 Direction = Literal["buy", "sell"]
 
 _PARENT_MINUTES = {"M30": 30, "M15": 15}
+
+# Broker rejections that will NEVER succeed on an identical immediate
+# retry. Deliberately narrow -- e.g. 10016 "Invalid stops" is NOT here:
+# the 2026-08-31 fix (see main.py) exists specifically because that one
+# DOES resolve itself as price moves and needs to keep retrying every
+# poll. These two don't -- retrying them changes nothing until an
+# external condition changes (margin freed, session reopens), so
+# hammering the broker every poll_seconds is pure waste. Confirmed live
+# 2026-09-02: a single stuck USOIL signal generated ~20,000 failed
+# order-send calls in one day, [No money] every time.
+FATAL_RETCODES = {
+    10019,  # TRADE_RETCODE_NO_MONEY -- insufficient free margin
+    10018,  # TRADE_RETCODE_MARKET_CLOSED -- won't open until session resumes
+}
 
 
 @dataclass
@@ -65,6 +80,8 @@ class EngineState:
         entry.setdefault("candidate_key", None)
         entry.setdefault("fired", False)
         entry.setdefault("last_confirmation_event_time", None)
+        entry.setdefault("fatal_failure_event_time", None)
+        entry.setdefault("fatal_failure_at", None)
         return entry
 
     def current_key(self, symbol: str) -> Optional[list]:
@@ -84,6 +101,27 @@ class EngineState:
     def mark_fired(self, symbol: str, confirmation_event_time: int) -> None:
         self._entry(symbol)["last_confirmation_event_time"] = confirmation_event_time
         self._entry(symbol)["fired"] = True
+        self._save()
+
+    def fatal_failure_active(self, symbol: str, confirmation_event_time: int, cooldown_seconds: float) -> bool:
+        """True if THIS EXACT confirmation already failed with a
+        non-retryable broker rejection (e.g. no money) within the last
+        cooldown_seconds -- caller should skip re-attempting the order
+        entirely rather than hammering the terminal every poll. A
+        different confirmation_event_time (a genuinely new signal) is
+        never suppressed -- only a repeat of the same doomed one."""
+        entry = self._entry(symbol)
+        if entry["fatal_failure_event_time"] != confirmation_event_time:
+            return False
+        failed_at = entry["fatal_failure_at"]
+        if failed_at is None:
+            return False
+        return (time.time() - failed_at) < cooldown_seconds
+
+    def record_fatal_failure(self, symbol: str, confirmation_event_time: int) -> None:
+        entry = self._entry(symbol)
+        entry["fatal_failure_event_time"] = confirmation_event_time
+        entry["fatal_failure_at"] = time.time()
         self._save()
 
 

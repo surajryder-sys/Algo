@@ -52,7 +52,7 @@ import MetaTrader5 as mt5
 
 from v4.crypto_trend_manager import broker
 from v4.crypto_trend_manager.config import PRIMARY_SYMBOL, SYMBOLS, load_config
-from v4.crypto_trend_manager.engine import EngineState, evaluate_symbol
+from v4.crypto_trend_manager.engine import FATAL_RETCODES, EngineState, evaluate_symbol
 from v4.crypto_trend_manager.exit_manager import ExitManagerState, evaluate_exit_actions
 
 _SECONDARY_SYMBOL = next(s for s in SYMBOLS if s != PRIMARY_SYMBOL)
@@ -68,7 +68,7 @@ def _comment(decision) -> str:
     return f"{decision.comment_tag}-{int(time.time())}"
 
 
-def _fire(cfg, symbol: str, decision, reason: str, existing_direction) -> bool:
+def _fire(cfg, state: EngineState, symbol: str, decision, reason: str, existing_direction) -> bool:
     """existing_direction: this symbol's REAL position direction before
     this poll's actions, or None if flat. Confirmed live bug, 2026-08-29:
     this account is RETAIL_HEDGING, not netting -- MT5 will NOT
@@ -108,8 +108,13 @@ def _fire(cfg, symbol: str, decision, reason: str, existing_direction) -> bool:
          f"sl={decision.sl:.2f} comment={comment!r} -- result={result}")
     ok = result is not None and result.retcode == 10009  # TRADE_RETCODE_DONE
     if not ok:
-        _log(f"[{symbol}] order did NOT go through -- NOT marking this M5 confirmation as used, "
-             f"will retry next poll")
+        if result is not None and result.retcode in FATAL_RETCODES:
+            state.record_fatal_failure(symbol, decision.confirm.event_time)
+            _log(f"[{symbol}] retcode {result.retcode} is non-retryable -- backing off this exact signal for "
+                 f"{cfg.fatal_retry_cooldown_seconds:.0f}s instead of hammering the terminal every poll")
+        else:
+            _log(f"[{symbol}] order did NOT go through -- NOT marking this M5 confirmation as used, "
+                 f"will retry next poll")
     return ok
 
 
@@ -191,8 +196,9 @@ def run_once(cfg, state: EngineState, exit_state: ExitManagerState) -> None:
     btc_result = evaluate_symbol(state, PRIMARY_SYMBOL, btc_pos_dir, btc_price)
     _log(f"[{PRIMARY_SYMBOL}] {btc_result.reason}")
     btc_fired_direction = None
-    if btc_result.decision is not None:
-        btc_ok = _fire(cfg, PRIMARY_SYMBOL, btc_result.decision, btc_result.reason, btc_pos_dir)
+    if btc_result.decision is not None and not state.fatal_failure_active(
+            PRIMARY_SYMBOL, btc_result.decision.confirm.event_time, cfg.fatal_retry_cooldown_seconds):
+        btc_ok = _fire(cfg, state, PRIMARY_SYMBOL, btc_result.decision, btc_result.reason, btc_pos_dir)
         if btc_ok:
             state.mark_fired(PRIMARY_SYMBOL, btc_result.decision.confirm.event_time)
             btc_fired_direction = btc_result.decision.direction
@@ -218,8 +224,9 @@ def run_once(cfg, state: EngineState, exit_state: ExitManagerState) -> None:
              f"ETHUSD keeps quiet on the opposite direction")
     else:
         _log(f"[{_SECONDARY_SYMBOL}] {eth_result.reason}")
-        if eth_result.decision is not None:
-            eth_ok = _fire(cfg, _SECONDARY_SYMBOL, eth_result.decision, eth_result.reason, eth_pos_dir)
+        if eth_result.decision is not None and not state.fatal_failure_active(
+                _SECONDARY_SYMBOL, eth_result.decision.confirm.event_time, cfg.fatal_retry_cooldown_seconds):
+            eth_ok = _fire(cfg, state, _SECONDARY_SYMBOL, eth_result.decision, eth_result.reason, eth_pos_dir)
             if eth_ok:
                 state.mark_fired(_SECONDARY_SYMBOL, eth_result.decision.confirm.event_time)
                 eth_fired_direction = eth_result.decision.direction

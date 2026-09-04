@@ -23,7 +23,7 @@ import MetaTrader5 as mt5
 
 from v4.usoil_ustec_trend_manager import broker
 from v4.usoil_ustec_trend_manager.config import SYMBOLS, load_config
-from v4.usoil_ustec_trend_manager.engine import EngineState, evaluate_symbol
+from v4.usoil_ustec_trend_manager.engine import FATAL_RETCODES, EngineState, evaluate_symbol
 from v4.usoil_ustec_trend_manager.exit_manager import ExitManagerState, evaluate_exit_actions
 
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -38,7 +38,7 @@ def _comment(decision) -> str:
     return f"{decision.comment_tag}-{int(time.time())}"
 
 
-def _fire(cfg, symbol: str, decision, reason: str, existing_direction) -> bool:
+def _fire(cfg, state: EngineState, symbol: str, decision, reason: str, existing_direction) -> bool:
     """existing_direction: this symbol's REAL position direction before
     this poll's actions, or None if flat. This account is RETAIL_HEDGING
     -- an opposite-direction fire must explicitly close the old position
@@ -71,8 +71,13 @@ def _fire(cfg, symbol: str, decision, reason: str, existing_direction) -> bool:
          f"sl={decision.sl:.3f} comment={comment!r} -- result={result}")
     ok = result is not None and result.retcode == 10009  # TRADE_RETCODE_DONE
     if not ok:
-        _log(f"[{symbol}] order did NOT go through -- NOT marking this M5 confirmation as used, "
-             f"will retry next poll")
+        if result is not None and result.retcode in FATAL_RETCODES:
+            state.record_fatal_failure(symbol, decision.confirm.event_time)
+            _log(f"[{symbol}] retcode {result.retcode} is non-retryable -- backing off this exact signal for "
+                 f"{cfg.fatal_retry_cooldown_seconds:.0f}s instead of hammering the terminal every poll")
+        else:
+            _log(f"[{symbol}] order did NOT go through -- NOT marking this M5 confirmation as used, "
+                 f"will retry next poll")
     return ok
 
 
@@ -139,7 +144,15 @@ def run_once(cfg, state: EngineState, exit_state: ExitManagerState) -> None:
         result = evaluate_symbol(state, symbol, pos_dir, current_price)
         _log(f"[{symbol}] {result.reason}")
         if result.decision is not None:
-            fired_ok = _fire(cfg, symbol, result.decision, result.reason, pos_dir)
+            # A non-retryable rejection (no money, market closed) on this
+            # EXACT confirmation was already logged once -- don't re-send
+            # the same doomed order every poll until the cooldown lapses.
+            # A genuinely new confirmation (different event_time) is never
+            # held back by this.
+            if state.fatal_failure_active(symbol, result.decision.confirm.event_time,
+                                          cfg.fatal_retry_cooldown_seconds):
+                continue
+            fired_ok = _fire(cfg, state, symbol, result.decision, result.reason, pos_dir)
             if fired_ok:
                 state.mark_fired(symbol, result.decision.confirm.event_time)
 

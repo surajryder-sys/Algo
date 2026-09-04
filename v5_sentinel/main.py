@@ -2,21 +2,27 @@
 
 Data path: MT5 bar history only (mt5.copy_rates_from_pos via
 v5_sentinel/rates.py) -- no chart, no MQL5 indicator, no bridge JSON file
-anywhere in this bot. M5/ICT (OB-formation bias) is NOT implemented yet;
-M5 Bias is currently M5/STR only (see bias.py).
+anywhere in this bot. M5/ICT and M15/ICT (OB-formation bias) are NOT
+implemented yet; both parents are STR-only for now (see bias.py).
 
 Run with: python -m v5_sentinel.main
 
 Rules implemented here (full design recap):
-  - M5 Bias: flip_state on M5's own trail lines -- Strong (bull) / Weak
-    (bear), holds till the opposite flip. See bias.py.
+  - Parent bias: M5 AND M15 both act as parents (2026-09-03 change --
+    see bias.compute_parent_bias's own docstring for the full decision
+    table). Short version: bullish M3 trades are allowed if EITHER
+    parent currently reads bullish; bearish allowed if EITHER reads
+    bearish -- no tie-break when they disagree, both directions just
+    stay open. A parent currently mid-trap doesn't get a vote; if only
+    one parent is trapped the other decides alone, if both are trapped
+    both directions stay open.
   - M3 execution: flip_state on M3's own trail lines. A fresh event
     (FLIP or TRAP_RESOLVED) on the LAST CLOSED bar is the only thing that
     ever triggers an entry/exit decision -- a merely-persisting confirmed
     state (no new event this bar) never does anything by itself.
-  - A fresh M3 event only leads to a trade if its direction matches the
-    CURRENT M5 Bias ("valid setup"). An event that doesn't match leaves
-    any open position alone -- it just waits for its own SL.
+  - A fresh M3 event only leads to a trade if its direction is allowed by
+    the current parent bias ("valid setup"). An event that isn't allowed
+    leaves any open position alone -- it just waits for its own SL.
   - No position open + valid fresh event -> open a new position (full
     lot size) in that direction.
   - Position open, valid fresh event, OPPOSITE direction -> square off
@@ -98,11 +104,42 @@ def _comment(action: str, code: str = "") -> str:
     return "-".join(parts)
 
 
-def _open_position(cfg: Config, direction: int, m3_series: rates.TrailSeries, label: str) -> None:
+def _parent_tag(parent: "bias.ParentBiasResult", direction: int) -> str:
+    """Which parent to credit in the entry comment (2026-09-04 naming
+    convention, confirmed with the user). M5_ONLY/M15_ONLY are literal --
+    that parent alone decided. AGREE (both clear, same direction) defaults
+    to M5, since both back it equally. DISAGREE picks whichever parent's
+    own confirmed direction actually matches this trade's direction --
+    exactly one always does, since disagreeing means one is bull and the
+    other bear. BOTH_TRAPPED writes "M15M5" (not the word "both") --
+    neither parent is really deciding in that case, both vetoes are just
+    off."""
+    if parent.source == "M5_ONLY":
+        return "M5"
+    if parent.source == "M15_ONLY":
+        return "M15"
+    if parent.source == "BOTH_TRAPPED":
+        return "M15M5"
+    if parent.source == "DISAGREE":
+        return "M5" if parent.m5.confirmed.value == direction else "M15"
+    return "M5"  # AGREE
+
+
+def _entry_comment(parent: "bias.ParentBiasResult", direction: int, label: str) -> str:
+    """"V5S-TM-{parent}/3{F|T}-<unix ts>" -- e.g. "V5S-TM-M5/3F-1788528601"
+    or "V5S-TM-M15M5/3T-1788528601". TM = Trend Manager. Confirmed with
+    the user this replaces the old "V5S-ENTRY-FLIP/TRAP-<ts>" shape for
+    OPEN trades specifically -- exits (SQOFF/REFRESH/PARTIAL1/PARTIAL2)
+    keep their existing _comment() format, unchanged."""
+    event_code = "F" if label == "FLIP" else "T"
+    return f"V5S-TM-{_parent_tag(parent, direction)}/3{event_code}-{int(time.time())}"
+
+
+def _open_position(cfg: Config, direction: int, m3_series: rates.TrailSeries, label: str,
+                   parent: "bias.ParentBiasResult") -> None:
     far = _far_line_for(direction, m3_series)
     sl = far - cfg.sl_buffer if direction == 1 else far + cfg.sl_buffer
-    event_code = "FLIP" if label == "FLIP" else "TRAP"
-    comment = _comment("ENTRY", event_code)
+    comment = _entry_comment(parent, direction, label)
 
     print(f"[V5S-ENTRY] {_DIR_LABEL[direction]} ({label}) far_line={far:.3f} sl={sl:.3f}")
     if not cfg.enable_trading:
@@ -163,7 +200,7 @@ def _run_trade_manager(cfg: Config, mgr: trade_manager.TradeManager, position) -
     volume_step = symbol_info.volume_step if symbol_info is not None else 0.01
 
     outcome = mgr.evaluate(position.ticket, direction, position.price_open, current_price,
-                           position.volume, has_tp, volume_step)
+                           position.volume, has_tp, volume_step, entry_comment=position.comment)
     if outcome is None:
         return
 
@@ -181,10 +218,10 @@ def _run_trade_manager(cfg: Config, mgr: trade_manager.TradeManager, position) -
 
 def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager,
             runtime: RuntimeState) -> None:
-    m5_bias = bias.compute_m5_bias(cfg.symbol)
+    parent = bias.compute_parent_bias(cfg.symbol)
     m3_series = rates.read_trail_series(cfg.symbol, _M3_MINUTES)
-    if m5_bias is None or m3_series is None:
-        print("[V5S] waiting for enough bar history (M5 bias / M3 series unavailable)")
+    if parent is None or m3_series is None:
+        print("[V5S] waiting for enough bar history (parent bias / M3 series unavailable)")
         return
     fs_m3 = flip_state.compute(m3_series)
     if fs_m3 is None:
@@ -205,15 +242,16 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
         runtime.mark_seen(fs_m3.last_event.bar_time)
         event = fs_m3.last_event
         new_dir = event.confirmed.value
-        valid = (new_dir == m5_bias.direction)
+        valid = parent.allows(new_dir)
         label = event.event_type.value
 
         print(f"[V5S] M3 {label} -> {_DIR_LABEL[new_dir]} at {event.bar_time} "
-              f"(M5 Bias={_DIR_LABEL[m5_bias.direction]}, valid={valid})")
+              f"(parent={parent.source}, M5={parent.m5.label()}, M15={parent.m15.label()}, "
+              f"bull_allowed={parent.bull_allowed}, bear_allowed={parent.bear_allowed}, valid={valid})")
 
         if valid:
             if position is None:
-                _open_position(cfg, new_dir, m3_series, label)
+                _open_position(cfg, new_dir, m3_series, label, parent)
                 positions = broker.get_positions(cfg.symbol, cfg.magic_number)
                 position = positions[0] if positions else None
             else:
@@ -221,14 +259,14 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
                 if new_dir != pos_direction:
                     # valid opposite setup -- square off, then open fresh opposite
                     if _close_position(cfg, position, "SQOFF"):
-                        _open_position(cfg, new_dir, m3_series, label)
+                        _open_position(cfg, new_dir, m3_series, label, parent)
                         positions = broker.get_positions(cfg.symbol, cfg.magic_number)
                         position = positions[0] if positions else None
                 elif tm_mgr.is_partially_cut(position.ticket):
                     # same-direction fresh signal on an already-cut-down
                     # position -- refresh to full size
                     if _close_position(cfg, position, "REFRESH"):
-                        _open_position(cfg, new_dir, m3_series, label)
+                        _open_position(cfg, new_dir, m3_series, label, parent)
                         positions = broker.get_positions(cfg.symbol, cfg.magic_number)
                         position = positions[0] if positions else None
                 # else: same direction, still full size -- nothing to refresh

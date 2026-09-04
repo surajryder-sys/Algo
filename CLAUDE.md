@@ -63,10 +63,13 @@ no MT5 connection, runs independently of main.py).
 - **`mql5/`** — the MT5 indicator (`.mq5`) source files that publish the
   bridge files the Python bots above read. Compiled and attached to
   charts manually in MetaTrader — not run by Python.
-- **`pine/`** — TradingView Pine scripts. `OBD_ATR.pine` (renamed
-  2026-08-20 from `atr_trail_webhook.pine`, consolidated into one
+- **`pine/`** — TradingView Pine scripts. `ATR_MTF_v2.pine` (indicator
+  title "ATR MTF V2"; renamed 2026-09-01 from `OBD_ATR.pine`, itself
+  renamed 2026-08-20 from `atr_trail_webhook.pine`; consolidated into one
   indicator computing two independent ATR-period trail lines instead of
-  running two full copies — see the file's own header) / `OBD_Reversal.pine`
+  running two full copies, then extended 2026-09-01 with up to 4
+  menu-selectable higher timeframes per period — see the file's own
+  header) / `OBD_Reversal.pine`
   (renamed 2026-08-20 from `ob_detector_webhook.pine`, LuxAlgo attribution
   trimmed to a comment since it's been substantially modified — see the
   file's own header) are the alert-push path `v3/tv_bridge` reads;

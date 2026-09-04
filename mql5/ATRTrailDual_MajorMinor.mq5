@@ -64,6 +64,8 @@ input ENUM_LINE_STYLE MajorStyle = STYLE_SOLID;
 input ENUM_LINE_STYLE MinorStyle = STYLE_SOLID;
 input int   MajorWidth   = 2;
 input int   MinorWidth   = 1;
+input int   MajorMinorEverySeconds = 2;   // throttles CopyConfirmedToWorking/ProcessBar/DrawFromWorking --
+                                           // see the 2026-09-03 fix note at their call site for why
 
 #define NAME_MAJOR_SUPPORT    "MmSecret_MajorSupport"
 #define NAME_MAJOR_RESISTANCE "MmSecret_MajorResistance"
@@ -98,6 +100,7 @@ bool loggedCopyFail1 = false;
 bool loggedCopyFail2 = false;
 
 datetime g_last_publish_time = 0;
+datetime g_last_mm_time = 0;
 
 // Incremental caches for FindEventTime/FindStructureEventTime below --
 // fixed 2026-09-02, confirmed live: "indicator is too slow, 38453 ms" on
@@ -1052,26 +1055,68 @@ int OnCalculate(const int rates_total,
 
       if(rates_total >= 2*PivotPeriod+2)
         {
-         if(prev_calculated<=0) ResetAllConfirmed();
-
-         CopyConfirmedToWorking();
-
-         int startBar=gc_ConfirmedUpTo+1;
-         if(startBar<0) startBar=0;
-
-         for(int i=startBar; i<rates_total; i++)
+         // Confirmed pivot-history arrays (gc_Type/gc_Value/gc_Index + their
+         // Adv counterparts) only ever grow across the whole loaded chart --
+         // easily tens of thousands of entries on M1/M3 XAUUSD after a few
+         // months. CopyConfirmedToWorking()/CommitWorkingToConfirmed() each
+         // do 6 full ArrayCopy calls over those arrays, and OnCalculate has
+         // no new-bar gate -- it runs on every tick, not just on bar close --
+         // so this whole block was re-copying the entire pivot history
+         // dozens of times a second. Fixed 2026-09-03, confirmed live:
+         // "indicator is too slow, 45453 ms" on XAUUSD M1 (a separate bug
+         // from the FindEventTime/FindStructureEventTime fix above -- this
+         // block was explicitly left out of that pass, see the merge
+         // header). Throttling to MajorMinorEverySeconds (same pattern as
+         // PublishEverySeconds below) cuts that to a couple of copies a
+         // second regardless of tick rate; correctness is unchanged -- a
+         // closed bar just gets confirmed up to ~MajorMinorEverySeconds
+         // later than instantly, trivial next to an M1+ bar's own duration,
+         // and this block is chart-object-only, never fed to any trading bot.
+         if(TimeCurrent() - g_last_mm_time >= MajorMinorEverySeconds)
            {
-            ProcessBar(i, rates_total, PivotPeriod, high, low, close);
-            TrackLatestPositions();
+            g_last_mm_time = TimeCurrent();
 
-            if(i<rates_total-1)
+            if(prev_calculated<=0) ResetAllConfirmed();
+
+            CopyConfirmedToWorking();
+
+            int startBar=gc_ConfirmedUpTo+1;
+            if(startBar<0) startBar=0;
+
+            // CommitWorkingToConfirmed() (6 more full ArrayCopy calls) used to
+            // run INSIDE this loop, once per closed bar -- fine for the usual
+            // 1-bar-per-tick case, but on a full rescan (ResetAllConfirmed(),
+            // i.e. every reattach) that's up to MaxBars iterations each
+            // re-copying the whole, ever-growing confirmed arrays again: an
+            // O(n^2) sum of growing copies, not a single O(n) pass. Fixed
+            // 2026-09-04, confirmed live: "indicator is too slow, 14625 ms"
+            // on XAUUSD M3 even with the 2026-09-03 throttle already in place
+            // (that fix cut how OFTEN this block runs, not the cost of one
+            // run -- a fresh reattach's rescan is still one full run).
+            // ProcessBar/TrackLatestPositions only ever read/write the w_*
+            // working arrays, never gc_* mid-loop, so nothing here depends on
+            // confirmed being in sync bar-by-bar -- committing once at the
+            // end, after the loop has finished accumulating into working,
+            // produces the exact same end state for a fraction of the cost.
+            int lastClosedProcessed=-1;
+
+            for(int i=startBar; i<rates_total; i++)
+              {
+               ProcessBar(i, rates_total, PivotPeriod, high, low, close);
+               TrackLatestPositions();
+
+               if(i<rates_total-1)
+                  lastClosedProcessed=i;
+              }
+
+            if(lastClosedProcessed>=0)
               {
                CommitWorkingToConfirmed();
-               gc_ConfirmedUpTo=i;
+               gc_ConfirmedUpTo=lastClosedProcessed;
               }
-           }
 
-         DrawFromWorking(time, rates_total);
+            DrawFromWorking(time, rates_total);
+           }
         }
      }
 
