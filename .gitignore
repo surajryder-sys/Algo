@@ -109,6 +109,7 @@ v4_usoil_ustec_exit_manager_state.json
 v5s_trend_manager_state.json
 v5s_trend_manager_sl_state.json
 v5s_trend_manager_runtime_state.json
+v5s_trend_manager_watch_zone_state.json
 v5s_reversal_manager_state.json
 v5s_reversal_manager_sl_state.json
 v5s_reversal_manager_levels_state.json

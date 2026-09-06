@@ -14,12 +14,17 @@ Summary of the full rule set implemented here:
   - A level is ARMED the moment LIVE price (bid for support, ask for
     resistance) touches it, and stays armed across cycles until traded or
     its parent HTF's own character changes (reversal_entry.scan_touches).
-  - Confirmation + entry is closed-bar only (reversal_entry.find_signals):
-    Path 1 gated (M5 bullish/bearish candle, M3 bullish/bearish candle,
-    M1 flip -- each requires that bar's own close on the correct side of
-    the level) or Path 2 privileged (M3 ATR flip, fires even on the wrong
-    side of the level, as long as that HTF's character hasn't yet
-    changed).
+  - Confirmation + entry (reversal_entry.find_signals): M5/M3 bullish/
+    bearish candle checks are closed-bar copy_rates; M3/M1 flip checks
+    read the LIVE BRIDGE ONLY (bridge_flip.py), no copy_rates fallback --
+    changed 2026-09-07 at the user's request, since the bridge's own
+    continuously-running lines are considered more reliable for LTF flip
+    detection than an independent recompute (same reasoning as Trend
+    Manager's own M3 bridge tie-breaker, just as the sole source here
+    instead of a disagreement-only override). Path 1 gated (candle
+    checks vs. that bar's own close; M1 flip vs. live price) or Path 2
+    privileged (M3 ATR flip, fires even on the wrong side of the level,
+    as long as that HTF's character hasn't yet changed).
   - One trade per flip: each level, once traded, is skipped until its
     parent HTF's own character changes (a fresh flip/trap-resolve there).
   - Position lifecycle, run once per qualifying signal per cycle (in
@@ -62,6 +67,7 @@ import time
 import MetaTrader5 as mt5
 
 from v5_sentinel import broker, flip_state, htf_levels, rates, reversal_entry, sl_manager, trade_manager
+from v5_sentinel.bridge_flip import BridgeFlipState
 from v5_sentinel.profit_alerts_telegram import send_message as _telegram_send
 from v5_sentinel.reversal_config import RMConfig, load_config
 
@@ -218,7 +224,7 @@ def _process_signal(cfg: RMConfig, sig: "reversal_entry.ReversalSignal", store: 
 
 
 def run_once(cfg: RMConfig, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager,
-            store: htf_levels.LevelEligibilityStore) -> None:
+            store: htf_levels.LevelEligibilityStore, bridge_flip: BridgeFlipState) -> None:
     htf_states = htf_levels.compute_all_htf_states(cfg.symbol)
     bid, ask = broker.get_tick_price(cfg.symbol)
     reversal_entry.scan_touches(htf_states, store, bid, ask)
@@ -230,7 +236,8 @@ def run_once(cfg: RMConfig, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.
         print("[V5S-STR] waiting for enough M3 bar history")
         return
 
-    signals = reversal_entry.find_signals(htf_states, store, m5_series, m3_series, m1_series,
+    signals = reversal_entry.find_signals(cfg.symbol, htf_states, store, bridge_flip, bid, ask,
+                                          m5_series, m3_series, m1_series,
                                           cfg.sl_buffer, cfg.swing_lookback)
 
     positions = broker.get_positions(cfg.symbol, cfg.magic_number)
@@ -257,11 +264,12 @@ def main() -> None:
     tm_mgr = trade_manager.TradeManager(cfg.state_file, cfg.partial1_trigger_points, cfg.partial1_fraction,
                                         cfg.partial2_trigger_points, cfg.partial2_fraction)
     store = htf_levels.LevelEligibilityStore(cfg.levels_state_file)
+    bridge_flip = BridgeFlipState(cfg.bridge_flip_state_file)
 
     try:
         while True:
             try:
-                run_once(cfg, sl_mgr, tm_mgr, store)
+                run_once(cfg, sl_mgr, tm_mgr, store, bridge_flip)
             except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
                 print(f"[V5S-STR] cycle error: {exc!r}")
             time.sleep(cfg.poll_seconds)

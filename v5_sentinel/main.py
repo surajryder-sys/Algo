@@ -27,8 +27,19 @@ Rules implemented here (full design recap):
     ever triggers an entry/exit decision -- a merely-persisting confirmed
     state (no new event this bar) never does anything by itself.
   - A fresh M3 event only leads to a trade if its direction is allowed by
-    the current parent bias ("valid setup"). An event that isn't allowed
-    leaves any open position alone -- it just waits for its own SL.
+    the current parent bias ("valid setup"). An invalid TRAP_RESOLVED
+    leaves any open position alone -- it just waits for its own SL. An
+    invalid FLIP instead arms the WATCH ZONE (watch_zone.py, added
+    2026-09-07) -- fixes a real gap where the parent gate was rejecting
+    exactly the trades that matter most (an M3 flip at the START of a
+    real trending move, before the slower parent has caught up -- normal
+    M1->M3->M5->M15 lag, not an edge case). A parent flipping into
+    agreement shortly after either fires the trade immediately (price
+    still within 2pts of M3's own qualifying price) or arms a 45%
+    pullback target (recomputed every cycle off that parent's own
+    current near trail line) to wait for instead. See watch_zone.py for
+    the full design, including cancellation and the "one trade per flip"
+    rule as it applies here.
   - No position open + valid fresh event -> open a new position (full
     lot size) in that direction.
   - Position open, valid fresh event, OPPOSITE direction -> square off
@@ -56,7 +67,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bias, bridge, broker, flip_state, rates, sl_manager, trade_manager
+from v5_sentinel import bias, bridge, broker, flip_state, rates, sl_manager, trade_manager, watch_zone
 from v5_sentinel.config import Config, load_config
 
 _M3_MINUTES = 3
@@ -129,27 +140,36 @@ def _tag(parent: "bias.ParentBiasResult", direction: int, label: str) -> str:
 
 
 def _extract_tag(comment: str) -> str:
-    """Pulls the "{parent}/3{F|T}" tag back out of one of our own past
-    comments (V5S-TM-{tag}-...) -- used to carry an ENTRY's own tag
-    forward onto its later partial-booking comments, so a partial-close
-    deal can be traced back to what opened the position by comment alone
-    (2026-09-04, confirmed with the user). Falls back to "UNK" if the
-    given comment isn't in our own format (predates this scheme, missing,
-    etc.) -- never raises."""
+    """Pulls the tag back out of one of our own past comments
+    (V5S-TM-{tag}-...) -- used to carry an ENTRY's own tag forward onto
+    its later partial-booking comments, so a partial-close deal can be
+    traced back to what opened the position by comment alone (2026-09-04,
+    confirmed with the user). Joins everything from parts[2] onward
+    (not just parts[2] alone) -- 2026-09-07: watch-zone tags like "M5-PB"
+    contain a "-" themselves, so a naive parts[2] would silently truncate
+    them to "M5" on a later partial-booking comment. Falls back to "UNK"
+    if the given comment isn't in our own format (predates this scheme,
+    missing, etc.) -- never raises."""
     parts = comment.split("-") if comment else []
     if len(parts) >= 3 and parts[0] == "V5S" and parts[1] == "TM":
-        return parts[2]
+        return "-".join(parts[2:])
     return "UNK"
 
 
-def _entry_comment(parent: "bias.ParentBiasResult", direction: int, label: str) -> str:
-    """"V5S-TM-{parent}/3{F|T}" -- e.g. "V5S-TM-M5/3F" or "V5S-TM-M15M5/3T".
-    TM = Trend Manager. No trailing timestamp (dropped 2026-09-07 at the
+def _comment_for_tag(tag: str) -> str:
+    """"V5S-TM-{tag}" -- the shared entry-comment shape, e.g.
+    "V5S-TM-M5/3F", "V5S-TM-M15M5/3T", or a watch-zone tag like
+    "V5S-TM-M5/5F" (straight-fire) / "V5S-TM-M5-PB" (pullback-triggered,
+    see watch_zone.py). No trailing timestamp (dropped 2026-09-07 at the
     user's request -- purely cosmetic, nothing in the logic ever read it
-    back; _extract_tag() only ever looks at parts[0]/[1]/[2], and the
-    bar-time dedup that actually matters lives in RuntimeState's own JSON,
-    not the comment string)."""
-    return f"V5S-TM-{_tag(parent, direction, label)}"
+    back; _extract_tag() only ever looks at parts[0]/[1]/[2:], and the
+    bar-time dedup that actually matters lives in RuntimeState's own
+    JSON, not the comment string)."""
+    return f"V5S-TM-{tag}"
+
+
+def _entry_comment(parent: "bias.ParentBiasResult", direction: int, label: str) -> str:
+    return _comment_for_tag(_tag(parent, direction, label))
 
 
 def _action_comment(tag: str, action_code: str) -> str:
@@ -162,13 +182,11 @@ def _action_comment(tag: str, action_code: str) -> str:
     return f"V5S-TM-{tag}-{action_code}"
 
 
-def _open_position(cfg: Config, direction: int, m3_series: rates.TrailSeries, label: str,
-                   parent: "bias.ParentBiasResult") -> None:
+def _open_position(cfg: Config, direction: int, m3_series: rates.TrailSeries, comment: str) -> None:
     far = _far_line_for(direction, m3_series)
     sl = far - cfg.sl_buffer if direction == 1 else far + cfg.sl_buffer
-    comment = _entry_comment(parent, direction, label)
 
-    print(f"[V5S-ENTRY] {_DIR_LABEL[direction]} ({label}) far_line={far:.3f} sl={sl:.3f}")
+    print(f"[V5S-ENTRY] {_DIR_LABEL[direction]} ({comment}) far_line={far:.3f} sl={sl:.3f}")
     if not cfg.enable_trading:
         print("[V5S-ENTRY] enable_trading is false -- decision only, no order sent")
         return
@@ -198,6 +216,39 @@ def _close_position(cfg: Config, position, action_label: str, tag: str, action_c
         print(f"[V5S-EXIT] close failed: retcode={result.retcode} comment={result.comment}")
         return False
     return True
+
+
+def _apply_signal(cfg: Config, position, new_dir: int, tag: str, m3_series: rates.TrailSeries,
+                  tm_mgr: trade_manager.TradeManager):
+    """Shared position-lifecycle branching -- used by BOTH a normal valid
+    M3 event and a watch-zone-driven signal (2026-09-07), so the two
+    trigger sources behave identically once a direction+tag is decided:
+    no position -> open; opposite direction -> square off + reopen;
+    same direction + already partially cut -> refresh (square off +
+    reopen full size); same direction + still full size -> no-op.
+    Returns the resulting position (re-queried after any broker action)."""
+    comment = _comment_for_tag(tag)
+    if position is None:
+        _open_position(cfg, new_dir, m3_series, comment)
+        positions = broker.get_positions(cfg.symbol, cfg.magic_number)
+        return positions[0] if positions else None
+
+    pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+    if new_dir != pos_direction:
+        if _close_position(cfg, position, "SQOFF", tag, "SQ"):
+            _open_position(cfg, new_dir, m3_series, comment)
+            positions = broker.get_positions(cfg.symbol, cfg.magic_number)
+            return positions[0] if positions else None
+        return position
+
+    if tm_mgr.is_partially_cut(position.ticket):
+        if _close_position(cfg, position, "REFRESH", tag, "RF"):
+            _open_position(cfg, new_dir, m3_series, comment)
+            positions = broker.get_positions(cfg.symbol, cfg.magic_number)
+            return positions[0] if positions else None
+        return position
+
+    return position  # same direction, still full size -- nothing to refresh
 
 
 def _run_sl_manager(cfg: Config, mgr: sl_manager.SLManager, position, m3_series: rates.TrailSeries) -> None:
@@ -256,8 +307,76 @@ def _run_trade_manager(cfg: Config, mgr: trade_manager.TradeManager, position) -
         print(f"[V5S-TM] partial close failed: retcode={result.retcode} comment={result.comment}")
 
 
+def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: "bias.ParentBiasResult",
+                      fs_m3: "flip_state.FlipStateResult", m5_series: Optional[rates.TrailSeries],
+                      m15_series: Optional[rates.TrailSeries]) -> Optional[tuple[int, str]]:
+    """Runs the watch-zone state machine for one cycle -- see
+    watch_zone.py for the full design. Returns (direction, tag) if a
+    watch-zone-driven trade should fire THIS cycle, else None. Arming a
+    new zone and cancelling an invalidated one both happen here as a
+    side effect regardless of whether a trade fires."""
+    zone = wz_store.zone
+
+    # Cancellation -- M3 entering a trap, or flipping to a DIFFERENT
+    # confirmed direction than the zone's own, both invalidate it.
+    if zone is not None and (fs_m3.watching is not None or fs_m3.confirmed.value != zone.direction):
+        reason = "M3 trapped" if fs_m3.watching is not None else "M3 flipped opposite"
+        print(f"[V5S-WATCHZONE] cancelled ({reason}) -- was {_DIR_LABEL[zone.direction]} "
+              f"@ {zone.qualifying_price:.3f}")
+        wz_store.cancel()
+        zone = None
+
+    if zone is None:
+        return None
+
+    # Look for the MOST RECENT qualifying parent flip (recency-first,
+    # 2026-09-07: a later parent event supersedes an earlier one still
+    # pending) -- M5 or M15, matching the zone's own direction.
+    candidates = []
+    for name, tf_code, fs in (("M5", "5", parent.m5), ("M15", "15", parent.m15)):
+        if fs is not None and fs.event_just_happened() and fs.confirmed.value == zone.direction:
+            candidates.append((fs.last_event.bar_time, name, tf_code, fs.last_close))
+
+    if candidates:
+        candidates.sort()
+        bar_time, name, tf_code, close = candidates[-1]
+        already = zone.pending is not None and zone.pending.source_bar_time == bar_time
+        if not already:
+            gap = abs(close - zone.qualifying_price)
+            if gap <= watch_zone.PULLBACK_GATE_POINTS:
+                print(f"[V5S-WATCHZONE] {name} confirms within {gap:.3f}pts of qualifying price "
+                      f"{zone.qualifying_price:.3f} -- straight fire")
+                wz_store.clear()
+                return zone.direction, f"{name}/{tf_code}F"
+            print(f"[V5S-WATCHZONE] {name} confirms {gap:.3f}pts away -- arming 45% pullback target")
+            wz_store.set_pending(name, tf_code, close, bar_time)
+
+    zone = wz_store.zone  # re-read -- set_pending() above may have just changed it
+    if zone is not None and zone.pending is not None:
+        p = zone.pending
+        parent_series = m5_series if p.parent_tf_code == "5" else m15_series
+        if (parent_series is not None and parent_series.trail1[-1] is not None
+                and parent_series.trail2[-1] is not None):
+            _far, near = flip_state.far_near_line(zone.direction, parent_series.trail1[-1], parent_series.trail2[-1])
+            if zone.direction == 1:
+                target = p.anchor_close - watch_zone.PULLBACK_RETRACE_FRACTION * (p.anchor_close - near)
+            else:
+                target = p.anchor_close + watch_zone.PULLBACK_RETRACE_FRACTION * (near - p.anchor_close)
+
+            bid, ask = broker.get_tick_price(cfg.symbol)
+            price = bid if zone.direction == 1 else ask
+            reached = price <= target if zone.direction == 1 else price >= target
+            if reached:
+                print(f"[V5S-WATCHZONE] {p.parent_name} pullback target {target:.3f} reached (price={price:.3f})")
+                wz_store.clear()
+                return zone.direction, f"{p.parent_name}-PB"
+            print(f"[V5S-WATCHZONE] pending {p.parent_name} pullback -- target={target:.3f} current={price:.3f}")
+
+    return None
+
+
 def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager,
-            runtime: RuntimeState) -> None:
+            runtime: RuntimeState, wz_store: watch_zone.WatchZoneStore) -> None:
     parent = bias.compute_parent_bias(cfg.symbol)
     m3_series = rates.read_trail_series(cfg.symbol, _M3_MINUTES)
     if parent is None or m3_series is None:
@@ -268,6 +387,13 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
         print("[V5S] waiting for enough M3 bar history for flip_state")
         return
     fs_m3 = bridge.reconcile(fs_m3, m3_series)
+
+    # Needed for the watch-zone's parent-confirmation + pullback-target
+    # calc (2026-09-07) -- parent.m5/parent.m15 already carry the
+    # FlipStateResult, but the pullback target needs each parent's own
+    # raw trail1/trail2 values too, which only the series itself has.
+    m5_series = rates.read_trail_series(cfg.symbol, 5)
+    m15_series = rates.read_trail_series(cfg.symbol, 15)
 
     positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     position = positions[0] if positions else None  # one position at a time, enforced by construction below
@@ -291,28 +417,21 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
               f"bull_allowed={parent.bull_allowed}, bear_allowed={parent.bear_allowed}, valid={valid})")
 
         if valid:
-            if position is None:
-                _open_position(cfg, new_dir, m3_series, label, parent)
-                positions = broker.get_positions(cfg.symbol, cfg.magic_number)
-                position = positions[0] if positions else None
-            else:
-                pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
-                new_event_tag = _tag(parent, new_dir, label)
-                if new_dir != pos_direction:
-                    # valid opposite setup -- square off, then open fresh opposite
-                    if _close_position(cfg, position, "SQOFF", new_event_tag, "SQ"):
-                        _open_position(cfg, new_dir, m3_series, label, parent)
-                        positions = broker.get_positions(cfg.symbol, cfg.magic_number)
-                        position = positions[0] if positions else None
-                elif tm_mgr.is_partially_cut(position.ticket):
-                    # same-direction fresh signal on an already-cut-down
-                    # position -- refresh to full size
-                    if _close_position(cfg, position, "REFRESH", new_event_tag, "RF"):
-                        _open_position(cfg, new_dir, m3_series, label, parent)
-                        positions = broker.get_positions(cfg.symbol, cfg.magic_number)
-                        position = positions[0] if positions else None
-                # else: same direction, still full size -- nothing to refresh
-        # else: no valid opposite/matching setup -- leave any open position alone, it waits on its own SL
+            new_event_tag = _tag(parent, new_dir, label)
+            position = _apply_signal(cfg, position, new_dir, new_event_tag, m3_series, tm_mgr)
+        elif label == "FLIP":
+            # Invalid FLIP (not TRAP_RESOLVED, see watch_zone.py's own
+            # docstring for why that's excluded) -- 2026-09-07: park it in
+            # the watch zone instead of dropping it outright, so a parent
+            # catching up shortly after still gets to trade the move.
+            wz_store.arm(new_dir, fs_m3.last_close, event.bar_time)
+            print(f"[V5S-WATCHZONE] armed {_DIR_LABEL[new_dir]} @ {fs_m3.last_close:.3f} (parent disagrees)")
+        # else: invalid TRAP_RESOLVED -- leave any open position alone, it waits on its own SL (unchanged)
+
+    wz_signal = _check_watch_zone(cfg, wz_store, parent, fs_m3, m5_series, m15_series)
+    if wz_signal is not None:
+        wz_dir, wz_tag = wz_signal
+        position = _apply_signal(cfg, position, wz_dir, wz_tag, m3_series, tm_mgr)
 
     if position is not None:
         _run_sl_manager(cfg, sl_mgr, position, m3_series)
@@ -329,11 +448,12 @@ def main() -> None:
     tm_mgr = trade_manager.TradeManager(cfg.state_file, cfg.partial1_trigger_points, cfg.partial1_fraction,
                                         cfg.partial2_trigger_points, cfg.partial2_fraction)
     runtime = RuntimeState(cfg.runtime_state_file)
+    wz_store = watch_zone.WatchZoneStore(cfg.watch_zone_state_file)
 
     try:
         while True:
             try:
-                run_once(cfg, sl_mgr, tm_mgr, runtime)
+                run_once(cfg, sl_mgr, tm_mgr, runtime, wz_store)
             except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
                 print(f"[V5S] cycle error: {exc!r}")
             time.sleep(cfg.poll_seconds)

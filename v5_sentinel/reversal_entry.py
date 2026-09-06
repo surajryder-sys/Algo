@@ -8,21 +8,30 @@ reaches a level's value, that level becomes ARMED (persisted in
 htf_levels.LevelEligibilityStore, survives across cycles) until it's
 either traded or its parent HTF's own character changes.
 
-CONFIRMATION + ENTRY is closed-bar only, same convention as the rest of
-this system -- see find_signals(). Four trigger types, all evaluated
-against the LATEST CLOSED bar of their own timeframe:
+CONFIRMATION + ENTRY: four trigger types. M5/M3 bullish-candle checks are
+closed-bar copy_rates, same convention as the rest of this system. M3/M1
+FLIP checks PRIORITIZE the live bridge (bridge_flip.py), falling back to
+copy_rates only when that timeframe's bridge data is itself missing/stale
+-- confirmed 2026-09-07 ("it can compute and keep internal M5/M3/M1 data
+too, but need to follow open chart data only; if the chart data gets
+stale, we can proceed with internal data copyrates... we have prioritized
+the chart data for Trend Manager too"). Same priority bridge.py's own
+reconcile() already applies for Trend Manager's M3 -- chart wins when
+fresh and available, copy_rates otherwise, never goes dark:
 
-  Path 1 (GATED -- price must be on the correct side of the armed level,
-  using that SAME closed bar's own close, not live price):
-    - M5 bullish/bearish candle (close vs open)          -> code "5C"
-    - M3 bullish/bearish candle (close vs open)          -> code "3C"
-    - M1 flip (flip_state.event_just_happened())          -> code "1F"
+  Path 1 (GATED -- price must be on the correct side of the armed level.
+  Candle checks use that SAME closed bar's own close; the M1 flip check
+  gates on live price when using the bridge, or that bar's own close when
+  fallen back to copy_rates):
+    - M5 bullish/bearish candle (close vs open, copy_rates)      -> "5C"
+    - M3 bullish/bearish candle (close vs open, copy_rates)      -> "3C"
+    - M1 flip (bridge-first, copy_rates fallback)                 -> "1F"
 
   Path 2 (PRIVILEGED -- M3 ATR flip only, fires even with price on the
   WRONG side of the level, as long as that HTF's own character hasn't
   yet changed -- i.e. it hasn't itself closed to confirm a genuine
   break):
-    - M3 ATR flip (flip_state.event_just_happened())      -> code "3F"
+    - M3 ATR flip (bridge-first, copy_rates fallback)             -> "3F"
 
 SL:
   - "5C"/"3C"/"1F" triggers -> that SAME timeframe's own last-N-closed-bar
@@ -44,7 +53,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from v5_sentinel import flip_state, rates
+from v5_sentinel import bridge, flip_state, rates
+from v5_sentinel.bridge_flip import BridgeFlipState
 from v5_sentinel.htf_levels import HTFState, LevelEligibilityStore
 
 
@@ -86,17 +96,6 @@ def _bearish(series: rates.TrailSeries) -> bool:
     return series.closes[-1] < series.opens[-1]
 
 
-def _flip_direction(series: Optional[rates.TrailSeries]) -> Optional[int]:
-    """1/-1 if that timeframe's OWN flip_state just produced a fresh
-    FLIP/TRAP_RESOLVED on its own last closed bar, else None."""
-    if series is None:
-        return None
-    fs = flip_state.compute(series)
-    if fs is None or not fs.event_just_happened():
-        return None
-    return fs.last_event.confirmed.value
-
-
 def _swing_sl(series: rates.TrailSeries, direction: int, buffer: float, lookback: int) -> Optional[float]:
     if direction == 1:
         low = rates.recent_swing_low(series, lookback)
@@ -110,9 +109,39 @@ def _m3_far_line_sl(m3_series: rates.TrailSeries, direction: int, buffer: float)
     return far - buffer if direction == 1 else far + buffer
 
 
+def _copyrates_flip_direction(series: Optional[rates.TrailSeries]) -> Optional[int]:
+    """copy_rates FALLBACK flip check -- only ever consulted when that
+    timeframe's own bridge data is missing/stale (see module docstring).
+    1/-1 if flip_state just produced a fresh FLIP/TRAP_RESOLVED on the
+    latest closed bar, else None."""
+    if series is None:
+        return None
+    fs = flip_state.compute(series)
+    if fs is None or not fs.event_just_happened():
+        return None
+    return fs.last_event.confirmed.value
+
+
+def _flip_check(symbol: str, tf_minutes: int, bridge_flip: BridgeFlipState, bid: float, ask: float,
+                fallback_series: Optional[rates.TrailSeries]) -> tuple[Optional[int], bool]:
+    """Bridge-first, copy_rates fallback -- returns (direction_or_None,
+    used_bridge). Availability is judged by bridge.read_lines() itself
+    (missing/stale -> None) -- deliberately checked separately from
+    bridge_flip.check()'s own return value, since that returns None both
+    when data is unavailable AND when it's available but nothing changed
+    this cycle; only the former should trigger a fallback."""
+    if bridge.read_lines(symbol, tf_minutes) is not None:
+        return bridge_flip.check(symbol, tf_minutes, bid, ask), True
+    return _copyrates_flip_direction(fallback_series), False
+
+
 def find_signals(
+    symbol: str,
     htf_states: dict[int, Optional[HTFState]],
     store: LevelEligibilityStore,
+    bridge_flip: BridgeFlipState,
+    bid: float,
+    ask: float,
     m5_series: Optional[rates.TrailSeries],
     m3_series: rates.TrailSeries,
     m1_series: Optional[rates.TrailSeries],
@@ -120,14 +149,25 @@ def find_signals(
     swing_lookback: int,
 ) -> list[ReversalSignal]:
     """Every armed (touched), untraded HTF level that satisfies one of the
-    4 confirmation triggers as of THIS cycle's latest closed bars. M3
-    flip (Path 2) is checked first per direction since it's the
-    privileged trigger; M5 candle, M3 candle, M1 flip (Path 1, gated on
-    price being on the correct side of that specific level) follow."""
+    4 confirmation triggers as of THIS cycle. M3 flip (Path 2, bridge) is
+    checked first per direction since it's the privileged trigger; M5
+    candle (copy_rates), M3 candle (copy_rates), M1 flip (Path 1, bridge,
+    gated on LIVE PRICE being on the correct side of the level -- there's
+    no closed-bar close to gate on here, bridge_flip itself already
+    evaluates against live price, so the gate matches it) follow.
+    m1_series is kept ONLY for the "1F" trigger's swing-low/high SL basis
+    (that still needs real bar highs/lows, which the bridge doesn't
+    publish) -- it plays no part in detecting the flip itself anymore."""
     m5_bull, m5_bear = (m5_series is not None and _bullish(m5_series)), (m5_series is not None and _bearish(m5_series))
     m3_bull, m3_bear = _bullish(m3_series), _bearish(m3_series)
-    m3_flip_dir = _flip_direction(m3_series)
-    m1_flip_dir = _flip_direction(m1_series)
+    m3_flip_dir, _m3_via_bridge = _flip_check(symbol, 3, bridge_flip, bid, ask, m3_series)
+    m1_flip_dir, m1_via_bridge = _flip_check(symbol, 1, bridge_flip, bid, ask, m1_series)
+    # Gate price: live mid when the flip came from the bridge (matches
+    # what it was itself evaluated against), that bar's own close when
+    # fallen back to copy_rates (matches the closed-bar convention every
+    # other fallback/candle check here already uses).
+    mid_price = (bid + ask) / 2
+    m1_gate_price = mid_price if m1_via_bridge else (m1_series.closes[-1] if m1_series is not None else None)
 
     signals: list[ReversalSignal] = []
 
@@ -149,7 +189,7 @@ def find_signals(
                     trigger_code, triggering_series = "5C", m5_series
                 elif m3_bull and m3_series.closes[-1] > level.value:
                     trigger_code, triggering_series = "3C", m3_series
-                elif m1_flip_dir == 1 and m1_series is not None and m1_series.closes[-1] > level.value:
+                elif m1_flip_dir == 1 and m1_gate_price is not None and m1_gate_price > level.value:
                     trigger_code, triggering_series = "1F", m1_series
             else:
                 if m3_flip_dir == -1:
@@ -158,7 +198,7 @@ def find_signals(
                     trigger_code, triggering_series = "5C", m5_series
                 elif m3_bear and m3_series.closes[-1] < level.value:
                     trigger_code, triggering_series = "3C", m3_series
-                elif m1_flip_dir == -1 and m1_series is not None and m1_series.closes[-1] < level.value:
+                elif m1_flip_dir == -1 and m1_gate_price is not None and m1_gate_price < level.value:
                     trigger_code, triggering_series = "1F", m1_series
 
             if trigger_code is None:
@@ -167,6 +207,8 @@ def find_signals(
             if trigger_code == "3F":
                 sl = _m3_far_line_sl(m3_series, direction, sl_buffer)
             else:
+                if triggering_series is None:
+                    continue
                 sl = _swing_sl(triggering_series, direction, sl_buffer, swing_lookback)
                 if sl is None:
                     continue
