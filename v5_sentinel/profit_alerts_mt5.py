@@ -41,20 +41,23 @@ def shutdown() -> None:
     mt5.shutdown()
 
 
-def _get_positions_once(symbol: str, magic: int) -> list:
+def _get_positions_once(symbol: str, magics: tuple[int, ...]) -> list:
     positions = mt5.positions_get(symbol=symbol)
     if positions is None:
         error = mt5.last_error()
         if error[0] != 1:  # 1 = "no error, just nothing found"
             raise RuntimeError(f"positions_get failed for {symbol}: {error}")
         return []
-    return [p for p in positions if p.magic == magic]
+    return [p for p in positions if p.magic in magics]
 
 
-def get_positions(symbol: str, magic: int) -> list:
+def get_positions(symbol: str, magics: tuple[int, ...]) -> list:
+    """magics: any of these magic numbers match -- 2026-09-07, extended to
+    cover both Trend Manager and STR Reversal Manager's trades under one
+    watcher (see profit_alerts_config.py)."""
     global _last_reconnect_attempt
     try:
-        return _get_positions_once(symbol, magic)
+        return _get_positions_once(symbol, magics)
     except RuntimeError as exc:
         if _cfg is None:
             raise
@@ -70,4 +73,4 @@ def get_positions(symbol: str, magic: int) -> list:
             print(f"[v5_sentinel.profit_alerts] MT5 reconnect FAILED: {reconnect_exc}")
             raise
         print("[v5_sentinel.profit_alerts] MT5 reconnected successfully")
-        return _get_positions_once(symbol, magic)
+        return _get_positions_once(symbol, magics)

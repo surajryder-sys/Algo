@@ -41,8 +41,12 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-# MT5 timeframe constants -- covers the 8 timeframes actually requested
-# (H4,H2,H1,M30,M15,M5,M3,M1) plus a couple of common neighbors for free.
+# MT5 timeframe constants -- the original Trend Manager 8 (H4,H2,H1,M30,
+# M15,M5,M3,M1) plus D1/H8/H6/H3 added 2026-09-07 for the STR Reversal
+# Manager's HTF levels store (see htf_levels.py). H7/H5/M45 were also
+# requested there but are NOT standard MT5 timeframes -- no TIMEFRAME_H7/
+# TIMEFRAME_H5/TIMEFRAME_M45 constant exists, so they were dropped rather
+# than built as custom-resampled bars (confirmed with the user 2026-09-06).
 _TIMEFRAME_CONST = {
     1: mt5.TIMEFRAME_M1,
     3: mt5.TIMEFRAME_M3,
@@ -51,10 +55,14 @@ _TIMEFRAME_CONST = {
     30: mt5.TIMEFRAME_M30,
     60: mt5.TIMEFRAME_H1,
     120: mt5.TIMEFRAME_H2,
+    180: mt5.TIMEFRAME_H3,
     240: mt5.TIMEFRAME_H4,
+    360: mt5.TIMEFRAME_H6,
+    480: mt5.TIMEFRAME_H8,
+    1440: mt5.TIMEFRAME_D1,
 }
 
-# H4, H2, H1, M30, M15, M5, M3, M1 -- the exact set + order requested.
+# H4, H2, H1, M30, M15, M5, M3, M1 -- Trend Manager's own set + order.
 TARGET_TIMEFRAMES_MINUTES = [240, 120, 60, 30, 15, 5, 3, 1]
 
 # Generous warm-up for the slow ATR line's default period (300) plus
@@ -172,10 +180,16 @@ class TrailSeries:
     """Full closed-bar series backing an ATRDualSnapshot -- exposed
     separately because the flip/trap state machine (flip_state.py) needs
     to walk bar-by-bar through close vs. both trail lines, not just read
-    the latest values."""
+    the latest values. opens/highs/lows added 2026-09-07 for the STR
+    Reversal Manager: candle-color checks (close vs open) and swing
+    low/high SL lookback both need them -- harmless additive change for
+    every existing caller, which only ever reads .closes/.trail*/.trend*."""
     symbol: str
     timeframe_minutes: int
     times: list[int]
+    opens: list[float]
+    highs: list[float]
+    lows: list[float]
     closes: list[float]
     trail1: list[Optional[float]]
     trail2: list[Optional[float]]
@@ -209,6 +223,7 @@ def read_trail_series(
     if len(closed) < atrperiod_2 + 1:
         return None
 
+    opens = [float(r["open"]) for r in closed]
     closes = [float(r["close"]) for r in closed]
     highs = [float(r["high"]) for r in closed]
     lows = [float(r["low"]) for r in closed]
@@ -217,8 +232,26 @@ def read_trail_series(
     trail1, trend1 = _compute_trail_series(closes, highs, lows, keyvalue_1, atrperiod_1)
     trail2, trend2 = _compute_trail_series(closes, highs, lows, keyvalue_2, atrperiod_2)
 
-    return TrailSeries(symbol=symbol, timeframe_minutes=tf_minutes, times=times, closes=closes,
+    return TrailSeries(symbol=symbol, timeframe_minutes=tf_minutes, times=times, opens=opens,
+                        highs=highs, lows=lows, closes=closes,
                         trail1=trail1, trail2=trail2, trend1=trend1, trend2=trend2)
+
+
+def recent_swing_low(series: TrailSeries, lookback: int = 8) -> Optional[float]:
+    """Lowest LOW of the last `lookback` closed bars (2026-09-07, STR
+    Reversal Manager SL basis -- confirmed simple lookback-low, no pivot-
+    shape requirement, Major/Minor explicitly NOT used here)."""
+    if len(series.lows) < 1:
+        return None
+    return min(series.lows[-lookback:])
+
+
+def recent_swing_high(series: TrailSeries, lookback: int = 8) -> Optional[float]:
+    """Highest HIGH of the last `lookback` closed bars -- mirror of
+    recent_swing_low() for sell-side SL."""
+    if len(series.highs) < 1:
+        return None
+    return max(series.highs[-lookback:])
 
 
 def read_atr_dual(

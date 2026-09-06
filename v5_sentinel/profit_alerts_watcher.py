@@ -60,7 +60,7 @@ def _format_alert(position, milestone: float, profit_points: float) -> str:
 
 def run_once(cfg: Config, state: ProfitState, subscribers: SubscriberStore) -> None:
     try:
-        positions = mt5_positions.get_positions(cfg.symbol, cfg.magic_number)
+        positions = mt5_positions.get_positions(cfg.symbol, cfg.magic_numbers)
     except Exception as exc:
         print(f"[v5_sentinel.profit_alerts] {cfg.symbol} position ERROR: {exc}")
         return
@@ -107,7 +107,7 @@ def main() -> None:
     state = ProfitState(cfg.state_file)
     subscribers = SubscriberStore(cfg.subscribers_file, cfg.owner_chat_id)
 
-    print(f"[v5_sentinel.profit_alerts] watching {cfg.symbol} (magic {cfg.magic_number}), "
+    print(f"[v5_sentinel.profit_alerts] watching {cfg.symbol} (magics {cfg.magic_numbers}), "
           f"polling every {cfg.poll_seconds}s, {len(subscribers.approved_chat_ids())} approved subscriber(s)")
     try:
         while True:

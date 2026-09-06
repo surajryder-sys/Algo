@@ -10,6 +10,14 @@ Reuses the base MT5_LOGIN/PASSWORD/SERVER/TERMINAL_PATH (same
 already-running, already-logged-in terminal V5-Sentinel's own
 broker.py connects to) and the SAME Telegram bot as before
 (SecretTrader_Critical_Bot, PROFIT_ALERTS_TELEGRAM_BOT_TOKEN/CHAT_ID).
+
+2026-09-07: magic_number (single int) became magic_numbers (a tuple) so
+this same watcher covers BOTH Trend Manager and the new STR Reversal
+Manager's trades -- confirmed with the user ("profit alerts stay on the
+existing bot"). Defaults to combining V5S_MAGIC_NUMBER + V5S_RM_MAGIC_NUMBER
+(the same sources each bot's own config already reads), so no duplicate
+value needs maintaining in .env; V5S_PROFIT_ALERTS_MAGIC_NUMBERS
+(comma-separated) overrides that default outright if ever needed.
 """
 from __future__ import annotations
 
@@ -42,13 +50,23 @@ class Config:
     # CURRENT profit is (an unbounded list can't be precomputed).
     milestone_start: float
     milestone_step: float
-    magic_number: int
+    magic_numbers: tuple[int, ...]
     state_file: str
     subscribers_file: str
 
 
 def load_config() -> Config:
     login_raw = os.getenv("MT5_LOGIN", "").strip()
+
+    magic_numbers_raw = os.getenv("V5S_PROFIT_ALERTS_MAGIC_NUMBERS", "").strip()
+    if magic_numbers_raw:
+        magic_numbers = tuple(int(x) for x in magic_numbers_raw.split(",") if x.strip())
+    else:
+        magic_numbers = (
+            int(os.getenv("V5S_MAGIC_NUMBER", "26090201")),        # Trend Manager
+            int(os.getenv("V5S_RM_MAGIC_NUMBER", "26090701")),      # STR Reversal Manager
+        )
+
     return Config(
         mt5_terminal_path=os.getenv("MT5_TERMINAL_PATH") or None,
         mt5_login=int(login_raw) if login_raw else None,
@@ -60,7 +78,7 @@ def load_config() -> Config:
         symbol=os.getenv("V5S_SYMBOL", "XAUUSD"),
         milestone_start=10.0,
         milestone_step=5.0,
-        magic_number=int(os.getenv("V5S_MAGIC_NUMBER", "26090201")),
+        magic_numbers=magic_numbers,
         state_file=os.getenv("V5S_PROFIT_ALERTS_STATE_FILE", "v5_sentinel_profit_alerts_state.json"),
         subscribers_file=os.getenv("V5S_PROFIT_ALERTS_SUBSCRIBERS_FILE", "v5_sentinel_profit_alerts_subscribers.json"),
     )

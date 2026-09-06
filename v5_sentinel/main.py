@@ -143,19 +143,23 @@ def _extract_tag(comment: str) -> str:
 
 
 def _entry_comment(parent: "bias.ParentBiasResult", direction: int, label: str) -> str:
-    """"V5S-TM-{parent}/3{F|T}-<unix ts>" -- e.g. "V5S-TM-M5/3F-1788528601"
-    or "V5S-TM-M15M5/3T-1788528601". TM = Trend Manager."""
-    return f"V5S-TM-{_tag(parent, direction, label)}-{int(time.time())}"
+    """"V5S-TM-{parent}/3{F|T}" -- e.g. "V5S-TM-M5/3F" or "V5S-TM-M15M5/3T".
+    TM = Trend Manager. No trailing timestamp (dropped 2026-09-07 at the
+    user's request -- purely cosmetic, nothing in the logic ever read it
+    back; _extract_tag() only ever looks at parts[0]/[1]/[2], and the
+    bar-time dedup that actually matters lives in RuntimeState's own JSON,
+    not the comment string)."""
+    return f"V5S-TM-{_tag(parent, direction, label)}"
 
 
 def _action_comment(tag: str, action_code: str) -> str:
-    """"V5S-TM-{tag}-{action_code}-<unix ts>" -- the shared shape for
-    every non-entry comment (P1/P2/SQ/RF). action_code is kept to 2
-    letters deliberately: the worst-case tag ("M15M5/3F") plus a longer
-    word like "SQOFF" would exceed MT5's real 31-char comment limit on
-    this account (confirmed: "V5S-TM-M15M5/3F-SQOFF-<10 digit ts>" comes
-    to 32 chars) -- P1/P2/SQ/RF all stay comfortably under it instead."""
-    return f"V5S-TM-{tag}-{action_code}-{int(time.time())}"
+    """"V5S-TM-{tag}-{action_code}" -- the shared shape for every non-entry
+    comment (P1/P2/SQ/RF). action_code is kept to 2 letters deliberately:
+    the worst-case tag ("M15M5/3F") plus a longer word like "SQOFF" would
+    exceed MT5's real 31-char comment limit on this account (confirmed:
+    "V5S-TM-M15M5/3F-SQOFF" territory) -- P1/P2/SQ/RF all stay comfortably
+    under it instead. No trailing timestamp, see _entry_comment()."""
+    return f"V5S-TM-{tag}-{action_code}"
 
 
 def _open_position(cfg: Config, direction: int, m3_series: rates.TrailSeries, label: str,
