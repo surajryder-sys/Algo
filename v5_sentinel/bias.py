@@ -1,4 +1,4 @@
-"""Parent bias -- M5 AND M15 both act as parents now (2026-09-03 design
+"""Parent bias -- M5 AND M15 both act as parents (2026-09-03 design
 change; M15 was declared as "Structure" at the very start of this build
 but had no active rule until now). M5/ICT (OB-formation-based) is still
 deferred for both timeframes; each parent's own bias is STR-only (ATR
@@ -27,18 +27,29 @@ regardless of what its `confirmed` value still reads, since a trapped
 parent's confirmed direction is exactly the stale value under question,
 not a reliable vote.
 
-2026-09-04: both M5 and M15's own flip_state are now reconciled against
-the live MQL5 bridge (bridge.reconcile()) before any of the above table
-logic runs -- see bridge.py's own docstring for why and when that
-overrides our independent recompute.
+2026-09-07: switched from copy_rates+bridge-tie-breaker to BRIDGE-ONLY
+(bridge_bar_flip.BridgeBarFlipTracker) -- user's explicit direction:
+"remove dependancy of copy rates for M5,M3,M1 -- follow exactly bridge,
+nothing else... not just for RM, even for TM, it should use bridge
+data." Still strictly bar-close-gated ("strictly on bar close even on
+bridge data") -- copy_rates is used ONLY to detect when a bar closed and
+what its close price was (bridge_bar_flip.read_last_closed_bar, no
+ATR/trail computation of our own at all); the LINE VALUES tested against
+that close come from the bridge. If a parent's bridge data is missing/
+stale right when its bar closes, that bar is simply skipped (state stays
+as it was) -- no fallback, no guess. See bridge_bar_flip.py's own
+docstring for the full mechanism and why (the old copy_rates recompute
+was a real, confirmed drift source, same root cause already fixed for
+M3 via the bridge tie-breaker -- this just removes the recompute
+entirely instead of only overriding it on disagreement).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
-from v5_sentinel import bridge, rates
-from v5_sentinel.flip_state import Confirmed, FlipStateResult, compute as compute_flip_state
+from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
+from v5_sentinel.flip_state import Confirmed, FlipStateResult
 
 
 @dataclass(frozen=True)
@@ -50,14 +61,10 @@ class BiasResult:
     flip_state: FlipStateResult
 
 
-def compute_m5_bias(symbol: str) -> Optional[BiasResult]:
-    series = rates.read_trail_series(symbol, 5)
-    if series is None:
-        return None
-    fs = compute_flip_state(series)
+def compute_m5_bias(tracker: BridgeBarFlipTracker, symbol: str) -> Optional[BiasResult]:
+    fs = tracker.update(symbol, 5)
     if fs is None:
         return None
-    fs = bridge.reconcile(fs, series)
     return BiasResult(direction=fs.confirmed.value, since_time=fs.confirmed_since_time, flip_state=fs)
 
 
@@ -73,21 +80,11 @@ class ParentBiasResult:
         return self.bull_allowed if direction == 1 else self.bear_allowed
 
 
-def compute_parent_bias(symbol: str) -> Optional[ParentBiasResult]:
-    m5_series = rates.read_trail_series(symbol, 5)
-    m15_series = rates.read_trail_series(symbol, 15)
-    if m5_series is None or m15_series is None:
-        return None
-    fs5 = compute_flip_state(m5_series)
-    fs15 = compute_flip_state(m15_series)
+def compute_parent_bias(tracker: BridgeBarFlipTracker, symbol: str) -> Optional[ParentBiasResult]:
+    fs5 = tracker.update(symbol, 5)
+    fs15 = tracker.update(symbol, 15)
     if fs5 is None or fs15 is None:
         return None
-
-    # Trust the live MQL5 chart over our own recompute when they disagree
-    # -- see bridge.py's own docstring. No-op (returns fs unchanged) if
-    # the bridge has nothing reliable to offer for this timeframe.
-    fs5 = bridge.reconcile(fs5, m5_series)
-    fs15 = bridge.reconcile(fs15, m15_series)
 
     m5_trapped = fs5.watching is not None
     m15_trapped = fs15.watching is not None

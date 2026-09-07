@@ -55,6 +55,7 @@ class Config:
     sl_state_file: str
     runtime_state_file: str
     watch_zone_state_file: str
+    bridge_bar_flip_state_file: str
 
     mt5_terminal_path: str | None
     mt5_login: int | None
@@ -83,6 +84,7 @@ def load_config() -> Config:
         sl_state_file=os.getenv("V5S_SL_STATE_FILE", "v5s_trend_manager_sl_state.json"),
         runtime_state_file=os.getenv("V5S_RUNTIME_STATE_FILE", "v5s_trend_manager_runtime_state.json"),
         watch_zone_state_file=os.getenv("V5S_WATCH_ZONE_STATE_FILE", "v5s_trend_manager_watch_zone_state.json"),
+        bridge_bar_flip_state_file=os.getenv("V5S_BRIDGE_BAR_FLIP_STATE_FILE", "v5s_trend_manager_bridge_bar_flip_state.json"),
         mt5_terminal_path=os.getenv("MT5_TERMINAL_PATH") or None,
         mt5_login=int(login_raw) if login_raw else None,
         mt5_password=os.getenv("MT5_PASSWORD") or None,

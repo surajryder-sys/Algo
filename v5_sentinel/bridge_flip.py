@@ -126,14 +126,22 @@ class StaleAlertTracker:
         return None
 
 
-def m3_far_line(symbol: str, direction: int) -> Optional[float]:
-    """M3's far trail line, sourced from the bridge's own raw line
-    values -- the SL basis for both the "3F" entry trigger and, in
-    reversal_main.py/main.py, post-breakeven trailing. Bridge-only, no
-    copy_rates fallback -- returns None if the bridge is missing/stale,
-    which the caller must treat as "skip this cycle", not a guess."""
-    lines = bridge.read_lines(symbol, 3)
+def far_near(symbol: str, tf_minutes: int, direction: int) -> Optional[tuple[float, float]]:
+    """(far, near) for one timeframe's own two lines, sourced from the
+    bridge's raw values -- bridge-only, no copy_rates fallback. None if
+    that timeframe's bridge data is missing/stale, which the caller must
+    treat as "skip this cycle", not a guess. Used for: RM's "3F" SL
+    basis, RM/TM's post-breakeven trailing (far), and TM's watch-zone
+    pullback target (near)."""
+    lines = bridge.read_lines(symbol, tf_minutes)
     if lines is None:
         return None
-    far, _near = flip_state.far_near_line(direction, lines[0], lines[1])
-    return far
+    return flip_state.far_near_line(direction, lines[0], lines[1])
+
+
+def m3_far_line(symbol: str, direction: int) -> Optional[float]:
+    """M3's far trail line only -- thin wrapper over far_near() for
+    callers (RM's SL basis, post-breakeven trailing) that only need the
+    far side."""
+    result = far_near(symbol, 3, direction)
+    return None if result is None else result[0]

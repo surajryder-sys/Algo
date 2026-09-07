@@ -110,6 +110,7 @@ v5s_trend_manager_state.json
 v5s_trend_manager_sl_state.json
 v5s_trend_manager_runtime_state.json
 v5s_trend_manager_watch_zone_state.json
+v5s_trend_manager_bridge_bar_flip_state.json
 v5s_reversal_manager_state.json
 v5s_reversal_manager_sl_state.json
 v5s_reversal_manager_levels_state.json

@@ -1,13 +1,21 @@
 """V5-Sentinel Trend Manager -- main loop.
 
-Data path: MT5 bar history (mt5.copy_rates_from_pos via v5_sentinel/
-rates.py) is PRIMARY for M5/M15/M3 alike -- no chart or indicator is
-required for this bot to run. As of 2026-09-04, the live MQL5 ATR Trail
-Dual bridge is additionally consulted (bridge.py) purely as a tie-breaker
-whenever it disagrees with that recompute (XAUUSD is volatile enough
-that this happens for real -- see bridge.py's docstring); the bridge
-itself is never a hard dependency, everything falls back to pure
-copy_rates the moment it's missing or stale. M5/ICT and M15/ICT
+Data path (rewritten 2026-09-07): M3/M5/M15 are all BRIDGE-ONLY now --
+user's explicit direction: "remove dependancy of copy rates for
+M5,M3,M1 -- follow exactly bridge, nothing else... not just for RM,
+even for TM, it should use bridge data." Still strictly bar-close-gated
+("strictly on bar close even on bridge data", not live/tick-driven) --
+see bridge_bar_flip.py for the mechanism: copy_rates is used ONLY to
+detect when a bar closed and what its close price was (no ATR/trail
+computation of our own at all), the bridge's CURRENT line values decide
+what that close confirms. If a timeframe's bridge data is missing/stale
+right when its bar closes, that bar is simply skipped (state stays as
+it was) -- no fallback, no guess -- and a sustained-staleness alert
+fires via the same @smcsecret_bot channel Reversal Manager uses. This
+replaces the old copy_rates-primary/bridge-tie-breaker design (2026-09-
+04) entirely, after that same drift issue (independent recompute vs.
+live chart divergence) kept needing patch after patch -- see bridge.py's
+OWN docstring for that history, now superseded. M5/ICT and M15/ICT
 (OB-formation bias) are NOT implemented yet; both parents are STR-only
 for now (see bias.py).
 
@@ -61,17 +69,35 @@ every decision is printed but nothing touches the account.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bias, bridge, broker, flip_state, rates, sl_manager, trade_manager, watch_zone
+from v5_sentinel import bias, bridge, broker, sl_manager, trade_manager, watch_zone
+from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
+from v5_sentinel.bridge_flip import StaleAlertTracker, far_near
 from v5_sentinel.config import Config, load_config
+from v5_sentinel.profit_alerts_telegram import send_message as _telegram_send
 
 _M3_MINUTES = 3
 _DIR_LABEL = {1: "BUY", -1: "SELL"}
+
+
+def _send_alert(text: str) -> None:
+    """Best-effort push to @smcsecret_bot -- same channel Reversal
+    Manager uses, never raises (a Telegram outage must never take the
+    trading loop down with it)."""
+    token, chat_id = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        print(f"[V5S-ALERT] (no bot configured) {text}")
+        return
+    try:
+        _telegram_send(token, chat_id, text)
+    except Exception as exc:  # noqa: BLE001 -- alerting must never break the loop
+        print(f"[V5S-ALERT] send failed: {exc!r} -- message was: {text}")
 
 
 class RuntimeState:
@@ -106,9 +132,9 @@ class RuntimeState:
         self._path.write_text(json.dumps({"last_m3_event_time": bar_time}))
 
 
-def _far_line_for(direction: int, m3_series: rates.TrailSeries) -> float:
-    far, _near = flip_state.far_near_line(direction, m3_series.trail1[-1], m3_series.trail2[-1])
-    return far
+def _far_line_for(symbol: str, direction: int) -> Optional[float]:
+    result = far_near(symbol, _M3_MINUTES, direction)
+    return None if result is None else result[0]
 
 
 def _parent_tag(parent: "bias.ParentBiasResult", direction: int) -> str:
@@ -182,8 +208,11 @@ def _action_comment(tag: str, action_code: str) -> str:
     return f"V5S-TM-{tag}-{action_code}"
 
 
-def _open_position(cfg: Config, direction: int, m3_series: rates.TrailSeries, comment: str) -> None:
-    far = _far_line_for(direction, m3_series)
+def _open_position(cfg: Config, direction: int, comment: str) -> None:
+    far = _far_line_for(cfg.symbol, direction)
+    if far is None:
+        print(f"[V5S-ENTRY] M3 bridge stale/missing -- cannot compute SL, skipping {_DIR_LABEL[direction]} ({comment})")
+        return
     sl = far - cfg.sl_buffer if direction == 1 else far + cfg.sl_buffer
 
     print(f"[V5S-ENTRY] {_DIR_LABEL[direction]} ({comment}) far_line={far:.3f} sl={sl:.3f}")
@@ -218,8 +247,7 @@ def _close_position(cfg: Config, position, action_label: str, tag: str, action_c
     return True
 
 
-def _apply_signal(cfg: Config, position, new_dir: int, tag: str, m3_series: rates.TrailSeries,
-                  tm_mgr: trade_manager.TradeManager):
+def _apply_signal(cfg: Config, position, new_dir: int, tag: str, tm_mgr: trade_manager.TradeManager):
     """Shared position-lifecycle branching -- used by BOTH a normal valid
     M3 event and a watch-zone-driven signal (2026-09-07), so the two
     trigger sources behave identically once a direction+tag is decided:
@@ -229,21 +257,21 @@ def _apply_signal(cfg: Config, position, new_dir: int, tag: str, m3_series: rate
     Returns the resulting position (re-queried after any broker action)."""
     comment = _comment_for_tag(tag)
     if position is None:
-        _open_position(cfg, new_dir, m3_series, comment)
+        _open_position(cfg, new_dir, comment)
         positions = broker.get_positions(cfg.symbol, cfg.magic_number)
         return positions[0] if positions else None
 
     pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     if new_dir != pos_direction:
         if _close_position(cfg, position, "SQOFF", tag, "SQ"):
-            _open_position(cfg, new_dir, m3_series, comment)
+            _open_position(cfg, new_dir, comment)
             positions = broker.get_positions(cfg.symbol, cfg.magic_number)
             return positions[0] if positions else None
         return position
 
     if tm_mgr.is_partially_cut(position.ticket):
         if _close_position(cfg, position, "REFRESH", tag, "RF"):
-            _open_position(cfg, new_dir, m3_series, comment)
+            _open_position(cfg, new_dir, comment)
             positions = broker.get_positions(cfg.symbol, cfg.magic_number)
             return positions[0] if positions else None
         return position
@@ -251,11 +279,14 @@ def _apply_signal(cfg: Config, position, new_dir: int, tag: str, m3_series: rate
     return position  # same direction, still full size -- nothing to refresh
 
 
-def _run_sl_manager(cfg: Config, mgr: sl_manager.SLManager, position, m3_series: rates.TrailSeries) -> None:
+def _run_sl_manager(cfg: Config, mgr: sl_manager.SLManager, position) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = bid if direction == 1 else ask  # the side that matters for "favor" is the closing side
-    far = _far_line_for(direction, m3_series)
+    far = _far_line_for(cfg.symbol, direction)
+    if far is None:
+        print("[V5S-SL] M3 bridge stale/missing -- skipping SL update this cycle")
+        return
     current_sl = position.sl if position.sl else None
 
     proposed = mgr.compute(position.ticket, direction, position.price_open, current_price, current_sl, far)
@@ -308,8 +339,7 @@ def _run_trade_manager(cfg: Config, mgr: trade_manager.TradeManager, position) -
 
 
 def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: "bias.ParentBiasResult",
-                      fs_m3: "flip_state.FlipStateResult", m5_series: Optional[rates.TrailSeries],
-                      m15_series: Optional[rates.TrailSeries]) -> Optional[tuple[int, str]]:
+                      fs_m3) -> Optional[tuple[int, str]]:
     """Runs the watch-zone state machine for one cycle -- see
     watch_zone.py for the full design. Returns (direction, tag) if a
     watch-zone-driven trade should fire THIS cycle, else None. Arming a
@@ -354,10 +384,10 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
     zone = wz_store.zone  # re-read -- set_pending() above may have just changed it
     if zone is not None and zone.pending is not None:
         p = zone.pending
-        parent_series = m5_series if p.parent_tf_code == "5" else m15_series
-        if (parent_series is not None and parent_series.trail1[-1] is not None
-                and parent_series.trail2[-1] is not None):
-            _far, near = flip_state.far_near_line(zone.direction, parent_series.trail1[-1], parent_series.trail2[-1])
+        parent_tf = 5 if p.parent_tf_code == "5" else 15
+        result = far_near(cfg.symbol, parent_tf, zone.direction)
+        if result is not None:
+            _far, near = result
             if zone.direction == 1:
                 target = p.anchor_close - watch_zone.PULLBACK_RETRACE_FRACTION * (p.anchor_close - near)
             else:
@@ -375,25 +405,24 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
     return None
 
 
-def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager,
-            runtime: RuntimeState, wz_store: watch_zone.WatchZoneStore) -> None:
-    parent = bias.compute_parent_bias(cfg.symbol)
-    m3_series = rates.read_trail_series(cfg.symbol, _M3_MINUTES)
-    if parent is None or m3_series is None:
-        print("[V5S] waiting for enough bar history (parent bias / M3 series unavailable)")
-        return
-    fs_m3 = flip_state.compute(m3_series)
-    if fs_m3 is None:
-        print("[V5S] waiting for enough M3 bar history for flip_state")
-        return
-    fs_m3 = bridge.reconcile(fs_m3, m3_series)
+def _check_stale(cfg: Config, stale_tracker: StaleAlertTracker) -> None:
+    for tf in (3, 5, 15):
+        msg = stale_tracker.check(tf, bridge.read_lines(cfg.symbol, tf) is not None)
+        if msg is not None:
+            print(msg)
+            _send_alert(msg)
 
-    # Needed for the watch-zone's parent-confirmation + pullback-target
-    # calc (2026-09-07) -- parent.m5/parent.m15 already carry the
-    # FlipStateResult, but the pullback target needs each parent's own
-    # raw trail1/trail2 values too, which only the series itself has.
-    m5_series = rates.read_trail_series(cfg.symbol, 5)
-    m15_series = rates.read_trail_series(cfg.symbol, 15)
+
+def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager,
+            runtime: RuntimeState, wz_store: watch_zone.WatchZoneStore, tracker: BridgeBarFlipTracker,
+            stale_tracker: StaleAlertTracker) -> None:
+    _check_stale(cfg, stale_tracker)
+
+    parent = bias.compute_parent_bias(tracker, cfg.symbol)
+    fs_m3 = tracker.update(cfg.symbol, _M3_MINUTES)
+    if parent is None or fs_m3 is None:
+        print("[V5S] waiting for enough bar history (parent bias / M3 state unavailable)")
+        return
 
     positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     position = positions[0] if positions else None  # one position at a time, enforced by construction below
@@ -418,7 +447,7 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
 
         if valid:
             new_event_tag = _tag(parent, new_dir, label)
-            position = _apply_signal(cfg, position, new_dir, new_event_tag, m3_series, tm_mgr)
+            position = _apply_signal(cfg, position, new_dir, new_event_tag, tm_mgr)
         elif label == "FLIP":
             # Invalid FLIP (not TRAP_RESOLVED, see watch_zone.py's own
             # docstring for why that's excluded) -- 2026-09-07: park it in
@@ -428,13 +457,13 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
             print(f"[V5S-WATCHZONE] armed {_DIR_LABEL[new_dir]} @ {fs_m3.last_close:.3f} (parent disagrees)")
         # else: invalid TRAP_RESOLVED -- leave any open position alone, it waits on its own SL (unchanged)
 
-    wz_signal = _check_watch_zone(cfg, wz_store, parent, fs_m3, m5_series, m15_series)
+    wz_signal = _check_watch_zone(cfg, wz_store, parent, fs_m3)
     if wz_signal is not None:
         wz_dir, wz_tag = wz_signal
-        position = _apply_signal(cfg, position, wz_dir, wz_tag, m3_series, tm_mgr)
+        position = _apply_signal(cfg, position, wz_dir, wz_tag, tm_mgr)
 
     if position is not None:
-        _run_sl_manager(cfg, sl_mgr, position, m3_series)
+        _run_sl_manager(cfg, sl_mgr, position)
         _run_trade_manager(cfg, tm_mgr, position)
 
 
@@ -449,11 +478,13 @@ def main() -> None:
                                         cfg.partial2_trigger_points, cfg.partial2_fraction)
     runtime = RuntimeState(cfg.runtime_state_file)
     wz_store = watch_zone.WatchZoneStore(cfg.watch_zone_state_file)
+    tracker = BridgeBarFlipTracker(cfg.bridge_bar_flip_state_file)
+    stale_tracker = StaleAlertTracker()
 
     try:
         while True:
             try:
-                run_once(cfg, sl_mgr, tm_mgr, runtime, wz_store)
+                run_once(cfg, sl_mgr, tm_mgr, runtime, wz_store, tracker, stale_tracker)
             except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
                 print(f"[V5S] cycle error: {exc!r}")
             time.sleep(cfg.poll_seconds)
