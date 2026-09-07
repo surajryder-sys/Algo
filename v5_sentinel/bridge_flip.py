@@ -1,14 +1,36 @@
-"""Bridge-only flip detection for the STR Reversal Manager's M3/M1 LTF
-confirmation triggers -- confirmed 2026-09-07: "for reversal confirmation
-of LTF, dont refer LTF signal from copyrates, check on live data via
-bridge only... flips to be taken from bridge data, not M3/M5 bullish
-candles." So: M3 ATR flip and M1 flip now read the live MQL5 bridge
-ONLY (no copy_rates fallback for these two triggers specifically) --
-M5/M3 bullish-candle triggers are UNCHANGED, still copy_rates, since the
-bridge publishes no open/close at all (confirmed by inspecting the actual
-JSON schema: symbol/timeframe_minutes/updated/line1{trail_stop,trend,
-event_time}/line2{...}/structure/structure_event_time -- no OHLC), so
-there's no bridge equivalent for a candle-color check.
+"""Bridge-ONLY flip detection for the STR Reversal Manager's M3/M1 LTF
+confirmation triggers. Originally built bridge-first/copy_rates-fallback
+(2026-09-07 morning), then changed to bridge-only, no fallback at all,
+same day: a live incident (H4/3F SELL immediately reversed into H8/3F
+BUY just 9 seconds later -- impossible for a genuine M3 flip, bars close
+every 3 REAL minutes) exposed a real design flaw in the fallback --
+BridgeFlipState (this file) and the old copy_rates path
+(flip_state.event_just_happened()) used completely different edge-
+detection logic with no shared dedup between them. If the system ever
+switched sources mid-stream (bridge crossing the staleness cutoff right
+at the boundary), a stale-but-still-"just happened" bar on one path
+could re-trigger independently of the other path's own state. Going
+bridge-only removes that whole class of bug by construction, whether or
+not this exact incident was that specific mechanism.
+
+User's own words (2026-09-07): "remove dependancy of copy rates for
+M5,M3,M1 -- follow exactly bridge, nothing else. if any data is stale on
+bridge for more than some specified time, simple send message saying
+data is stale, so i can manually check on chart, simple." So: no
+fallback, no guessing -- StaleAlertTracker below fires an alert once a
+timeframe's bridge data has been stale/missing for longer than
+STALE_ALERT_THRESHOLD_SECONDS, and re-arms (can alert again) once fresh
+data returns. M5 isn't listed here because Reversal Manager doesn't use
+an M5 signal at all any more (candle triggers were removed the same
+day) -- nothing to monitor there for this bot.
+
+NOTE on scope: this is about SIGNAL detection (the flip itself) and the
+M3 far-line SL basis (m3_far_line() below, also switched to bridge-only
+for consistency). M1's swing-low/high SL basis is UNCHANGED, still
+copy_rates -- the bridge publishes no OHLC at all (confirmed against the
+actual JSON schema: symbol/timeframe_minutes/updated/line1{trail_stop,
+trend,event_time}/line2{...}/structure/structure_event_time), so there
+is no bridge alternative for real bar highs/lows to fall back to.
 
 Direction is computed geometrically -- live price (mid of bid/ask)
 against the bridge's own raw line1/line2.trail_stop VALUES, the exact
@@ -19,22 +41,19 @@ docstring for the 2026-09-04 false-positive this avoids repeating).
 
 A "flip" is an EDGE -- the bridge-implied direction actually CHANGING
 from what was last recorded for that timeframe -- not merely "currently
-reads bullish/bearish" (the same event-vs-state distinction flip_state.py
-draws between a fresh FLIP and an already-settled confirmed state).
-State is persisted per timeframe so a bot restart doesn't rediscover the
-current direction as a brand new "flip".
-
-Staleness/ambiguity both read as "nothing to report" (None), same
-fallback philosophy as bridge.py's reconcile() -- no live/reliable data
-means no signal, never a guess.
+reads bullish/bearish". State is persisted per timeframe so a bot
+restart doesn't rediscover the current direction as a brand new "flip".
 """
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Optional
 
-from v5_sentinel import bridge
+from v5_sentinel import bridge, flip_state
+
+STALE_ALERT_THRESHOLD_SECONDS = 60.0  # sustained staleness, not a momentary blip, before alerting
 
 
 class BridgeFlipState:
@@ -78,3 +97,43 @@ class BridgeFlipState:
             self._state[tf_minutes] = direction
             self._save()
         return direction if (prev is not None and prev != direction) else None
+
+
+class StaleAlertTracker:
+    """Tracks how long each timeframe's bridge data has been continuously
+    stale/missing (in-memory only -- a restart re-arming this is fine,
+    it just means one fresh 60s grace period again). Fires an alert
+    message once past STALE_ALERT_THRESHOLD_SECONDS, ONCE per staleness
+    episode (not every cycle -- that would spam), and re-arms the moment
+    fresh data returns so a LATER staleness episode alerts again."""
+
+    def __init__(self):
+        self._stale_since: dict[int, float] = {}
+        self._alerted: dict[int, bool] = {}
+
+    def check(self, tf_minutes: int, available: bool) -> Optional[str]:
+        if available:
+            self._stale_since.pop(tf_minutes, None)
+            self._alerted.pop(tf_minutes, None)
+            return None
+
+        now = time.time()
+        since = self._stale_since.setdefault(tf_minutes, now)
+        if not self._alerted.get(tf_minutes) and (now - since) > STALE_ALERT_THRESHOLD_SECONDS:
+            self._alerted[tf_minutes] = True
+            return (f"[V5S-STR-ALERT] M{tf_minutes} bridge data has been stale/missing for over "
+                   f"{STALE_ALERT_THRESHOLD_SECONDS:.0f}s -- please check the M{tf_minutes} chart manually.")
+        return None
+
+
+def m3_far_line(symbol: str, direction: int) -> Optional[float]:
+    """M3's far trail line, sourced from the bridge's own raw line
+    values -- the SL basis for both the "3F" entry trigger and, in
+    reversal_main.py/main.py, post-breakeven trailing. Bridge-only, no
+    copy_rates fallback -- returns None if the bridge is missing/stale,
+    which the caller must treat as "skip this cycle", not a guess."""
+    lines = bridge.read_lines(symbol, 3)
+    if lines is None:
+        return None
+    far, _near = flip_state.far_near_line(direction, lines[0], lines[1])
+    return far

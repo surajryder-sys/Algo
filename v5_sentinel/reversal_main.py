@@ -14,17 +14,35 @@ Summary of the full rule set implemented here:
   - A level is ARMED the moment LIVE price (bid for support, ask for
     resistance) touches it, and stays armed across cycles until traded or
     its parent HTF's own character changes (reversal_entry.scan_touches).
-  - Confirmation + entry (reversal_entry.find_signals): M5/M3 bullish/
-    bearish candle checks are closed-bar copy_rates; M3/M1 flip checks
-    read the LIVE BRIDGE ONLY (bridge_flip.py), no copy_rates fallback --
-    changed 2026-09-07 at the user's request, since the bridge's own
-    continuously-running lines are considered more reliable for LTF flip
-    detection than an independent recompute (same reasoning as Trend
-    Manager's own M3 bridge tie-breaker, just as the sole source here
-    instead of a disagreement-only override). Path 1 gated (candle
-    checks vs. that bar's own close; M1 flip vs. live price) or Path 2
-    privileged (M3 ATR flip, fires even on the wrong side of the level,
-    as long as that HTF's character hasn't yet changed).
+  - Confirmation + entry (reversal_entry.find_signals): TWO trigger types
+    only, both flip-based, both BRIDGE-ONLY -- no copy_rates fallback at
+    all. M5/M3 candle-color triggers ("5C"/"3C") were REMOVED entirely
+    2026-09-07 after a real live incident: H4 sitting in TRAP (support+
+    resistance both active, both touched in a tight consolidation) let
+    candle triggers on both sides fire repeatedly against each other for
+    ~55 minutes, ~150 trades, net -$62 on that timeframe alone. The
+    bridge-first/copy_rates-fallback design that replaced them was ITSELF
+    then found to have a real flaw the same day: an M3/H4 SELL reversed
+    into an M3/H8 BUY 9 seconds later -- impossible for a genuine M3
+    flip (bars close every 3 real minutes) -- because the bridge path and
+    the copy_rates fallback path used different edge-detection logic
+    with no shared dedup, so switching sources mid-stream could double-
+    fire. User's own words: "remove dependancy of copy rates for
+    M5,M3,M1 -- follow exactly bridge, nothing else. if any data is
+    stale on bridge for more than some specified time, simple send
+    message saying data is stale." So now: if a timeframe's bridge data
+    is missing/stale, that trigger simply produces no signal -- no
+    fallback, no guess -- and bridge_flip.StaleAlertTracker fires an
+    alert once that staleness has been SUSTAINED past 60s (not a
+    momentary blip), once per staleness episode. Path 1 gated (M1 flip
+    vs. live price, below resistance for a sell, above support for a
+    buy) or Path 2 privileged (M3 ATR flip, fires even on the wrong side
+    of the level, as long as that HTF's character hasn't yet changed).
+    The M3 far-line SL basis (bridge_flip.m3_far_line) was also switched
+    to bridge-only the same day, for consistency -- M1's swing-low/high
+    SL basis stays on copy_rates, unavoidably (the bridge publishes no
+    OHLC at all, so there's no bridge alternative for real bar highs/
+    lows).
   - One trade per flip: each level, once traded, is skipped until its
     parent HTF's own character changes (a fresh flip/trap-resolve there).
   - Position lifecycle, run once per qualifying signal per cycle (in
@@ -40,14 +58,24 @@ Summary of the full rule set implemented here:
     just under RM's own magic number/state files -- confirmed 2026-09-07
     ("sl manager exactly works same...trade manager also works
     same...partial booking also takes place exactly same"). Trailing
-    always follows M3's far line once past breakeven, regardless of
-    which timeframe/trigger opened the trade -- confirmed 2026-09-07.
-  - Comments: "V5S-STR-{HTF}/{trigger}" on entry (e.g. "V5S-STR-H1/3C"),
-    "-P1"/"-P2"/"-SQ"/"-RF" appended for partials/square-off/refresh.
-    STR (not RM) is the literal prefix used, to distinguish this
-    Structure-based sub-component from the later OB-based ICT one
-    (confirmed 2026-09-07) -- both will share Reversal Manager's magic
-    number space conceptually but this file only ever writes STR trades.
+    always follows M3's far line (bridge-only, see above) once past
+    breakeven, regardless of which timeframe/trigger opened the trade --
+    confirmed 2026-09-07. If M3's bridge is stale when a trailing update
+    would otherwise fire, that cycle's SL update is skipped rather than
+    guessed at.
+  - Comments: "V5S-RM-STR-{HTF}/{trigger}" on entry (e.g.
+    "V5S-RM-STR-H1/3F"), "-P1"/"-P2"/"-SQ"/"-RF" appended for partials/
+    square-off/refresh. RM-STR (not just STR) is the literal prefix --
+    briefly dropped the "RM-" 2026-09-07 to save space while the tag
+    still carried a trailing timestamp, then added back the same day
+    once that timestamp was removed elsewhere freed up plenty of room,
+    since the later OB-based ICT sub-component needs "RM-ICT-" as its
+    own distinct prefix to actually differentiate from this one (both
+    share Reversal Manager's magic number space conceptually, but only
+    the comment prefix tells them apart at a glance). _extract_tag()
+    still accepts the older bare "V5S-STR-{tag}" shape too, for any
+    position opened before this change whose entry comment is already
+    frozen on the broker side.
   - Alerts: a qualifying-but-not-acted-on signal (the "ignore" case above)
     pushes to the existing @smcsecret_bot (TELEGRAM_BOT_TOKEN/
     TELEGRAM_CHAT_ID in .env, confirmed 2026-09-07) -- best-effort, never
@@ -66,12 +94,12 @@ import time
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import broker, flip_state, htf_levels, rates, reversal_entry, sl_manager, trade_manager
-from v5_sentinel.bridge_flip import BridgeFlipState
+from v5_sentinel import bridge, broker, htf_levels, rates, reversal_entry, sl_manager, trade_manager
+from v5_sentinel.bridge_flip import BridgeFlipState, StaleAlertTracker, m3_far_line
 from v5_sentinel.profit_alerts_telegram import send_message as _telegram_send
 from v5_sentinel.reversal_config import RMConfig, load_config
 
-_M1_MINUTES, _M3_MINUTES, _M5_MINUTES = 1, 3, 5
+_M1_MINUTES = 1
 _DIR_LABEL = {1: "BUY", -1: "SELL"}
 
 
@@ -80,21 +108,30 @@ def _tag(sig: "reversal_entry.ReversalSignal") -> str:
 
 
 def _extract_tag(comment: str) -> str:
-    """Mirrors main.py's _extract_tag() but for the "V5S-STR-{tag}-..."
+    """Mirrors main.py's _extract_tag() but for the "V5S-RM-STR-{tag}-..."
     shape -- used to carry an entry's own tag forward onto its later
-    partial-booking comments."""
+    partial-booking comments. Joins everything after the fixed prefix
+    (not just one part) so a dash-containing tag survives intact, same
+    fix as main.py's own _extract_tag(). Also accepts the older
+    "V5S-STR-{tag}" shape (pre-2026-09-07, before "RM-" was added back
+    in) for backward compatibility with positions opened before this
+    change -- their entry comment is frozen on the broker side and can
+    never be rewritten, so their own later P1/P2 comments still need to
+    resolve the right tag."""
     parts = comment.split("-") if comment else []
+    if len(parts) >= 4 and parts[0] == "V5S" and parts[1] == "RM" and parts[2] == "STR":
+        return "-".join(parts[3:])
     if len(parts) >= 3 and parts[0] == "V5S" and parts[1] == "STR":
-        return parts[2]
+        return "-".join(parts[2:])
     return "UNK"
 
 
 def _entry_comment(tag: str) -> str:
-    return f"V5S-STR-{tag}"
+    return f"V5S-RM-STR-{tag}"
 
 
 def _action_comment(tag: str, action_code: str) -> str:
-    return f"V5S-STR-{tag}-{action_code}"
+    return f"V5S-RM-STR-{tag}-{action_code}"
 
 
 def _send_alert(text: str) -> None:
@@ -110,23 +147,29 @@ def _send_alert(text: str) -> None:
         print(f"[V5S-STR-ALERT] send failed: {exc!r} -- message was: {text}")
 
 
-def _far_line_for(direction: int, m3_series: rates.TrailSeries) -> float:
-    far, _near = flip_state.far_near_line(direction, m3_series.trail1[-1], m3_series.trail2[-1])
-    return far
 
 
-def _open_position(cfg: RMConfig, sig: "reversal_entry.ReversalSignal", tag: str) -> None:
+def _open_position(cfg: RMConfig, sig: "reversal_entry.ReversalSignal", tag: str) -> bool:
+    """Returns True if the entry actually went through (filled, or
+    enable_trading is False so it's decision-only and conceptually
+    "accepted") -- False only on a genuine order rejection while live.
+    2026-09-07 (found live, see htf_levels.py's own bugfix note): the
+    caller must NOT mark a level traded on a False return -- a failed
+    order (e.g. retcode 10044 "session closed" right at market reopen)
+    used to consume "one trade per flip" eligibility anyway, silently
+    dropping a genuinely valid setup that never actually got a position."""
     comment = _entry_comment(tag)
     print(f"[V5S-STR-ENTRY] {_DIR_LABEL[sig.direction]} ({tag}) level={sig.level_value:.3f} sl={sig.sl:.3f}")
     if not cfg.enable_trading:
         print("[V5S-STR-ENTRY] enable_trading is false -- decision only, no order sent")
-        return
+        return True
     result = broker.send_market_order(cfg.symbol, sig.direction, cfg.lots, sig.sl, cfg.magic_number,
                                       cfg.deviation_points, comment)
     if not result.ok:
         print(f"[V5S-STR-ENTRY] order_send failed: retcode={result.retcode} comment={result.comment}")
-    else:
-        print(f"[V5S-STR-ENTRY] filled, ticket={result.ticket}")
+        return False
+    print(f"[V5S-STR-ENTRY] filled, ticket={result.ticket}")
+    return True
 
 
 def _close_position(cfg: RMConfig, position, action_label: str, tag: str, action_code: str) -> bool:
@@ -142,11 +185,14 @@ def _close_position(cfg: RMConfig, position, action_label: str, tag: str, action
     return True
 
 
-def _run_sl_manager(cfg: RMConfig, mgr: sl_manager.SLManager, position, m3_series: rates.TrailSeries) -> None:
+def _run_sl_manager(cfg: RMConfig, mgr: sl_manager.SLManager, position) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = bid if direction == 1 else ask
-    far = _far_line_for(direction, m3_series)
+    far = m3_far_line(cfg.symbol, direction)
+    if far is None:
+        print("[V5S-STR-SL] M3 bridge stale/missing -- skipping SL update this cycle")
+        return
     current_sl = position.sl if position.sl else None
 
     proposed = mgr.compute(position.ticket, direction, position.price_open, current_price, current_sl, far)
@@ -194,27 +240,29 @@ def _process_signal(cfg: RMConfig, sig: "reversal_entry.ReversalSignal", store: 
                     tm_mgr: trade_manager.TradeManager) -> None:
     """Acts on ONE signal against whatever position is ACTUALLY open right
     now (re-queried, so an earlier signal's own action this same cycle is
-    visible here) -- always ends by marking the level traded, and either
-    performs a real trade action or sends an alert, never a silent no-op."""
+    visible here). Only marks the level traded once the entry actually
+    went through (or, for the "already in a full-size trade" case, always
+    -- no order is even attempted there) -- 2026-09-07, found live: a
+    failed order_send used to consume eligibility anyway, silently
+    dropping a genuinely valid setup that never got a position (see
+    _open_position's own docstring)."""
     tag = _tag(sig)
     positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     position = positions[0] if positions else None
 
     if position is None:
-        _open_position(cfg, sig, tag)
-        store.mark_traded(sig.timeframe_minutes, sig.direction)
+        if _open_position(cfg, sig, tag):
+            store.mark_traded(sig.timeframe_minutes, sig.direction)
         return
 
     pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
 
     if sig.direction != pos_direction:
-        if _close_position(cfg, position, "SQOFF", tag, "SQ"):
-            _open_position(cfg, sig, tag)
-        store.mark_traded(sig.timeframe_minutes, sig.direction)
+        if _close_position(cfg, position, "SQOFF", tag, "SQ") and _open_position(cfg, sig, tag):
+            store.mark_traded(sig.timeframe_minutes, sig.direction)
     elif tm_mgr.is_partially_cut(position.ticket):
-        if _close_position(cfg, position, "REFRESH", tag, "RF"):
-            _open_position(cfg, sig, tag)
-        store.mark_traded(sig.timeframe_minutes, sig.direction)
+        if _close_position(cfg, position, "REFRESH", tag, "RF") and _open_position(cfg, sig, tag):
+            store.mark_traded(sig.timeframe_minutes, sig.direction)
     else:
         store.mark_traded(sig.timeframe_minutes, sig.direction)
         msg = (f"[V5S-STR] {tag} qualifies ({_DIR_LABEL[sig.direction]}) but a full-size {_DIR_LABEL[pos_direction]} "
@@ -223,22 +271,28 @@ def _process_signal(cfg: RMConfig, sig: "reversal_entry.ReversalSignal", store: 
         _send_alert(msg)
 
 
+def _check_stale(cfg: RMConfig, stale_tracker: StaleAlertTracker) -> None:
+    """M3/M1 only -- M5 isn't used for any RM signal any more (candle
+    triggers were removed), nothing to monitor there for this bot."""
+    for tf in (3, 1):
+        msg = stale_tracker.check(tf, bridge.read_lines(cfg.symbol, tf) is not None)
+        if msg is not None:
+            print(msg)
+            _send_alert(msg)
+
+
 def run_once(cfg: RMConfig, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager,
-            store: htf_levels.LevelEligibilityStore, bridge_flip: BridgeFlipState) -> None:
+            store: htf_levels.LevelEligibilityStore, bridge_flip: BridgeFlipState,
+            stale_tracker: StaleAlertTracker) -> None:
     htf_states = htf_levels.compute_all_htf_states(cfg.symbol)
     bid, ask = broker.get_tick_price(cfg.symbol)
     reversal_entry.scan_touches(htf_states, store, bid, ask)
+    _check_stale(cfg, stale_tracker)
 
-    m5_series = rates.read_trail_series(cfg.symbol, _M5_MINUTES)
-    m3_series = rates.read_trail_series(cfg.symbol, _M3_MINUTES)
     m1_series = rates.read_trail_series(cfg.symbol, _M1_MINUTES)
-    if m3_series is None:
-        print("[V5S-STR] waiting for enough M3 bar history")
-        return
 
     signals = reversal_entry.find_signals(cfg.symbol, htf_states, store, bridge_flip, bid, ask,
-                                          m5_series, m3_series, m1_series,
-                                          cfg.sl_buffer, cfg.swing_lookback)
+                                          m1_series, cfg.sl_buffer, cfg.swing_lookback)
 
     positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     sl_mgr.prune({p.ticket for p in positions})
@@ -250,7 +304,7 @@ def run_once(cfg: RMConfig, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.
     positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     position = positions[0] if positions else None
     if position is not None:
-        _run_sl_manager(cfg, sl_mgr, position, m3_series)
+        _run_sl_manager(cfg, sl_mgr, position)
         _run_trade_manager(cfg, tm_mgr, position)
 
 
@@ -265,11 +319,12 @@ def main() -> None:
                                         cfg.partial2_trigger_points, cfg.partial2_fraction)
     store = htf_levels.LevelEligibilityStore(cfg.levels_state_file)
     bridge_flip = BridgeFlipState(cfg.bridge_flip_state_file)
+    stale_tracker = StaleAlertTracker()
 
     try:
         while True:
             try:
-                run_once(cfg, sl_mgr, tm_mgr, store, bridge_flip)
+                run_once(cfg, sl_mgr, tm_mgr, store, bridge_flip, stale_tracker)
             except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
                 print(f"[V5S-STR] cycle error: {exc!r}")
             time.sleep(cfg.poll_seconds)

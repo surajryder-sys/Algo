@@ -134,14 +134,25 @@ def compute_all_htf_states(symbol: str, **kwargs) -> dict[int, Optional[HTFState
 
 class LevelEligibilityStore:
     """Persists, per HTF timeframe, the character_event_time last seen,
-    whether that character has already been traded (and in which
-    direction), and which of its 2 individual lines is currently ARMED by
-    a live-price touch -- see module docstring's "only one trade per
-    flip" section and reversal_entry.py's "touch is live price,
-    confirmation is candle close" design (confirmed 2026-09-07). A bot
-    restart reloads this from disk rather than reopening eligibility that
-    was already consumed mid-session, or forgetting a touch that armed a
-    level before the restart."""
+    which direction(s) have already been traded, and which of its 2
+    individual lines is currently ARMED by a live-price touch -- see
+    module docstring's "only one trade per flip" section and
+    reversal_entry.py's "touch is live price, confirmation is candle
+    close" design (confirmed 2026-09-07). A bot restart reloads this from
+    disk rather than reopening eligibility that was already consumed
+    mid-session, or forgetting a touch that armed a level before the
+    restart.
+
+    BUG FIXED 2026-09-07, found live: "traded_direction" used to be a
+    single scalar, not a set -- in a TRAP character (support AND
+    resistance both active at once, both commonly touched together in a
+    tight consolidation), marking one direction traded silently
+    UN-marked the other. That let the two directions repeatedly re-fire
+    against each other -- confirmed live on H4 (07:24-08:19 IST, ~150
+    trades, net -$62.21 on that timeframe alone) -- a real, continuous
+    BUY<->SELL flip-flop, not a hypothetical. Now "traded_directions" is
+    a list that both directions get appended to independently, so
+    marking one never clears the other."""
 
     def __init__(self, path: str):
         self._path = Path(path)
@@ -161,9 +172,18 @@ class LevelEligibilityStore:
         self._path.write_text(json.dumps(self._state))
 
     def _entry(self, tf_minutes: int) -> dict:
-        return self._state.setdefault(
-            tf_minutes, {"event_time": None, "traded_direction": None, "touched_lines": []}
-        )
+        """setdefault() only injects the new-schema default for a
+        timeframe key that doesn't exist AT ALL yet -- an entry already
+        persisted under the OLD schema (pre-2026-09-07, "traded_direction"
+        singular) survives a restart with no "traded_directions" key at
+        all, and would KeyError the moment mark_traded/mark_touched index
+        it directly (confirmed live immediately after this same fix went
+        in). The two setdefault() calls below backfill it lazily instead
+        of requiring a clean wipe of the whole state file."""
+        entry = self._state.setdefault(tf_minutes, {"event_time": None, "traded_directions": [], "touched_lines": []})
+        entry.setdefault("traded_directions", [])
+        entry.setdefault("touched_lines", [])
+        return entry
 
     def sync(self, tf_minutes: int, character_event_time: int) -> bool:
         """Call once per cycle with a timeframe's CURRENT
@@ -175,7 +195,7 @@ class LevelEligibilityStore:
         entry = self._state.get(tf_minutes)
         if entry is None or entry.get("event_time") != character_event_time:
             self._state[tf_minutes] = {
-                "event_time": character_event_time, "traded_direction": None, "touched_lines": [],
+                "event_time": character_event_time, "traded_directions": [], "touched_lines": [],
             }
             self._save()
             return True
@@ -183,11 +203,12 @@ class LevelEligibilityStore:
 
     def is_traded(self, tf_minutes: int, direction: int) -> bool:
         entry = self._state.get(tf_minutes)
-        return entry is not None and entry.get("traded_direction") == direction
+        return entry is not None and direction in entry.get("traded_directions", [])
 
     def mark_traded(self, tf_minutes: int, direction: int) -> None:
         entry = self._entry(tf_minutes)
-        entry["traded_direction"] = direction
+        if direction not in entry["traded_directions"]:
+            entry["traded_directions"].append(direction)
         self._save()
 
     def mark_touched(self, tf_minutes: int, line_no: int) -> None:
