@@ -8,6 +8,21 @@ reaches a level's value, that level becomes ARMED (persisted in
 htf_levels.LevelEligibilityStore, survives across cycles) until it's
 either traded or its parent HTF's own character changes.
 
+GENUINE PULLBACK-TOUCH vs. TOUCH-BY-CHARACTER-CHANGE (confirmed 2026-09-07,
+found live -- user report: "price really didnt go and touch 4384 ... the
+previous candle made a flip breaking the resistance"): these are NOT the
+same event. A genuine touch is live price returning to test an
+ALREADY-ESTABLISHED level from the correct side (e.g. price that was
+above a resistance dips back down and taps it). A line's role can also
+flip (RESISTANCE<->SUPPORT) simply because price broke THROUGH it and the
+next closed bar relabels it relative to the new close -- that's the level
+being redefined out from under any old touch, not a fresh visit to it.
+LevelEligibilityStore.mark_touched()/is_touched() now key a touch to the
+(line_no, value, role) actually tested, not line_no alone, so a stale
+touch from before a role-flip can never be misread as validating whatever
+that same slot happens to mean now -- see htf_levels.py's mark_touched()
+docstring for the full mechanism.
+
 CONFIRMATION + ENTRY: ONE trigger only -- "3F", M3 ATR flip, PRIVILEGED
 (fires even with price on the WRONG side of the touched level, as long
 as that HTF's own character hasn't yet changed -- i.e. it hasn't itself
@@ -79,7 +94,7 @@ def scan_touches(htf_states: dict[int, Optional[HTFState]], store: LevelEligibil
             touch_price = bid if level.role == "SUPPORT" else ask
             reached = (touch_price <= level.value) if level.role == "SUPPORT" else (touch_price >= level.value)
             if reached:
-                store.mark_touched(tf, level.line_no)
+                store.mark_touched(tf, level.line_no, level.value, level.role)
 
 
 def find_signals(
@@ -112,7 +127,7 @@ def find_signals(
             direction = 1 if level.role == "SUPPORT" else -1
             if direction != m3_flip_dir:
                 continue
-            if store.is_traded(tf, direction) or not store.is_touched(tf, level.line_no):
+            if store.is_traded(tf, direction) or not store.is_touched(tf, level.line_no, level.value, level.role):
                 continue
 
             signals.append(ReversalSignal(direction=direction, timeframe_minutes=tf, line_no=level.line_no,

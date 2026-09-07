@@ -239,14 +239,50 @@ class LevelEligibilityStore:
             entry["traded_directions"].append(direction)
         self._save()
 
-    def mark_touched(self, tf_minutes: int, line_no: int) -> None:
-        """Arms one specific line -- live price has reached it. Persists
-        immediately so a restart doesn't lose an armed touch."""
-        entry = self._entry(tf_minutes)
-        if line_no not in entry["touched_lines"]:
-            entry["touched_lines"].append(line_no)
-            self._save()
+    _TOUCH_VALUE_TOLERANCE = 0.01  # float/recompute jitter only, not a real level move
 
-    def is_touched(self, tf_minutes: int, line_no: int) -> bool:
+    def mark_touched(self, tf_minutes: int, line_no: int, value: float, role: str) -> None:
+        """Arms one specific line -- live price has reached it. Persists
+        immediately so a restart doesn't lose an armed touch.
+
+        BUG FIXED 2026-09-07, found live (user report: "price really didnt
+        go and touch 4384 ... the previous candle made a flip breaking the
+        resistance"): this used to record only the line_no SLOT, not what
+        was actually touched. That slot's value/role can change on the very
+        next bar close WITHOUT the timeframe's own character_event_time
+        moving at all -- entering a trap (flip_state's `watching` branch)
+        never sets last_event, so a "partial flip" that crosses just the
+        near line re-labels that same line_no from RESISTANCE to SUPPORT
+        (or vice versa) with no eligibility reset. The old code then kept
+        reporting that line as "touched," but now attached to a brand new
+        value price never actually traded down/up to -- the touch and the
+        role-flip were being conflated as the same event when they aren't:
+        a GENUINE pullback touch tests an already-established level from
+        the correct side; a role just flipping because price broke THROUGH
+        a line is not that, it's the level being redefined out from under
+        the old touch. Now the (value, role) actually tested is stored
+        alongside line_no, and is_touched() below requires them to still
+        match the level's CURRENT value/role -- if the level moved on, the
+        old touch simply no longer counts, self-invalidating with no
+        separate reset step needed."""
+        entry = self._entry(tf_minutes)
+        for existing in entry["touched_lines"]:
+            if isinstance(existing, dict) and existing["line_no"] == line_no \
+                    and existing["role"] == role and abs(existing["value"] - value) < self._TOUCH_VALUE_TOLERANCE:
+                return  # already armed against this exact (line_no, value, role) -- nothing new to persist
+        entry["touched_lines"] = [e for e in entry["touched_lines"]
+                                   if not (isinstance(e, dict) and e["line_no"] == line_no) and not isinstance(e, int)]
+        entry["touched_lines"].append({"line_no": line_no, "value": value, "role": role})
+        self._save()
+
+    def is_touched(self, tf_minutes: int, line_no: int, value: float, role: str) -> bool:
         entry = self._state.get(tf_minutes)
-        return entry is not None and line_no in entry.get("touched_lines", [])
+        if entry is None:
+            return False
+        for existing in entry.get("touched_lines", []):
+            if not isinstance(existing, dict):
+                continue  # old-schema (bare int) entry -- treat as stale, not a match
+            if existing["line_no"] == line_no and existing["role"] == role \
+                    and abs(existing["value"] - value) < self._TOUCH_VALUE_TOLERANCE:
+                return True
+        return False
