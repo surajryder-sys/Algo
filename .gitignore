@@ -82,6 +82,16 @@ tv_scraper_zone_history.jsonl
 tv_scraper_xauusd_zone_history.jsonl
 tv_scraper_ethusd_zone_history.jsonl
 tv_scraper_usoil_ustec_zone_history.jsonl
+
+# v5_sentinel/tv_scraper -- ported 2026-09-07 from v3/tv_scraper (OB zones
+# only, no ATR -- see that module's own docstring)
+v5s_tv_scraper_profile/
+v5s_tv_scraper_zones.json
+v5s_tv_scraper_first_seen.json
+v5s_tv_scraper_retest.json
+v5s_tv_scraper_live.json
+v5s_tv_scraper_mitigation_track.json
+v5s_tv_scraper_zone_history.jsonl
 alert_manager_alerted_zones.json
 alert_manager_command_offset.json
 trend_manager_trade_state.json
