@@ -14,25 +14,32 @@ LevelEligibilityStore ("traded" state) -- alerts fire on every touch of
 a genuinely new value regardless of whether RM has already traded that
 level, they are not the same concept.
 
-A level's value only ever changes when its OWN timeframe's trail line
-actually moves (a new bar closing, or the ratchet catching up) -- not on
-every cycle -- so this naturally alerts once per distinct level value,
-any number of touches on the SAME value produce no further alerts, and a
-genuinely new value (even on the exact same timeframe+line slot) always
-gets its own fresh alert.
+DEDUP KEY FIXED 2026-09-07 (found live, same day -- "i received same
+alert twice, once per bar is fine"): originally deduped on the level's
+own float VALUE (within a small epsilon), but that value comes from the
+same path-dependent copy_rates recompute already documented elsewhere
+in this project as capable of tiny cycle-to-cycle jitter -- occasionally
+enough to exceed the epsilon and look like "a new level" when the
+underlying bar hadn't actually changed. Deduping on the timeframe's own
+last CLOSED BAR TIME instead (HTFState.last_time) is far more robust:
+that's a discrete integer that only changes when a real new bar closes,
+immune to float noise, and it naturally satisfies the original "new
+value = alert again" requirement too, since a level's value only ever
+actually changes on a bar close in the first place. "Once per bar" is
+the confirmed, simpler contract now -- even a bar that closes with the
+SAME value as before gets its own fresh alert if price touches it again,
+which the user confirmed is fine.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
 
 
 class CriticalAlertState:
-    def __init__(self, path: str, value_epsilon: float = 0.05):
+    def __init__(self, path: str):
         self._path = Path(path)
-        self._value_epsilon = value_epsilon
-        self._alerted: dict[str, float] = {}  # "{tf}:{line_no}" -> last alerted value
+        self._alerted: dict[str, int] = {}  # "{tf}:{line_no}" -> last alerted bar_time
         self._load()
 
     def _load(self) -> None:
@@ -50,13 +57,12 @@ class CriticalAlertState:
     def _key(tf_minutes: int, line_no: int) -> str:
         return f"{tf_minutes}:{line_no}"
 
-    def already_alerted(self, tf_minutes: int, line_no: int, value: float) -> bool:
-        """True if THIS same value (within value_epsilon, to absorb
-        float noise -- not a genuine level move) was already alerted for
-        this timeframe+line slot."""
-        prior = self._alerted.get(self._key(tf_minutes, line_no))
-        return prior is not None and abs(prior - value) <= self._value_epsilon
+    def already_alerted(self, tf_minutes: int, line_no: int, bar_time: int) -> bool:
+        """True if this timeframe+line slot was already alerted for THIS
+        exact closed bar -- immune to float jitter in the level's own
+        value, since bar_time only changes on a genuine new bar close."""
+        return self._alerted.get(self._key(tf_minutes, line_no)) == bar_time
 
-    def mark_alerted(self, tf_minutes: int, line_no: int, value: float) -> None:
-        self._alerted[self._key(tf_minutes, line_no)] = value
+    def mark_alerted(self, tf_minutes: int, line_no: int, bar_time: int) -> None:
+        self._alerted[self._key(tf_minutes, line_no)] = bar_time
         self._save()

@@ -10,14 +10,18 @@ of them -- independent of whether Reversal Manager has traded that
 level or not, this is a pure observation feed.
 
 Dedup rule (confirmed with the user, critical_alerts_state.py): ONE
-alert per level VALUE, not per touch -- price can touch the SAME level
-any number of times without a repeat alert. The moment that timeframe's
-own line VALUE actually changes (a new bar closing, the ratchet moving),
-it's treated as a genuinely different level and can alert again, even
-though it's still nominally "the same" support/resistance role on the
-same timeframe. Example given: "M30 support is at 4430... after a
-couple of hours M30 support is still valid, but has a new price value
-of 4435 -- then it becomes valid again."
+alert per level per CLOSED BAR ("once per bar is fine"), not per touch
+-- price can touch the same level any number of times within one bar
+without a repeat alert, but the moment that timeframe's own bar closes
+again, a fresh touch can alert again, whether or not the level's value
+actually moved. This was originally deduped on the level's own float
+VALUE instead, but that's fed by the same path-dependent copy_rates
+recompute already documented elsewhere as capable of tiny cycle-to-cycle
+jitter -- found live the same day ("i received same alert twice") when
+that jitter alone was enough to look like a new level. Bar-time dedup is
+immune to that and still satisfies the original ask ("M30 support at
+4430... a new price value of 4435 -- alerts again"), since a level's
+value only ever actually changes on a bar close in the first place.
 
 Run alongside critical_alerts_listener.py (separate process, handles
 subscriber approval commands -- see that module's own docstring for why
@@ -64,7 +68,7 @@ def run_once(cfg: Config, state: CriticalAlertState, subscribers: SubscriberStor
             reached = (touch_price <= level.value) if level.role == "SUPPORT" else (touch_price >= level.value)
             if not reached:
                 continue
-            if state.already_alerted(tf, level.line_no, level.value):
+            if state.already_alerted(tf, level.line_no, htf_state.last_time):
                 continue
 
             text = _format_alert(tf, level, touch_price)
@@ -81,7 +85,7 @@ def run_once(cfg: Config, state: CriticalAlertState, subscribers: SubscriberStor
                 # -- a partial-send failure retries the WHOLE level next
                 # cycle rather than risk silently skipping someone, same
                 # convention the old profit-alerts watcher used.
-                state.mark_alerted(tf, level.line_no, level.value)
+                state.mark_alerted(tf, level.line_no, htf_state.last_time)
                 name = htf_levels.TIMEFRAME_NAMES.get(tf, f"M{tf}")
                 print(f"[v5_sentinel.critical_alerts] sent alert: {cfg.symbol} {name} {level.role} "
                       f"@ {level.value:.3f} recipients={len(recipients)}")
@@ -93,7 +97,7 @@ def main() -> None:
         raise RuntimeError("CRITICAL_ALERTS_TELEGRAM_BOT_TOKEN / CRITICAL_ALERTS_TELEGRAM_CHAT_ID must be set in .env")
 
     mt5_price.connect(cfg)
-    state = CriticalAlertState(cfg.state_file, cfg.value_epsilon)
+    state = CriticalAlertState(cfg.state_file)
     subscribers = SubscriberStore(cfg.subscribers_file, cfg.owner_chat_id)
 
     print(f"[v5_sentinel.critical_alerts] watching {cfg.symbol} support/resistance touches "

@@ -33,7 +33,6 @@ class Config:
     owner_chat_id: str
     poll_seconds: float
     symbol: str
-    value_epsilon: float   # how much a level's value must move to count as "a new value", not float noise
     state_file: str
     subscribers_file: str
 
@@ -49,7 +48,6 @@ def load_config() -> Config:
         owner_chat_id=os.getenv("CRITICAL_ALERTS_TELEGRAM_CHAT_ID", ""),
         poll_seconds=float(os.getenv("V5S_CRITICAL_ALERTS_POLL_SECONDS", "5.0")),
         symbol=os.getenv("V5S_SYMBOL", "XAUUSD"),
-        value_epsilon=float(os.getenv("V5S_CRITICAL_ALERTS_VALUE_EPSILON", "0.05")),
         state_file=os.getenv("V5S_CRITICAL_ALERTS_STATE_FILE", "v5_sentinel_critical_alerts_state.json"),
         subscribers_file=os.getenv("V5S_CRITICAL_ALERTS_SUBSCRIBERS_FILE", "v5_sentinel_critical_alerts_subscribers.json"),
     )
