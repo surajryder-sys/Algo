@@ -56,6 +56,15 @@ Rules implemented here (full design recap):
     side) -> only refresh (square off leftover + reopen full size) if the
     current position has already been partially cut by Trade Manager;
     a still-full-size matching position has nothing to refresh.
+  - Ownership (added 2026-09-07, see _owner_timeframe()): once a
+    watch-zone trade is taken over by M5 or M15 (straight-fire or
+    pullback), that timeframe OWNS the resulting position for its whole
+    life -- SL trails THAT timeframe's own far line (not M3's), and only
+    THAT SAME timeframe's own fresh opposite-direction flip can close/
+    reverse it. M3 activity (and, symmetrically, the other of M5/M15) has
+    ZERO effect on an owned position while it's open -- see
+    _maybe_apply()'s gating. A normal M3-triggered position is unaffected,
+    still M3-owned as before.
   - Every cycle, regardless of the above: SL Manager and Trade Manager
     both run against whatever position ends up open (or the fresh one
     just opened this same cycle).
@@ -115,6 +124,12 @@ class RuntimeState:
     def __init__(self, path: str):
         self._path = Path(path)
         self.last_m3_event_time: Optional[int] = None
+        # 2026-09-07: same dedup problem, now also needed for a M5/M15-
+        # OWNED position's own opposite-flip exit trigger (see
+        # _owner_timeframe/_maybe_apply) -- keyed by timeframe since M5
+        # and M15 each need their own independent "already acted on this
+        # bar" tracking.
+        self.last_owner_event_time: dict[int, int] = {}
         self._load()
 
     def _load(self) -> None:
@@ -123,17 +138,50 @@ class RuntimeState:
         try:
             data = json.loads(self._path.read_text())
             self.last_m3_event_time = data.get("last_m3_event_time")
-        except (json.JSONDecodeError, OSError, TypeError):
+            self.last_owner_event_time = {int(k): v for k, v in data.get("last_owner_event_time", {}).items()}
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
             self.last_m3_event_time = None
+            self.last_owner_event_time = {}
+
+    def _save(self) -> None:
+        self._path.write_text(json.dumps({
+            "last_m3_event_time": self.last_m3_event_time,
+            "last_owner_event_time": self.last_owner_event_time,
+        }))
 
     def mark_seen(self, bar_time: int) -> None:
         self.last_m3_event_time = bar_time
-        self._path.write_text(json.dumps({"last_m3_event_time": bar_time}))
+        self._save()
+
+    def owner_event_already_seen(self, tf_minutes: int, bar_time: int) -> bool:
+        return self.last_owner_event_time.get(tf_minutes) == bar_time
+
+    def mark_owner_event_seen(self, tf_minutes: int, bar_time: int) -> None:
+        self.last_owner_event_time[tf_minutes] = bar_time
+        self._save()
 
 
-def _far_line_for(symbol: str, direction: int) -> Optional[float]:
-    result = far_near(symbol, _M3_MINUTES, direction)
+def _far_line_for(symbol: str, tf_minutes: int, direction: int) -> Optional[float]:
+    result = far_near(symbol, tf_minutes, direction)
     return None if result is None else result[0]
+
+
+def _owner_timeframe(tag: str) -> int:
+    """Which timeframe governs THIS position's SL trailing basis and
+    exit/reversal trigger -- 2026-09-07: "a M5 [watch-zone] trade
+    shouldn't check for M3 structure once it takes over... it follows
+    SL of M5, and nothing [closes/reverses it] unless M5 itself makes
+    the flip." A watch-zone trade credited to M5 or M15 (tag ending
+    "/5F"/"/15F", or exactly "M5-PB"/"M15-PB") is owned by that same
+    timeframe for its whole life -- M3 activity has zero effect on it
+    while it's open. A normal M3-triggered trade (tag ending "/3F" or
+    "/3T") is unaffected, still M3-owned. Unrecognized tags default to
+    3, matching this system's original, only-ever-M3 behavior."""
+    if tag.endswith("/5F") or tag == "M5-PB":
+        return 5
+    if tag.endswith("/15F") or tag == "M15-PB":
+        return 15
+    return 3
 
 
 def _parent_tag(parent: "bias.ParentBiasResult", direction: int) -> str:
@@ -197,10 +245,10 @@ def _action_comment(tag: str, action_code: str) -> str:
     return f"V5S-TM-{tag}-{action_code}"
 
 
-def _open_position(cfg: Config, direction: int, comment: str) -> None:
-    far = _far_line_for(cfg.symbol, direction)
+def _open_position(cfg: Config, direction: int, sl_tf: int, comment: str) -> None:
+    far = _far_line_for(cfg.symbol, sl_tf, direction)
     if far is None:
-        print(f"[V5S-ENTRY] M3 bridge stale/missing -- cannot compute SL, skipping {_DIR_LABEL[direction]} ({comment})")
+        print(f"[V5S-ENTRY] M{sl_tf} bridge stale/missing -- cannot compute SL, skipping {_DIR_LABEL[direction]} ({comment})")
         return
     sl = far - cfg.sl_buffer if direction == 1 else far + cfg.sl_buffer
 
@@ -236,31 +284,32 @@ def _close_position(cfg: Config, position, action_label: str, tag: str, action_c
     return True
 
 
-def _apply_signal(cfg: Config, position, new_dir: int, tag: str, tm_mgr: trade_manager.TradeManager):
-    """Shared position-lifecycle branching -- used by BOTH a normal valid
-    M3 event and a watch-zone-driven signal (2026-09-07), so the two
-    trigger sources behave identically once a direction+tag is decided:
-    no position -> open; opposite direction -> square off + reopen;
-    same direction + already partially cut -> refresh (square off +
-    reopen full size); same direction + still full size -> no-op.
-    Returns the resulting position (re-queried after any broker action)."""
+def _apply_signal(cfg: Config, position, new_dir: int, tag: str, sl_tf: int, tm_mgr: trade_manager.TradeManager):
+    """Shared position-lifecycle branching -- used by every trigger source
+    (normal M3 event, watch-zone signal, or a M5/M15-owned position's own
+    reversal, all 2026-09-07), so they all behave identically once a
+    direction+tag+sl_tf is decided: no position -> open; opposite
+    direction -> square off + reopen; same direction + already partially
+    cut -> refresh (square off + reopen full size); same direction +
+    still full size -> no-op. Returns the resulting position (re-queried
+    after any broker action)."""
     comment = _comment_for_tag(tag)
     if position is None:
-        _open_position(cfg, new_dir, comment)
+        _open_position(cfg, new_dir, sl_tf, comment)
         positions = broker.get_positions(cfg.symbol, cfg.magic_number)
         return positions[0] if positions else None
 
     pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     if new_dir != pos_direction:
         if _close_position(cfg, position, "SQOFF", tag, "SQ"):
-            _open_position(cfg, new_dir, comment)
+            _open_position(cfg, new_dir, sl_tf, comment)
             positions = broker.get_positions(cfg.symbol, cfg.magic_number)
             return positions[0] if positions else None
         return position
 
     if tm_mgr.is_partially_cut(position.ticket):
         if _close_position(cfg, position, "REFRESH", tag, "RF"):
-            _open_position(cfg, new_dir, comment)
+            _open_position(cfg, new_dir, sl_tf, comment)
             positions = broker.get_positions(cfg.symbol, cfg.magic_number)
             return positions[0] if positions else None
         return position
@@ -268,13 +317,27 @@ def _apply_signal(cfg: Config, position, new_dir: int, tag: str, tm_mgr: trade_m
     return position  # same direction, still full size -- nothing to refresh
 
 
-def _run_sl_manager(cfg: Config, mgr: sl_manager.SLManager, position) -> None:
+def _maybe_apply(cfg: Config, position, owner_tf: int, new_dir: int, tag: str, sl_tf: int,
+                 tm_mgr: trade_manager.TradeManager, source_label: str) -> tuple:
+    """Gate before _apply_signal -- 2026-09-07: once a position is open,
+    ONLY its own owning timeframe's signals may touch it. A different
+    timeframe's activity (e.g. M3 noise while an M5-owned trade is open)
+    is simply ignored -- no SQOFF, no refresh, nothing. Returns
+    (position, owner_tf), updated if a broker action actually happened."""
+    if position is not None and owner_tf != sl_tf:
+        print(f"[V5S] {source_label} ignored -- current position is M{owner_tf}-owned")
+        return position, owner_tf
+    new_position = _apply_signal(cfg, position, new_dir, tag, sl_tf, tm_mgr)
+    return new_position, sl_tf
+
+
+def _run_sl_manager(cfg: Config, mgr: sl_manager.SLManager, position, owner_tf: int) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = bid if direction == 1 else ask  # the side that matters for "favor" is the closing side
-    far = _far_line_for(cfg.symbol, direction)
+    far = _far_line_for(cfg.symbol, owner_tf, direction)
     if far is None:
-        print("[V5S-SL] M3 bridge stale/missing -- skipping SL update this cycle")
+        print(f"[V5S-SL] M{owner_tf} bridge stale/missing -- skipping SL update this cycle")
         return
     current_sl = position.sl if position.sl else None
 
@@ -328,12 +391,14 @@ def _run_trade_manager(cfg: Config, mgr: trade_manager.TradeManager, position) -
 
 
 def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: "bias.ParentBiasResult",
-                      fs_m3) -> Optional[tuple[int, str]]:
+                      fs_m3) -> Optional[tuple[int, str, int]]:
     """Runs the watch-zone state machine for one cycle -- see
-    watch_zone.py for the full design. Returns (direction, tag) if a
-    watch-zone-driven trade should fire THIS cycle, else None. Arming a
-    new zone and cancelling an invalidated one both happen here as a
-    side effect regardless of whether a trade fires."""
+    watch_zone.py for the full design. Returns (direction, tag, sl_tf) if
+    a watch-zone-driven trade should fire THIS cycle, else None -- sl_tf
+    is the CONFIRMING parent's own timeframe (5 or 15), since 2026-09-07
+    that parent OWNS the resulting trade's SL basis and exit trigger, not
+    M3. Arming a new zone and cancelling an invalidated one both happen
+    here as a side effect regardless of whether a trade fires."""
     zone = wz_store.zone
 
     # Cancellation -- M3 entering a trap, or flipping to a DIFFERENT
@@ -371,7 +436,7 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
                 print(f"[V5S-WATCHZONE] {name} confirms within {gap:.3f}pts of qualifying price "
                       f"{zone.qualifying_price:.3f} -- straight fire")
                 wz_store.clear()
-                return zone.direction, f"{name}/{tf_code}F"
+                return zone.direction, f"{name}/{tf_code}F", int(tf_code)
             print(f"[V5S-WATCHZONE] {name} confirms {gap:.3f}pts away -- arming 45% pullback target")
             wz_store.set_pending(name, tf_code, close, bar_time)
 
@@ -393,7 +458,7 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
             if reached:
                 print(f"[V5S-WATCHZONE] {p.parent_name} pullback target {target:.3f} reached (price={price:.3f})")
                 wz_store.clear()
-                return zone.direction, f"{p.parent_name}-PB"
+                return zone.direction, f"{p.parent_name}-PB", parent_tf
             print(f"[V5S-WATCHZONE] pending {p.parent_name} pullback -- target={target:.3f} current={price:.3f}")
 
     return None
@@ -424,6 +489,14 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
     sl_mgr.prune({p.ticket for p in positions})
     tm_mgr.prune({p.ticket for p in positions})
 
+    # Which timeframe owns the CURRENT position's SL basis + exit trigger
+    # -- 2026-09-07: a watch-zone trade taken over by M5/M15 is immune to
+    # M3 (and to the other of M5/M15) once open, see _owner_timeframe().
+    owner_tf = 3
+    if position is not None:
+        entry_tag = _extract_tag(tm_mgr.get_entry_comment(position.ticket) or "")
+        owner_tf = _owner_timeframe(entry_tag)
+
     # event_just_happened() alone stays True for the whole ~3-minute window
     # this bar remains the most recent CLOSED one -- the bar_time dedup
     # below is what makes this fire exactly ONCE per genuine event, not
@@ -441,7 +514,7 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
 
         if valid:
             new_event_tag = _tag(parent, new_dir, label)
-            position = _apply_signal(cfg, position, new_dir, new_event_tag, tm_mgr)
+            position, owner_tf = _maybe_apply(cfg, position, owner_tf, new_dir, new_event_tag, 3, tm_mgr, "M3 event")
         elif label == "FLIP":
             # Invalid FLIP (not TRAP_RESOLVED, see watch_zone.py's own
             # docstring for why that's excluded) -- 2026-09-07: park it in
@@ -453,11 +526,29 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
 
     wz_signal = _check_watch_zone(cfg, wz_store, parent, fs_m3)
     if wz_signal is not None:
-        wz_dir, wz_tag = wz_signal
-        position = _apply_signal(cfg, position, wz_dir, wz_tag, tm_mgr)
+        wz_dir, wz_tag, wz_sl_tf = wz_signal
+        position, owner_tf = _maybe_apply(cfg, position, owner_tf, wz_dir, wz_tag, wz_sl_tf, tm_mgr, "watch-zone signal")
+
+    # A M5/M15-OWNED position's own reversal trigger -- 2026-09-07: "it
+    # shouldn't impact the M5 based trade [if M3 changes]... nothing to
+    # do unless M5 doesn't make the flip." Only that SAME owning
+    # timeframe's own fresh opposite-direction flip can close/reverse it.
+    if position is not None and owner_tf in (5, 15):
+        fs_owner = parent.m5 if owner_tf == 5 else parent.m15
+        if (fs_owner.event_just_happened()
+                and not runtime.owner_event_already_seen(owner_tf, fs_owner.last_event.bar_time)):
+            runtime.mark_owner_event_seen(owner_tf, fs_owner.last_event.bar_time)
+            owner_dir = fs_owner.confirmed.value
+            pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+            if owner_dir != pos_direction:
+                owner_name = "M5" if owner_tf == 5 else "M15"
+                owner_tag = f"{owner_name}/{owner_tf}F"
+                print(f"[V5S] M{owner_tf} owner-flip -> {_DIR_LABEL[owner_dir]} -- reversing M{owner_tf}-owned position")
+                position, owner_tf = _maybe_apply(cfg, position, owner_tf, owner_dir, owner_tag, owner_tf,
+                                                  tm_mgr, f"M{owner_tf} owner-flip")
 
     if position is not None:
-        _run_sl_manager(cfg, sl_mgr, position)
+        _run_sl_manager(cfg, sl_mgr, position, owner_tf)
         _run_trade_manager(cfg, tm_mgr, position)
 
 
