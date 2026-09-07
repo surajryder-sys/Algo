@@ -14,30 +14,20 @@ Summary of the full rule set implemented here:
   - A level is ARMED the moment LIVE price (bid for support, ask for
     resistance) touches it, and stays armed across cycles until traded or
     its parent HTF's own character changes (reversal_entry.scan_touches).
-  - Confirmation + entry (reversal_entry.find_signals): TWO trigger types
-    only, both flip-based, both BRIDGE-ONLY -- no copy_rates fallback at
-    all. M5/M3 candle-color triggers ("5C"/"3C") were REMOVED entirely
-    2026-09-07 after a real live incident: H4 sitting in TRAP (support+
-    resistance both active, both touched in a tight consolidation) let
-    candle triggers on both sides fire repeatedly against each other for
-    ~55 minutes, ~150 trades, net -$62 on that timeframe alone. The
-    bridge-first/copy_rates-fallback design that replaced them was ITSELF
-    then found to have a real flaw the same day: an M3/H4 SELL reversed
-    into an M3/H8 BUY 9 seconds later -- impossible for a genuine M3
-    flip (bars close every 3 real minutes) -- because the bridge path and
-    the copy_rates fallback path used different edge-detection logic
-    with no shared dedup, so switching sources mid-stream could double-
-    fire. User's own words: "remove dependancy of copy rates for
-    M5,M3,M1 -- follow exactly bridge, nothing else. if any data is
-    stale on bridge for more than some specified time, simple send
-    message saying data is stale." So now: if a timeframe's bridge data
-    is missing/stale, that trigger simply produces no signal -- no
-    fallback, no guess -- and bridge_flip.StaleAlertTracker fires an
-    alert once that staleness has been SUSTAINED past 60s (not a
-    momentary blip), once per staleness episode. Path 1 gated (M1 flip
-    vs. live price, below resistance for a sell, above support for a
-    buy) or Path 2 privileged (M3 ATR flip, fires even on the wrong side
-    of the level, as long as that HTF's character hasn't yet changed).
+  - Confirmation + entry (reversal_entry.find_signals): ONE trigger only
+    now -- "3F", M3 ATR flip, privileged (fires even on the wrong side of
+    the level, as long as that HTF's character hasn't yet changed),
+    bridge-only, no copy_rates fallback. Two things were removed to get
+    here, both same-day, both from real live incidents: M5/M3 candle-
+    color triggers ("5C"/"3C") after H4 sitting in TRAP let them fire
+    repeatedly against each other for ~55 minutes, ~150 trades, net -$62
+    on that timeframe alone; and M1 flip ("1F", the gated Path 1
+    trigger) per the user's explicit direction, "remove 1f logic
+    completely and replace with strict 3F confirmation." If M3's bridge
+    data is missing/stale, no signal is produced -- no fallback, no
+    guess -- and bridge_flip.StaleAlertTracker fires an alert once that
+    staleness has been SUSTAINED past 60s (not a momentary blip), once
+    per staleness episode.
     The M3 far-line SL basis (bridge_flip.m3_far_line) was also switched
     to bridge-only the same day, for consistency -- M1's swing-low/high
     SL basis stays on copy_rates, unavoidably (the bridge publishes no
@@ -97,12 +87,11 @@ import time
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bridge, broker, htf_levels, rates, reversal_entry, sl_manager, trade_manager
+from v5_sentinel import bridge, broker, htf_levels, reversal_entry, sl_manager, trade_manager
 from v5_sentinel.bridge_flip import BridgeFlipState, StaleAlertTracker, m3_far_line
 from v5_sentinel.critical_alerts_telegram import send_message as _telegram_send
 from v5_sentinel.reversal_config import RMConfig, load_config
 
-_M1_MINUTES = 1
 _DIR_LABEL = {1: "BUY", -1: "SELL"}
 
 
@@ -275,13 +264,13 @@ def _process_signal(cfg: RMConfig, sig: "reversal_entry.ReversalSignal", store: 
 
 
 def _check_stale(cfg: RMConfig, stale_tracker: StaleAlertTracker) -> None:
-    """M3/M1 only -- M5 isn't used for any RM signal any more (candle
-    triggers were removed), nothing to monitor there for this bot."""
-    for tf in (3, 1):
-        msg = stale_tracker.check(tf, bridge.read_lines(cfg.symbol, tf) is not None)
-        if msg is not None:
-            print(msg)
-            _send_alert(msg)
+    """M3 only -- the sole remaining signal source (2026-09-07: M1 flip
+    removed entirely, M5 candle removed earlier same day), nothing else
+    to monitor here for this bot."""
+    msg = stale_tracker.check(3, bridge.read_lines(cfg.symbol, 3) is not None)
+    if msg is not None:
+        print(msg)
+        _send_alert(msg)
 
 
 def run_once(cfg: RMConfig, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager,
@@ -292,10 +281,7 @@ def run_once(cfg: RMConfig, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.
     reversal_entry.scan_touches(htf_states, store, bid, ask)
     _check_stale(cfg, stale_tracker)
 
-    m1_series = rates.read_trail_series(cfg.symbol, _M1_MINUTES)
-
-    signals = reversal_entry.find_signals(cfg.symbol, htf_states, store, bridge_flip, bid, ask,
-                                          m1_series, cfg.sl_buffer, cfg.swing_lookback)
+    signals = reversal_entry.find_signals(cfg.symbol, htf_states, store, bridge_flip, bid, ask, cfg.sl_buffer)
 
     positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     sl_mgr.prune({p.ticket for p in positions})

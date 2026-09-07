@@ -9,8 +9,8 @@ Only RM-specific settings get their own V5S_RM_* vars: its own magic
 number (separate identity from TM, confirmed 2026-09-07), its own
 enable_trading toggle (independent go-ahead required, per this project's
 per-bot safety convention -- RM going live is a SEPARATE decision from
-TM's), its own state files (so the two managers' persisted ticket/level
-state never collide), and the swing-low/high SL lookback bar count.
+TM's), and its own state files (so the two managers' persisted ticket/
+level state never collide).
 
 Safety: V5S_RM_ENABLE_TRADING must be explicitly set to true in .env for
 any order to actually be sent/modified/cancelled. Left unset (default
@@ -51,8 +51,6 @@ class RMConfig:
     partial2_trigger_points: float
     partial2_fraction: float
 
-    swing_lookback: int   # bars, for recent_swing_low/high SL basis
-
     state_file: str
     sl_state_file: str
     levels_state_file: str
@@ -80,7 +78,6 @@ def load_config() -> RMConfig:
         partial1_fraction=float(os.getenv("V5S_PARTIAL1_FRACTION", "0.70")),
         partial2_trigger_points=float(os.getenv("V5S_PARTIAL2_TRIGGER_POINTS", "15")),
         partial2_fraction=float(os.getenv("V5S_PARTIAL2_FRACTION", "0.15")),
-        swing_lookback=int(os.getenv("V5S_RM_SWING_LOOKBACK", "8")),
         state_file=os.getenv("V5S_RM_STATE_FILE", "v5s_reversal_manager_state.json"),
         sl_state_file=os.getenv("V5S_RM_SL_STATE_FILE", "v5s_reversal_manager_sl_state.json"),
         levels_state_file=os.getenv("V5S_RM_LEVELS_STATE_FILE", "v5s_reversal_manager_levels_state.json"),
