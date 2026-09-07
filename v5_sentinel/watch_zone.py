@@ -11,12 +11,25 @@ Instead of dropping an M3 FLIP the parent doesn't yet allow, it's parked
 here with its own qualifying price (M3's flip-candle close). A parent
 flipping into agreement later either fires the trade immediately (price
 still close to that qualifying price) or arms a target to wait for
-instead -- NOT a fixed number, a 45% retracement recomputed fresh every
-cycle off the confirming parent's own CURRENT near trail line (the
-anchor close stays fixed, but the near line keeps ratcheting, so the
-target itself typically shallows over time the longer a real trend
-holds -- this is what keeps the zone from missing the move on a big
-impulsive parent candle, per the user's own worked examples 2026-09-07).
+instead -- a 40% retracement (changed from 45% same day) off the
+confirming parent's own close, toward its near trail line.
+
+FROZEN AT THE FLIP BAR, fixed 2026-09-07 (found live: a real trade was
+missed because of this): the near/far line values used for the target
+are the confirming parent's OWN trail lines AS OF ITS OWN FLIP BAR
+(rates.trail_values_at, via copy_rates -- the bridge has no history
+endpoint at all, only ever the live snapshot, so a frozen historical
+reference can't come from there). Originally built re-reading the LIVE
+bridge value every cycle instead -- in a real live incident the near
+line ratcheted so far past the anchor close over a sustained rally that
+the "45% pullback" target ended up ABOVE the anchor close entirely
+(nonsensical as a pullback), and the target kept drifting rather than
+staying put, missing a trade that should have fired on the real dip
+that occurred right after the parent's own flip. Freezing both close
+and near/far to the SAME bar gives a stable, one-time-computed target
+that doesn't drift as time passes -- confirmed against the user's own
+manual calculation (close 4395.23, near 4389.436 at that bar -> target
+~4392.6) before this fix went in.
 
 TRAP_RESOLVED events are NOT parked here -- "trap and resolve enters as
 it is": that path keeps using the existing, unchanged pipeline.
@@ -46,7 +59,7 @@ from pathlib import Path
 from typing import Optional
 
 PULLBACK_GATE_POINTS = 2.0
-PULLBACK_RETRACE_FRACTION = 0.45
+PULLBACK_RETRACE_FRACTION = 0.40  # changed from 0.45, 2026-09-07 -- shallower, catches the entry sooner
 
 
 @dataclass

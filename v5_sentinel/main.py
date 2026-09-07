@@ -84,7 +84,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bias, bridge, broker, sl_manager, trade_manager, watch_zone
+from v5_sentinel import bias, bridge, broker, flip_state, rates, sl_manager, trade_manager, watch_zone
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.bridge_flip import StaleAlertTracker, far_near
 from v5_sentinel.config import Config, load_config
@@ -437,16 +437,26 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
                       f"{zone.qualifying_price:.3f} -- straight fire")
                 wz_store.clear()
                 return zone.direction, f"{name}/{tf_code}F", int(tf_code)
-            print(f"[V5S-WATCHZONE] {name} confirms {gap:.3f}pts away -- arming 45% pullback target")
+            print(f"[V5S-WATCHZONE] {name} confirms {gap:.3f}pts away -- arming "
+                  f"{watch_zone.PULLBACK_RETRACE_FRACTION:.0%} pullback target")
             wz_store.set_pending(name, tf_code, close, bar_time)
 
     zone = wz_store.zone  # re-read -- set_pending() above may have just changed it
     if zone is not None and zone.pending is not None:
         p = zone.pending
         parent_tf = 5 if p.parent_tf_code == "5" else 15
-        result = far_near(cfg.symbol, parent_tf, zone.direction)
+        # FROZEN at the confirming parent's OWN flip bar, not live --
+        # 2026-09-07, see watch_zone.py's own docstring for why (a real
+        # trade was missed when this re-read the live bridge every cycle
+        # instead: the near line ratcheted past the anchor close over a
+        # sustained rally, and the target kept drifting rather than
+        # staying put). The bridge has no history endpoint at all, so
+        # this specific lookup has to go through copy_rates.
+        parent_series = rates.read_trail_series(cfg.symbol, parent_tf)
+        result = (rates.trail_values_at(parent_series, p.source_bar_time)
+                 if parent_series is not None else None)
         if result is not None:
-            _far, near = result
+            _far, near = flip_state.far_near_line(zone.direction, result[0], result[1])
             if zone.direction == 1:
                 target = p.anchor_close - watch_zone.PULLBACK_RETRACE_FRACTION * (p.anchor_close - near)
             else:

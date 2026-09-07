@@ -237,6 +237,23 @@ def read_trail_series(
                         trail1=trail1, trail2=trail2, trend1=trend1, trend2=trend2)
 
 
+def trail_values_at(series: TrailSeries, bar_time: int) -> Optional[tuple[float, float]]:
+    """(trail1, trail2) at a SPECIFIC historical closed bar -- 2026-09-07,
+    added for the watch-zone's pullback target: the bridge only ever
+    holds a live snapshot (no history endpoint at all), so freezing a
+    reference to "the near/far line as of the confirming parent's own
+    flip bar" can only come from copy_rates. None if that bar_time isn't
+    in the fetched window, or either line was still warming up then."""
+    try:
+        i = series.times.index(bar_time)
+    except ValueError:
+        return None
+    t1, t2 = series.trail1[i], series.trail2[i]
+    if t1 is None or t2 is None:
+        return None
+    return t1, t2
+
+
 def recent_swing_low(series: TrailSeries, lookback: int = 8) -> Optional[float]:
     """Lowest LOW of the last `lookback` closed bars (2026-09-07, STR
     Reversal Manager SL basis -- confirmed simple lookback-low, no pivot-
