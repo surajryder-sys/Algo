@@ -79,9 +79,12 @@ Summary of the full rule set implemented here:
   - Alerts: a qualifying-but-not-acted-on signal (the "ignore" case above)
     pushes to the existing @smcsecret_bot (TELEGRAM_BOT_TOKEN/
     TELEGRAM_CHAT_ID in .env, confirmed 2026-09-07) -- best-effort, never
-    crashes the loop. Profit alerts are NOT sent from here; they go
-    through the existing profit_alerts_watcher, which also needs to be
-    told to watch this magic number (separate change).
+    crashes the loop. Profit-milestone alerts were retired entirely
+    2026-09-07 ("stop sending the profit alerts, now it is no longer
+    needed") -- what used to be profit_alerts_watcher is now
+    critical_alerts_watcher.py, a completely different thing (HTF
+    support/resistance touch alerts on SecretTrader_Critical_Bot, not
+    position-based at all any more).
 
 Safety: V5S_RM_ENABLE_TRADING must be explicitly true in .env for any
 order to actually be sent/modified/cancelled -- independent of Trend
@@ -96,7 +99,7 @@ import MetaTrader5 as mt5
 
 from v5_sentinel import bridge, broker, htf_levels, rates, reversal_entry, sl_manager, trade_manager
 from v5_sentinel.bridge_flip import BridgeFlipState, StaleAlertTracker, m3_far_line
-from v5_sentinel.profit_alerts_telegram import send_message as _telegram_send
+from v5_sentinel.critical_alerts_telegram import send_message as _telegram_send
 from v5_sentinel.reversal_config import RMConfig, load_config
 
 _M1_MINUTES = 1

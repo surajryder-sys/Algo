@@ -1,13 +1,14 @@
-"""Subscriber approval listener for the profit-alerts bot
-(SecretTrader_Critical_Bot) -- long-polls Telegram for new messages,
-auto-registers any new sender as a pending subscriber (with an
-acknowledgement reply), and lets the OWNER (PROFIT_ALERTS_TELEGRAM_
+"""Subscriber approval listener for the critical-alerts bot
+(SecretTrader_Critical_Bot) -- renamed 2026-09-07 from
+profit_alerts_listener.py, logic unchanged. Long-polls Telegram for new
+messages, auto-registers any new sender as a pending subscriber (with an
+acknowledgement reply), and lets the OWNER (CRITICAL_ALERTS_TELEGRAM_
 CHAT_ID) approve them via /pending and /approve <name_or_chat_id>
 commands sent directly to the bot -- fully self-service, per the user's
 own explicit choice 2026-08-28 ("Command in Telegram... no need to come
 back to this chat").
 
-Deliberately a SEPARATE process from profit_alerts_watcher.py (which
+Deliberately a SEPARATE process from critical_alerts_watcher.py (which
 only ever sends, never polls for incoming messages) -- Telegram's own
 getUpdates offset mechanism means only ONE process can long-poll a
 given bot token at a time without the two racing each other for the
@@ -21,7 +22,7 @@ very first message triggers the pending-registration reply):
                         match replies asking for the exact chat_id
                         instead of guessing
 
-Run with: python -m v5_sentinel.profit_alerts_listener
+Run with: python -m v5_sentinel.critical_alerts_listener
 """
 from __future__ import annotations
 
@@ -30,11 +31,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from v5_sentinel.profit_alerts_config import load_config
-from v5_sentinel.profit_alerts_subscribers import SubscriberStore
-from v5_sentinel.profit_alerts_telegram import get_updates, send_message
+from v5_sentinel.critical_alerts_config import load_config
+from v5_sentinel.critical_alerts_subscribers import SubscriberStore
+from v5_sentinel.critical_alerts_telegram import get_updates, send_message
 
-_OFFSET_FILE = "v5_sentinel_profit_alerts_command_offset.json"
+_OFFSET_FILE = "v5_sentinel_critical_alerts_command_offset.json"
 
 
 def _load_offset(path: str) -> int:
@@ -90,8 +91,8 @@ def _handle_message(cfg, subscribers: SubscriberStore, message: dict) -> None:
             approved_chat_id, approved_name = result
             send_message(cfg.telegram_bot_token, chat_id, f"Approved {approved_name} ({approved_chat_id}).")
             send_message(cfg.telegram_bot_token, approved_chat_id,
-                         "You're approved -- you'll now receive profit alerts.")
-            print(f"[v5_sentinel.profit_alerts_listener] approved {approved_name} ({approved_chat_id})")
+                         "You're approved -- you'll now receive critical alerts.")
+            print(f"[v5_sentinel.critical_alerts_listener] approved {approved_name} ({approved_chat_id})")
             return
         return  # any other message from the owner -- nothing to do
 
@@ -103,25 +104,25 @@ def _handle_message(cfg, subscribers: SubscriberStore, message: dict) -> None:
                      "Thanks -- your request to receive alerts is pending approval.")
         send_message(cfg.telegram_bot_token, subscribers.owner_chat_id,
                      f"New subscriber request: {name} ({chat_id}). Approve with /approve {name}")
-        print(f"[v5_sentinel.profit_alerts_listener] new pending request: {name} ({chat_id})")
+        print(f"[v5_sentinel.critical_alerts_listener] new pending request: {name} ({chat_id})")
     # else: already pending, already sent the ack once -- no need to repeat it every message
 
 
 def main() -> None:
     cfg = load_config()
     if not cfg.telegram_bot_token or not cfg.owner_chat_id:
-        raise RuntimeError("PROFIT_ALERTS_TELEGRAM_BOT_TOKEN / PROFIT_ALERTS_TELEGRAM_CHAT_ID must be set in .env")
+        raise RuntimeError("CRITICAL_ALERTS_TELEGRAM_BOT_TOKEN / CRITICAL_ALERTS_TELEGRAM_CHAT_ID must be set in .env")
 
     subscribers = SubscriberStore(cfg.subscribers_file, cfg.owner_chat_id)
     offset = _load_offset(_OFFSET_FILE)
-    print(f"[v5_sentinel.profit_alerts_listener] listening for subscriber commands, "
+    print(f"[v5_sentinel.critical_alerts_listener] listening for subscriber commands, "
           f"{len(subscribers.approved_chat_ids())} approved subscriber(s)")
 
     while True:
         try:
             updates = get_updates(cfg.telegram_bot_token, offset)
         except Exception as exc:
-            print(f"[v5_sentinel.profit_alerts_listener] getUpdates ERROR: {exc}")
+            print(f"[v5_sentinel.critical_alerts_listener] getUpdates ERROR: {exc}")
             time.sleep(5)
             continue
 
@@ -133,7 +134,7 @@ def main() -> None:
             try:
                 _handle_message(cfg, subscribers, message)
             except Exception as exc:
-                print(f"[v5_sentinel.profit_alerts_listener] error handling message: {exc}")
+                print(f"[v5_sentinel.critical_alerts_listener] error handling message: {exc}")
 
         if updates:
             _save_offset(_OFFSET_FILE, offset)

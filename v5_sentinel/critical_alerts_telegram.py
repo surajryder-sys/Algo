@@ -1,5 +1,9 @@
 """Minimal Telegram Bot API client -- sendMessage plus getUpdates (for
-profit_alerts_listener.py's /pending, /approve command handling).
+critical_alerts_listener.py's /pending, /approve command handling).
+Renamed 2026-09-07 from profit_alerts_telegram.py -- also imported
+directly by main.py and reversal_main.py for their own bridge-staleness
+alerts (a different bot, @smcsecret_bot), since this client is fully
+generic.
 """
 from __future__ import annotations
 

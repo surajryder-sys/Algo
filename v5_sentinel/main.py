@@ -88,7 +88,7 @@ from v5_sentinel import bias, bridge, broker, sl_manager, trade_manager, watch_z
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.bridge_flip import StaleAlertTracker, far_near
 from v5_sentinel.config import Config, load_config
-from v5_sentinel.profit_alerts_telegram import send_message as _telegram_send
+from v5_sentinel.critical_alerts_telegram import send_message as _telegram_send
 
 _M3_MINUTES = 3
 _DIR_LABEL = {1: "BUY", -1: "SELL"}

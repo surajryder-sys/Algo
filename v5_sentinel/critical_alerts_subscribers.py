@@ -1,15 +1,18 @@
-"""Persisted subscriber list for the profit-alerts bot
-(SecretTrader_Critical_Bot) -- approval-gated per the user's explicit
-requirement, 2026-08-28: "i want to choose and approve each person."
+"""Persisted subscriber list for the critical-alerts bot
+(SecretTrader_Critical_Bot) -- renamed 2026-09-07 from
+profit_alerts_subscribers.py, unchanged otherwise. Approval-gated per
+the user's explicit requirement, 2026-08-28: "i want to choose and
+approve each person."
 
 Three states a chat_id can be in:
-- Owner (PROFIT_ALERTS_TELEGRAM_CHAT_ID) -- seeded as approved on first
-  load, always. This is you; never needs manual approval.
+- Owner (CRITICAL_ALERTS_TELEGRAM_CHAT_ID) -- seeded as approved on
+  first load, always. This is you; never needs manual approval.
 - Pending -- messaged the bot for the first time, not yet approved.
-  Recorded automatically by profit_alerts_listener.py, invisible to
-  profit_alerts_watcher.py (never receives alerts).
+  Recorded automatically by critical_alerts_listener.py, invisible to
+  critical_alerts_watcher.py (never receives alerts).
 - Approved -- explicitly approved by the owner (via /approve in
-  Telegram). profit_alerts_watcher.py sends to every approved chat_id.
+  Telegram). critical_alerts_watcher.py sends to every approved
+  chat_id.
 
 Telegram itself only allows a bot to message someone who has messaged
 it first -- this store's own "pending" state can't exist for someone
