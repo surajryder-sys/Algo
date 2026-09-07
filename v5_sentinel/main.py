@@ -22,14 +22,13 @@ for now (see bias.py).
 Run with: python -m v5_sentinel.main
 
 Rules implemented here (full design recap):
-  - Parent bias: M5 AND M15 both act as parents (2026-09-03 change --
-    see bias.compute_parent_bias's own docstring for the full decision
-    table). Short version: bullish M3 trades are allowed if EITHER
-    parent currently reads bullish; bearish allowed if EITHER reads
-    bearish -- no tie-break when they disagree, both directions just
-    stay open. A parent currently mid-trap doesn't get a vote; if only
-    one parent is trapped the other decides alone, if both are trapped
-    both directions stay open.
+  - Parent bias, REVISED 2026-09-07: M5 is the PRIMARY parent, M15 only
+    gets a vote when M5 ITSELF is trapped (see bias.compute_parent_bias's
+    own docstring for the full table) -- this retires the 2026-09-03
+    "M5 AND M15 both act as parents, disagreement opens both directions"
+    design. Short version: M5 clear -> follow M5 alone, M15 not
+    consulted at all. M5 trapped, M15 clear -> follow M15 alone. Both
+    trapped -> NEITHER direction allowed, wait for M5 to resolve.
   - M3 execution: flip_state on M3's own trail lines. A fresh event
     (FLIP or TRAP_RESOLVED) on the LAST CLOSED bar is the only thing that
     ever triggers an entry/exit decision -- a merely-persisting confirmed
@@ -138,24 +137,14 @@ def _far_line_for(symbol: str, direction: int) -> Optional[float]:
 
 
 def _parent_tag(parent: "bias.ParentBiasResult", direction: int) -> str:
-    """Which parent to credit in the entry comment (2026-09-04 naming
-    convention, confirmed with the user). M5_ONLY/M15_ONLY are literal --
-    that parent alone decided. AGREE (both clear, same direction) defaults
-    to M5, since both back it equally. DISAGREE picks whichever parent's
-    own confirmed direction actually matches this trade's direction --
-    exactly one always does, since disagreeing means one is bull and the
-    other bear. BOTH_TRAPPED writes "M15M5" (not the word "both") --
-    neither parent is really deciding in that case, both vetoes are just
-    off."""
-    if parent.source == "M5_ONLY":
-        return "M5"
-    if parent.source == "M15_ONLY":
-        return "M15"
-    if parent.source == "BOTH_TRAPPED":
-        return "M15M5"
-    if parent.source == "DISAGREE":
-        return "M5" if parent.m5.confirmed.value == direction else "M15"
-    return "M5"  # AGREE
+    """Which parent to credit in the entry comment. 2026-09-07: bias.py's
+    source is now literally "M5" or "M15" (M5 decided, or M5 was trapped
+    and M15 decided instead) -- BOTH_TRAPPED never reaches here in
+    practice, since allows() is False for both directions in that case,
+    but "M15M5" is kept as a safe fallback label just in case."""
+    if parent.source in ("M5", "M15"):
+        return parent.source
+    return "M15M5"  # BOTH_TRAPPED -- shouldn't normally be reached, see above
 
 
 def _tag(parent: "bias.ParentBiasResult", direction: int, label: str) -> str:
@@ -361,9 +350,14 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
 
     # Look for the MOST RECENT qualifying parent flip (recency-first,
     # 2026-09-07: a later parent event supersedes an earlier one still
-    # pending) -- M5 or M15, matching the zone's own direction.
+    # pending) -- M5 always eligible; M15 only counts when M5 is
+    # CURRENTLY trapped, matching bias.py's own M5-primary/M15-fallback
+    # table (M15 has no vote at all while M5 is decisive, agree or not).
     candidates = []
-    for name, tf_code, fs in (("M5", "5", parent.m5), ("M15", "15", parent.m15)):
+    parent_candidates = [("M5", "5", parent.m5)]
+    if parent.m5.watching is not None:
+        parent_candidates.append(("M15", "15", parent.m15))
+    for name, tf_code, fs in parent_candidates:
         if fs is not None and fs.event_just_happened() and fs.confirmed.value == zone.direction:
             candidates.append((fs.last_event.bar_time, name, tf_code, fs.last_close))
 
