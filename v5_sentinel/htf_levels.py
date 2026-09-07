@@ -191,9 +191,37 @@ class LevelEligibilityStore:
         character (differs from what was stored) -- in which case
         eligibility AND touch-armed state for that timeframe have just
         been reset (the old levels no longer even exist once the
-        character changes, so any touch armed against them is moot)."""
+        character changes, so any touch armed against them is moot).
+
+        MONOTONIC GUARD, added 2026-09-07 (found live -- M30 fired a real
+        SELL twice within what looked like the same unchanged character
+        window, net -$41 on the intervening BUY that shouldn't have had
+        the chance to exist): a genuinely NEW character can only ever
+        advance to a LATER bar_time than what's already stored -- time
+        doesn't move backwards. copy_rates HTF classification (this store
+        deliberately has no bridge tie-breaker, see module docstring) can
+        still be a path-dependent recompute that occasionally computes a
+        transiently different character_event_time on one cycle and reverts
+        the next (the same class of instability already documented for
+        M3's own trail drift) -- if that happens, the reset-then-revert
+        would silently wipe traded_directions in between, re-arming a
+        direction that had already legitimately fired. Rejecting any
+        "new" event_time that's OLDER than what's stored closes that gap:
+        a real character change can never look like a regression, so
+        anything that does is treated as a transient recompute glitch,
+        not trusted."""
         entry = self._state.get(tf_minutes)
-        if entry is None or entry.get("event_time") != character_event_time:
+        stored_event_time = entry.get("event_time") if entry is not None else None
+
+        if stored_event_time is not None and character_event_time < stored_event_time:
+            print(f"[V5S-STR-ELIGIBILITY] M{tf_minutes} character_event_time regressed "
+                  f"({stored_event_time} -> {character_event_time}) -- ignoring as a transient "
+                  f"recompute glitch, not a genuine character change")
+            return False
+
+        if entry is None or stored_event_time != character_event_time:
+            print(f"[V5S-STR-ELIGIBILITY] M{tf_minutes} character reset "
+                  f"(event_time {stored_event_time} -> {character_event_time})")
             self._state[tf_minutes] = {
                 "event_time": character_event_time, "traded_directions": [], "touched_lines": [],
             }

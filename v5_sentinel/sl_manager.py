@@ -35,11 +35,23 @@ from typing import Optional
 
 _MIN_SL_IMPROVEMENT = 1e-6  # same float-noise tolerance as algo_v2/sl_manager.py
 
+# 2026-09-07, found live: the broker rounds whatever SL we propose on fill
+# (confirmed: proposed 4416.61678, broker stored 4416.617 -- a ~0.0002
+# rounding difference) -- comparing that against the tight
+# _MIN_SL_IMPROVEMENT tolerance made the manager detect ITS OWN just-
+# applied SL as a "manual change" and permanently pause auto-trailing on
+# the very next cycle. This tolerance is deliberately much wider (XAUUSD
+# rounding error is a few ten-thousandths; 0.01 gives ~50x headroom)
+# specifically for manual-change DETECTION -- the tight
+# _MIN_SL_IMPROVEMENT above is unrelated and untouched, still governing
+# whether a proposed trail update counts as a genuine improvement.
+_MANUAL_CHANGE_TOLERANCE = 0.01
 
-def _differs(a: Optional[float], b: Optional[float]) -> bool:
+
+def _differs(a: Optional[float], b: Optional[float], tolerance: float = _MIN_SL_IMPROVEMENT) -> bool:
     if a is None or b is None:
         return a is not b
-    return abs(a - b) > _MIN_SL_IMPROVEMENT
+    return abs(a - b) > tolerance
 
 
 @dataclass
@@ -101,7 +113,7 @@ class SLManager:
                 print(f"[V5S-SL] #{ticket} SL manually cleared -- resuming auto-trail control")
             state.override_active = False
             state.last_bot_sl = None
-        elif _differs(current_broker_sl, state.last_bot_sl):
+        elif _differs(current_broker_sl, state.last_bot_sl, _MANUAL_CHANGE_TOLERANCE):
             if not state.override_active:
                 print(f"[V5S-SL] #{ticket} manual SL change detected "
                       f"({state.last_bot_sl} -> {current_broker_sl}) -- "
