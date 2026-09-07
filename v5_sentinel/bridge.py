@@ -77,6 +77,32 @@ def read_lines(symbol: str, tf_minutes: int) -> Optional[tuple[float, float]]:
         return None
 
 
+def read_close(symbol: str, tf_minutes: int) -> Optional[tuple[float, int]]:
+    """(close, bar_time) of the bridge's own last CLOSED bar -- 2026-09-07,
+    added so a caller that just needs "what did MQL5 close its own last bar
+    at" can read it straight off the bridge instead of a separate copy_rates
+    call, which can independently disagree with what MQL5 itself computed
+    off of (see the M3 line2/ATR300 divergence investigation the same day --
+    this doesn't fix that class of bug, it just avoids introducing a NEW
+    instance of it for anything that only needs the close, not a recomputed
+    trail). None if the file is missing/stale, or predates this field
+    (older bridge builds won't have "close"/"bar_time" at all)."""
+    path = _bridge_root() / f"ATRSTATE_DUAL_{symbol}_{tf_minutes}.json"
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, KeyError):
+        return None
+
+    age = time.time() - raw.get("updated", 0)
+    if age > MAX_AGE_SECONDS:
+        return None
+
+    try:
+        return float(raw["close"]), int(raw["bar_time"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _bridge_confirmed(close: float, bridge_lines: tuple[float, float]) -> Optional[Confirmed]:
     """Same geometric test flip_state.py's own compute() uses -- close
     strictly outside both bridge line values means confirmed that side;

@@ -884,7 +884,7 @@ datetime FindStructureEventTime(const int reference_idx, const datetime &time[],
 //| unchanged from the original ATR Dual indicator. Major/Minor is    |
 //| NOT included here, see header.                                    |
 //+------------------------------------------------------------------+
-void PublishATRBridgeFile(const int rates_total, const datetime &time[])
+void PublishATRBridgeFile(const int rates_total, const datetime &time[], const double &close[])
 {
    if(!PublishToFile)
       return;
@@ -913,6 +913,13 @@ void PublishATRBridgeFile(const int rates_total, const datetime &time[])
    j += "\"symbol\":\"" + symbol + "\",";
    j += "\"timeframe_minutes\":" + IntegerToString(tf_minutes) + ",";
    j += "\"updated\":" + IntegerToString((long)TimeCurrent()) + ",";
+   // Previous (last CLOSED) bar's own close + bar_time, 2026-09-07 -- lets a
+   // reader use the bridge as the single source for both the trail values
+   // AND the close they were computed against, instead of a separate
+   // copy_rates call that can independently disagree with what MQL5 itself
+   // used (see line2's ATR300 divergence investigation the same day).
+   j += "\"close\":" + DoubleToString(close[closed_idx], 3) + ",";
+   j += "\"bar_time\":" + IntegerToString((long)time[closed_idx]) + ",";
    j += "\"line1\":{";
    j += "\"trail_stop\":" + DoubleToString(TrailStop[closed_idx], 8) + ",";
    j += "\"trend\":" + IntegerToString(trend1) + ",";
@@ -1020,16 +1027,23 @@ int OnCalculate(const int rates_total,
    CalcTrail("Line1(ATR" + IntegerToString(ATRPeriod) + ")", rates_total, prev_calculated, ATRPeriod,  KeyValue,  ATRHandle,  ATRBuffer,  TrailStop,  ColorBuffer,  TrendBuffer,  close, loggedInsufficientBars1, loggedCopyFail1);
    CalcTrail("Line2(ATR" + IntegerToString(ATRPeriod2) + ")", rates_total, prev_calculated, ATRPeriod2, KeyValue2, ATRHandle2, ATRBuffer2, TrailStop2, ColorBuffer2, TrendBuffer2, close, loggedInsufficientBars2, loggedCopyFail2);
 
+   // Previous-CLOSED-bar value, not the live/still-forming one (2026-09-07,
+   // user report: "one value is continuously changing one is stable" -- both
+   // labels used to read TrailStop[rates_total-1]/TrailStop2[rates_total-1],
+   // the currently-forming bar, which recomputes every tick and made the
+   // on-screen number jitter constantly. rates_total-2 is the same closed_idx
+   // PublishATRBridgeFile already uses, so the label now always matches
+   // exactly what's published to the bridge.
    if (rates_total >= ATRPeriod + 2)
       DisplayTrailValue(LABEL_NAME, 20, "ATR" + IntegerToString(ATRPeriod) + " Trail: ",
-                         TrailStop[rates_total - 1], (int)TrendBuffer[rates_total - 1]);
+                         TrailStop[rates_total - 2], (int)TrendBuffer[rates_total - 2]);
 
    if (rates_total >= ATRPeriod2 + 2)
       DisplayTrailValue(LABEL_NAME2, 40, "ATR" + IntegerToString(ATRPeriod2) + " Trail: ",
-                         TrailStop2[rates_total - 1], (int)TrendBuffer2[rates_total - 1]);
+                         TrailStop2[rates_total - 2], (int)TrendBuffer2[rates_total - 2]);
 
    if (rates_total >= MathMax(ATRPeriod, ATRPeriod2) + 2)
-      PublishATRBridgeFile(rates_total, time);
+      PublishATRBridgeFile(rates_total, time, close);
 
    //===================== Major/Minor structure -- togglable =====================
    // mm_was_enabled's initializer matches EnableMajorMinor's own default (true)
