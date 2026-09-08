@@ -433,13 +433,24 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
         if not already:
             gap = abs(close - zone.qualifying_price)
             if gap <= watch_zone.PULLBACK_GATE_POINTS:
-                print(f"[V5S-WATCHZONE] {name} confirms within {gap:.3f}pts of qualifying price "
-                      f"{zone.qualifying_price:.3f} -- straight fire")
-                wz_store.clear()
-                return zone.direction, f"{name}/{tf_code}F", int(tf_code)
-            print(f"[V5S-WATCHZONE] {name} confirms {gap:.3f}pts away -- arming "
-                  f"{watch_zone.PULLBACK_RETRACE_FRACTION:.0%} pullback target")
-            wz_store.set_pending(name, tf_code, close, bar_time)
+                # Staleness pre-check, same reasoning/incident as the M3
+                # event path above (2026-09-08) -- wz_store.clear() used to
+                # run unconditionally before _open_position ever got a
+                # chance to fail on a stale far line, permanently losing
+                # this fire (the zone would already be gone, nothing left
+                # to retry) instead of just skipping one cycle.
+                if _far_line_for(cfg.symbol, int(tf_code), zone.direction) is None:
+                    print(f"[V5S-WATCHZONE] {name} confirms within {gap:.3f}pts -- "
+                          f"but M{tf_code} bridge stale, deferring straight-fire, will retry once fresh")
+                else:
+                    print(f"[V5S-WATCHZONE] {name} confirms within {gap:.3f}pts of qualifying price "
+                          f"{zone.qualifying_price:.3f} -- straight fire")
+                    wz_store.clear()
+                    return zone.direction, f"{name}/{tf_code}F", int(tf_code)
+            else:
+                print(f"[V5S-WATCHZONE] {name} confirms {gap:.3f}pts away -- arming "
+                      f"{watch_zone.PULLBACK_RETRACE_FRACTION:.0%} pullback target")
+                wz_store.set_pending(name, tf_code, close, bar_time)
 
     zone = wz_store.zone  # re-read -- set_pending() above may have just changed it
     if zone is not None and zone.pending is not None:
@@ -466,10 +477,19 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
             price = bid if zone.direction == 1 else ask
             reached = price <= target if zone.direction == 1 else price >= target
             if reached:
-                print(f"[V5S-WATCHZONE] {p.parent_name} pullback target {target:.3f} reached (price={price:.3f})")
-                wz_store.clear()
-                return zone.direction, f"{p.parent_name}-PB", parent_tf
-            print(f"[V5S-WATCHZONE] pending {p.parent_name} pullback -- target={target:.3f} current={price:.3f}")
+                # Same staleness pre-check as the straight-fire branch above
+                # (2026-09-08) -- clearing the zone before confirming
+                # _open_position can get a fresh far line would permanently
+                # lose this fire instead of retrying next cycle.
+                if _far_line_for(cfg.symbol, parent_tf, zone.direction) is None:
+                    print(f"[V5S-WATCHZONE] {p.parent_name} pullback target {target:.3f} reached "
+                          f"(price={price:.3f}) -- but M{parent_tf} bridge stale, deferring, will retry once fresh")
+                else:
+                    print(f"[V5S-WATCHZONE] {p.parent_name} pullback target {target:.3f} reached (price={price:.3f})")
+                    wz_store.clear()
+                    return zone.direction, f"{p.parent_name}-PB", parent_tf
+            else:
+                print(f"[V5S-WATCHZONE] pending {p.parent_name} pullback -- target={target:.3f} current={price:.3f}")
 
     return None
 
@@ -512,27 +532,47 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
     # below is what makes this fire exactly ONCE per genuine event, not
     # once per poll while it's still the latest bar. See RuntimeState.
     if fs_m3.event_just_happened() and fs_m3.last_event.bar_time != runtime.last_m3_event_time:
-        runtime.mark_seen(fs_m3.last_event.bar_time)
         event = fs_m3.last_event
         new_dir = event.confirmed.value
         valid = parent.allows(new_dir)
         label = event.event_type.value
 
-        print(f"[V5S] M3 {label} -> {_DIR_LABEL[new_dir]} at {event.bar_time} "
-              f"(parent={parent.source}, M5={parent.m5.label()}, M15={parent.m15.label()}, "
-              f"bull_allowed={parent.bull_allowed}, bear_allowed={parent.bear_allowed}, valid={valid})")
+        # Staleness pre-check, added 2026-09-08 (found live: a real trade's
+        # SL was computed off a bridge read that was 3 bars/9 minutes stale
+        # -- fixed at the bridge.py layer, see its own bar_time-staleness
+        # comment). That fix alone would have LOST the trade instead: the
+        # event used to get marked "seen" unconditionally, before knowing
+        # whether _open_position could even get a fresh far line -- a
+        # stale-at-the-wrong-instant bridge meant the event was consumed
+        # and never retried, even once the bridge recovered moments later.
+        # Only mark_seen() once we know this specific attempt can actually
+        # proceed with fresh data -- event_just_happened() stays True for
+        # this bar's whole ~3-minute window (see comment above), so leaving
+        # it unmarked here means the very next fresh-bridge cycle retries
+        # the SAME event instead of silently dropping it.
+        if valid and _far_line_for(cfg.symbol, 3, new_dir) is None:
+            print(f"[V5S] M3 {label} -> {_DIR_LABEL[new_dir]} at {event.bar_time} -- "
+                  f"M3 bridge stale -- deferring this event, will retry once fresh")
+        else:
+            runtime.mark_seen(fs_m3.last_event.bar_time)
 
-        if valid:
-            new_event_tag = _tag(parent, new_dir, label)
-            position, owner_tf = _maybe_apply(cfg, position, owner_tf, new_dir, new_event_tag, 3, tm_mgr, "M3 event")
-        elif label == "FLIP":
-            # Invalid FLIP (not TRAP_RESOLVED, see watch_zone.py's own
-            # docstring for why that's excluded) -- 2026-09-07: park it in
-            # the watch zone instead of dropping it outright, so a parent
-            # catching up shortly after still gets to trade the move.
-            wz_store.arm(new_dir, fs_m3.last_close, event.bar_time)
-            print(f"[V5S-WATCHZONE] armed {_DIR_LABEL[new_dir]} @ {fs_m3.last_close:.3f} (parent disagrees)")
-        # else: invalid TRAP_RESOLVED -- leave any open position alone, it waits on its own SL (unchanged)
+            print(f"[V5S] M3 {label} -> {_DIR_LABEL[new_dir]} at {event.bar_time} "
+                  f"(parent={parent.source}, M5={parent.m5.label()}, M15={parent.m15.label()}, "
+                  f"bull_allowed={parent.bull_allowed}, bear_allowed={parent.bear_allowed}, valid={valid})")
+
+            if valid:
+                new_event_tag = _tag(parent, new_dir, label)
+                position, owner_tf = _maybe_apply(cfg, position, owner_tf, new_dir, new_event_tag, 3, tm_mgr, "M3 event")
+            elif label == "FLIP":
+                # Invalid FLIP (not TRAP_RESOLVED, see watch_zone.py's own
+                # docstring for why that's excluded) -- 2026-09-07: park it in
+                # the watch zone instead of dropping it outright, so a parent
+                # catching up shortly after still gets to trade the move.
+                # Doesn't need far_line at all (uses last_close), so no
+                # staleness pre-check applies to this branch.
+                wz_store.arm(new_dir, fs_m3.last_close, event.bar_time)
+                print(f"[V5S-WATCHZONE] armed {_DIR_LABEL[new_dir]} @ {fs_m3.last_close:.3f} (parent disagrees)")
+            # else: invalid TRAP_RESOLVED -- leave any open position alone, it waits on its own SL (unchanged)
 
     wz_signal = _check_watch_zone(cfg, wz_store, parent, fs_m3)
     if wz_signal is not None:
@@ -547,15 +587,30 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
         fs_owner = parent.m5 if owner_tf == 5 else parent.m15
         if (fs_owner.event_just_happened()
                 and not runtime.owner_event_already_seen(owner_tf, fs_owner.last_event.bar_time)):
-            runtime.mark_owner_event_seen(owner_tf, fs_owner.last_event.bar_time)
             owner_dir = fs_owner.confirmed.value
             pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
             if owner_dir != pos_direction:
-                owner_name = "M5" if owner_tf == 5 else "M15"
-                owner_tag = f"{owner_name}/{owner_tf}F"
-                print(f"[V5S] M{owner_tf} owner-flip -> {_DIR_LABEL[owner_dir]} -- reversing M{owner_tf}-owned position")
-                position, owner_tf = _maybe_apply(cfg, position, owner_tf, owner_dir, owner_tag, owner_tf,
-                                                  tm_mgr, f"M{owner_tf} owner-flip")
+                # Staleness pre-check, same reasoning/incident as the M3
+                # event and watch-zone paths above (2026-09-08) -- only
+                # mark_owner_event_seen once we know _open_position can get
+                # a fresh far line; a stale-at-the-wrong-instant read here
+                # would otherwise permanently skip this reversal instead of
+                # retrying next cycle.
+                if _far_line_for(cfg.symbol, owner_tf, owner_dir) is None:
+                    print(f"[V5S] M{owner_tf} owner-flip -> {_DIR_LABEL[owner_dir]} -- "
+                          f"M{owner_tf} bridge stale, deferring reversal, will retry once fresh")
+                else:
+                    runtime.mark_owner_event_seen(owner_tf, fs_owner.last_event.bar_time)
+                    owner_name = "M5" if owner_tf == 5 else "M15"
+                    owner_tag = f"{owner_name}/{owner_tf}F"
+                    print(f"[V5S] M{owner_tf} owner-flip -> {_DIR_LABEL[owner_dir]} -- reversing M{owner_tf}-owned position")
+                    position, owner_tf = _maybe_apply(cfg, position, owner_tf, owner_dir, owner_tag, owner_tf,
+                                                      tm_mgr, f"M{owner_tf} owner-flip")
+            else:
+                # Same direction -- nothing to act on, safe to mark seen
+                # unconditionally (no staleness risk since no far_line read
+                # happens on this branch).
+                runtime.mark_owner_event_seen(owner_tf, fs_owner.last_event.bar_time)
 
     if position is not None:
         _run_sl_manager(cfg, sl_mgr, position, owner_tf)
