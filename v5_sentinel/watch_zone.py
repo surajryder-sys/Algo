@@ -31,11 +31,18 @@ that doesn't drift as time passes -- confirmed against the user's own
 manual calculation (close 4395.23, near 4389.436 at that bar -> target
 ~4392.6) before this fix went in.
 
-TRAP_RESOLVED events are NOT parked here -- "trap and resolve enters as
-it is": that path keeps using the existing, unchanged pipeline.
+UPDATED 2026-09-08 -- invalid TRAP_RESOLVED events ARE now parked here
+too, same as FLIP (this reverses the original "trap and resolve enters
+as it is, that path keeps using the existing, unchanged pipeline"
+decision). Found live: M3 resolved bullish while the parent still
+disagreed, the parent itself confirmed bullish just ONE MINUTE later,
+and nothing was parked to catch that confirmation -- a real missed
+trade. TRAP_RESOLVED is just as real a "M3 leads, parent confirms
+shortly after" trigger as FLIP is; there was no principled reason left
+to treat it differently once that gap turned up.
 
 Only ONE watch zone is ever active (Trend Manager runs one M3 execution
-stream) -- arming a new one (a fresh, still-invalid M3 FLIP) replaces
+stream) -- arming a new one (a fresh, still-invalid M3 event) replaces
 whatever was there before.
 
 Cancellation (either one drops the zone, no trade): M3 itself enters a

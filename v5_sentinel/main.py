@@ -167,14 +167,19 @@ def _far_line_for(symbol: str, tf_minutes: int, direction: int) -> Optional[floa
 
 
 def _owner_timeframe(tag: str) -> int:
-    """Which timeframe governs THIS position's SL trailing basis and
-    exit/reversal trigger -- 2026-09-07: "a M5 [watch-zone] trade
-    shouldn't check for M3 structure once it takes over... it follows
-    SL of M5, and nothing [closes/reverses it] unless M5 itself makes
-    the flip." A watch-zone trade credited to M5 or M15 (tag ending
-    "/5F"/"/15F", or exactly "M5-PB"/"M15-PB") is owned by that same
-    timeframe for its whole life -- M3 activity has zero effect on it
-    while it's open. A normal M3-triggered trade (tag ending "/3F" or
+    """Which timeframe currently governs this position's SL trailing
+    basis and exit/reversal trigger, READ BACK from its own comment tag
+    -- 2026-09-07: "a M5 [watch-zone] trade shouldn't check for M3
+    structure once it takes over... it follows SL of M5, and nothing
+    [closes/reverses it] unless M5 itself makes the flip." A watch-zone
+    trade credited to M5 or M15 (tag ending "/5F"/"/15F", or exactly
+    "M5-PB"/"M15-PB") is owned by that same timeframe -- M3 activity has
+    zero effect on it -- UNLESS a later M3 TRAP_RESOLVED reconfirms the
+    SAME direction, added 2026-09-08: that hands ownership to M3 (see
+    run_once's own handover branch), reopening the position under a
+    fresh M3-owned tag so this function reads the new ownership back
+    correctly on a later restart too, not just for the rest of this
+    process's run. A normal M3-triggered trade (tag ending "/3F" or
     "/3T") is unaffected, still M3-owned. Unrecognized tags default to
     3, matching this system's original, only-ever-M3 behavior."""
     if tag.endswith("/5F") or tag == "M5-PB":
@@ -562,17 +567,54 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
 
             if valid:
                 new_event_tag = _tag(parent, new_dir, label)
-                position, owner_tf = _maybe_apply(cfg, position, owner_tf, new_dir, new_event_tag, 3, tm_mgr, "M3 event")
-            elif label == "FLIP":
-                # Invalid FLIP (not TRAP_RESOLVED, see watch_zone.py's own
-                # docstring for why that's excluded) -- 2026-09-07: park it in
-                # the watch zone instead of dropping it outright, so a parent
-                # catching up shortly after still gets to trade the move.
-                # Doesn't need far_line at all (uses last_close), so no
-                # staleness pre-check applies to this branch.
+                if (label == "TRAP_RESOLVED" and position is not None and owner_tf in (5, 15)
+                        and new_dir == (1 if position.type == mt5.POSITION_TYPE_BUY else -1)):
+                    # M3 TRAP_RESOLVED reconfirming an M5/M15-owned
+                    # position's OWN direction -- 2026-09-08, user
+                    # direction: the M5/M15 ownership rule exists so a
+                    # trade isn't missed when M3 flips first and the
+                    # parent only confirms later; once that trade has run
+                    # long enough to take partial exits, and M3 itself
+                    # THEN independently resolves back in agreement, the
+                    # parent and M3 are back in full alignment -- refresh
+                    # to full size (closes any partial-cut leftover, same
+                    # mechanism _apply_signal's own REFRESH branch already
+                    # uses) AND hand ownership over to M3 from here on,
+                    # not just for this cycle: reopening under M3's own
+                    # tag makes the handover durable across a restart too
+                    # (_owner_timeframe reads ownership back from the
+                    # position's own comment, not from any separately
+                    # persisted "current owner" -- an in-memory-only
+                    # reassignment here would silently revert on the next
+                    # restart otherwise). Always refreshes (not gated on
+                    # is_partially_cut like a normal same-direction event)
+                    # specifically so the handover is always durable, even
+                    # if triggered before any partial exit happened yet.
+                    print(f"[V5S] M3 TRAP_RESOLVED reconfirms M{owner_tf}-owned position's own "
+                          f"{_DIR_LABEL[new_dir]} direction -- refreshing to full size, handing ownership to M3")
+                    if _close_position(cfg, position, "HANDOVER", new_event_tag, "HO"):
+                        _open_position(cfg, new_dir, 3, _comment_for_tag(new_event_tag))
+                        positions = broker.get_positions(cfg.symbol, cfg.magic_number)
+                        position = positions[0] if positions else None
+                        owner_tf = 3
+                else:
+                    position, owner_tf = _maybe_apply(cfg, position, owner_tf, new_dir, new_event_tag, 3, tm_mgr, "M3 event")
+            else:
+                # Invalid M3 event (FLIP or TRAP_RESOLVED) -- park it in
+                # the watch zone instead of dropping it outright, so a
+                # parent catching up shortly after still gets to trade the
+                # move. TRAP_RESOLVED used to be excluded from this
+                # (dropped outright when invalid, per the ORIGINAL "trap
+                # and resolve enters as it is" design) -- found live
+                # 2026-09-08 to miss a real BUY: M3 resolved bullish while
+                # M5 still disagreed, M5 itself confirmed bullish just ONE
+                # MINUTE later, but nothing was parked to catch that
+                # confirmation. Both event types now get the same
+                # treatment. Doesn't need far_line at all (uses
+                # last_close), so no staleness pre-check applies here.
                 wz_store.arm(new_dir, fs_m3.last_close, event.bar_time)
-                print(f"[V5S-WATCHZONE] armed {_DIR_LABEL[new_dir]} @ {fs_m3.last_close:.3f} (parent disagrees)")
-            # else: invalid TRAP_RESOLVED -- leave any open position alone, it waits on its own SL (unchanged)
+                print(f"[V5S-WATCHZONE] armed {_DIR_LABEL[new_dir]} @ {fs_m3.last_close:.3f} "
+                      f"(parent disagrees, {label})")
 
     wz_signal = _check_watch_zone(cfg, wz_store, parent, fs_m3)
     if wz_signal is not None:
