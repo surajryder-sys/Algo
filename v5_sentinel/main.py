@@ -84,7 +84,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bias, bridge, broker, flip_state, heartbeat, rates, sl_manager, trade_manager, watch_zone
+from v5_sentinel import bias, bridge, broker, flip_state, heartbeat, htf_levels, rates, sl_manager, trade_manager, watch_zone
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.bridge_flip import StaleAlertTracker, far_near
 from v5_sentinel.config import Config, load_config
@@ -250,12 +250,51 @@ def _action_comment(tag: str, action_code: str) -> str:
     return f"V5S-TM-{tag}-{action_code}"
 
 
+def _atr_block_check(cfg: Config, direction: int, entry_price: float) -> Optional[str]:
+    """ATR Long/Short Blocked safeguard, added 2026-09-09 (user direction):
+    a qualifying setup is blocked if entry_price sits within
+    cfg.atr_block_buffer_points of an M15-or-higher HTF level in the
+    direction-relevant role -- "buy sees only resistances, sell sees only
+    supports". M15 and everything ABOVE it (M30 through D1, the same 9
+    timeframes RM's own htf_levels.py already computes) is in scope;
+    M5/M3/M1 are deliberately NOT checked at all, per the user's own
+    "nothing to do with M5 and lower timeframe resistances and supports".
+
+    Returns a human-readable block reason (which HTF, which level, how
+    close) if blocked, else None. Checked ONCE per entry attempt, at
+    whatever price is current when _open_position runs -- not re-checked
+    continuously while a setup is pending elsewhere (watch-zone pullback
+    etc.), same as every other entry-time-only check in this file."""
+    blocking_role = "RESISTANCE" if direction == 1 else "SUPPORT"
+    states = htf_levels.compute_all_htf_states(cfg.symbol)
+    for tf in htf_levels.HTF_TIMEFRAMES_MINUTES:
+        state = states.get(tf)
+        if state is None:
+            continue
+        for level in state.levels:
+            if level.role != blocking_role:
+                continue
+            gap = abs(entry_price - level.value)
+            if gap < cfg.atr_block_buffer_points:
+                name = htf_levels.TIMEFRAME_NAMES[tf]
+                return f"{name} {level.role} @ {level.value:.3f} is only {gap:.3f}pts away"
+    return None
+
+
 def _open_position(cfg: Config, direction: int, sl_tf: int, comment: str) -> None:
     far = _far_line_for(cfg.symbol, sl_tf, direction)
     if far is None:
         print(f"[V5S-ENTRY] M{sl_tf} bridge stale/missing -- cannot compute SL, skipping {_DIR_LABEL[direction]} ({comment})")
         return
     sl = far - cfg.sl_buffer if direction == 1 else far + cfg.sl_buffer
+
+    bid, ask = broker.get_tick_price(cfg.symbol)
+    entry_price = ask if direction == 1 else bid
+    block_reason = _atr_block_check(cfg, direction, entry_price)
+    if block_reason is not None:
+        label = "ATR Long Blocked" if direction == 1 else "ATR Short Blocked"
+        print(f"[V5S-ENTRY] {label} -- {block_reason} -- skipping {_DIR_LABEL[direction]} ({comment})")
+        return
 
     print(f"[V5S-ENTRY] {_DIR_LABEL[direction]} ({comment}) far_line={far:.3f} sl={sl:.3f}")
     if not cfg.enable_trading:

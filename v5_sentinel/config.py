@@ -38,6 +38,12 @@ class Config:
     # trailing SL both use it) -- XAUUSD points.
     sl_buffer: float
 
+    # ATR Long/Short Blocked safeguard, added 2026-09-09: a qualifying
+    # entry is blocked if the entry price sits within this many points of
+    # an M15-or-higher HTF resistance (for a BUY) / support (for a SELL)
+    # level -- see main.py's own _atr_block_check() docstring.
+    atr_block_buffer_points: float
+
     # SL Manager thresholds (points in favor of the trade).
     breakeven_trigger_points: float   # SL -> cost once profit reaches this
     trail_activation_points: float    # far-line trailing starts once profit is at/beyond this (== breakeven_trigger today, see main.py note)
@@ -75,6 +81,7 @@ def load_config() -> Config:
         poll_seconds=float(os.getenv("V5S_POLL_SECONDS", "1")),
         enable_trading=_env_bool("V5S_ENABLE_TRADING", False),
         sl_buffer=float(os.getenv("V5S_SL_BUFFER", "2.0")),
+        atr_block_buffer_points=float(os.getenv("V5S_ATR_BLOCK_BUFFER_POINTS", "5.0")),
         breakeven_trigger_points=float(os.getenv("V5S_BREAKEVEN_TRIGGER_POINTS", "7")),
         trail_activation_points=float(os.getenv("V5S_TRAIL_ACTIVATION_POINTS", "7")),
         partial1_trigger_points=float(os.getenv("V5S_PARTIAL1_TRIGGER_POINTS", "10")),
