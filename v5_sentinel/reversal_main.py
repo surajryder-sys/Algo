@@ -87,7 +87,7 @@ import time
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bridge, broker, htf_levels, reversal_entry, sl_manager, trade_manager
+from v5_sentinel import bridge, broker, heartbeat, htf_levels, reversal_entry, sl_manager, trade_manager
 from v5_sentinel.bridge_flip import BridgeFlipState, StaleAlertTracker, m3_far_line
 from v5_sentinel.critical_alerts_telegram import send_message as _telegram_send
 from v5_sentinel.reversal_config import RMConfig, load_config
@@ -316,6 +316,11 @@ def main() -> None:
                 run_once(cfg, sl_mgr, tm_mgr, store, bridge_flip, stale_tracker)
             except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
                 print(f"[V5S-STR] cycle error: {exc!r}")
+            # See heartbeat.py's own docstring -- proves the loop itself
+            # is alive, regardless of whether this cycle raised. Added
+            # 2026-09-08 after this exact process went silently inert for
+            # over 25 hours while still showing as a running OS process.
+            heartbeat.write(cfg.heartbeat_file)
             time.sleep(cfg.poll_seconds)
     finally:
         broker.shutdown()

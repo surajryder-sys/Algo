@@ -34,6 +34,7 @@ from __future__ import annotations
 import time
 
 from v5_sentinel import critical_alerts_mt5 as mt5_price
+from v5_sentinel import heartbeat
 from v5_sentinel import htf_levels
 from v5_sentinel.critical_alerts_config import Config, load_config
 from v5_sentinel.critical_alerts_state import CriticalAlertState
@@ -109,6 +110,12 @@ def main() -> None:
                 run_once(cfg, state, subscribers)
             except Exception as exc:
                 print(f"[v5_sentinel.critical_alerts] ERROR: {exc}")
+            # See heartbeat.py's own docstring -- proves the loop itself
+            # is alive each cycle, added 2026-09-08 as part of the
+            # watchdog build (TM and RM both independently went silently
+            # inert for extended periods with no existing signal to catch
+            # it).
+            heartbeat.write(cfg.heartbeat_file)
             time.sleep(cfg.poll_seconds)
     except KeyboardInterrupt:
         pass

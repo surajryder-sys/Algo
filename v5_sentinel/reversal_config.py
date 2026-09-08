@@ -55,6 +55,7 @@ class RMConfig:
     sl_state_file: str
     levels_state_file: str
     bridge_flip_state_file: str
+    heartbeat_file: str
 
     mt5_terminal_path: str | None
     mt5_login: int | None
@@ -82,6 +83,7 @@ def load_config() -> RMConfig:
         sl_state_file=os.getenv("V5S_RM_SL_STATE_FILE", "v5s_reversal_manager_sl_state.json"),
         levels_state_file=os.getenv("V5S_RM_LEVELS_STATE_FILE", "v5s_reversal_manager_levels_state.json"),
         bridge_flip_state_file=os.getenv("V5S_RM_BRIDGE_FLIP_STATE_FILE", "v5s_reversal_manager_bridge_flip_state.json"),
+        heartbeat_file=os.getenv("V5S_RM_HEARTBEAT_FILE", "v5s_reversal_manager_heartbeat.json"),
         mt5_terminal_path=os.getenv("MT5_TERMINAL_PATH") or None,
         mt5_login=int(login_raw) if login_raw else None,
         mt5_password=os.getenv("MT5_PASSWORD") or None,

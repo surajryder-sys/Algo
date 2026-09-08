@@ -84,7 +84,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bias, bridge, broker, flip_state, rates, sl_manager, trade_manager, watch_zone
+from v5_sentinel import bias, bridge, broker, flip_state, heartbeat, rates, sl_manager, trade_manager, watch_zone
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.bridge_flip import StaleAlertTracker, far_near
 from v5_sentinel.config import Config, load_config
@@ -679,6 +679,11 @@ def main() -> None:
                 run_once(cfg, sl_mgr, tm_mgr, runtime, wz_store, tracker, stale_tracker)
             except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
                 print(f"[V5S] cycle error: {exc!r}")
+            # Written every iteration regardless of whether run_once
+            # raised -- see heartbeat.py's own docstring. A caught cycle
+            # error still proves the loop is alive; only a genuine hang
+            # inside run_once (or process death) stops this from updating.
+            heartbeat.write(cfg.heartbeat_file)
             time.sleep(cfg.poll_seconds)
     finally:
         broker.shutdown()

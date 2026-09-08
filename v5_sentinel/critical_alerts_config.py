@@ -35,6 +35,7 @@ class Config:
     symbol: str
     state_file: str
     subscribers_file: str
+    heartbeat_file: str
 
 
 def load_config() -> Config:
@@ -50,4 +51,5 @@ def load_config() -> Config:
         symbol=os.getenv("V5S_SYMBOL", "XAUUSD"),
         state_file=os.getenv("V5S_CRITICAL_ALERTS_STATE_FILE", "v5_sentinel_critical_alerts_state.json"),
         subscribers_file=os.getenv("V5S_CRITICAL_ALERTS_SUBSCRIBERS_FILE", "v5_sentinel_critical_alerts_subscribers.json"),
+        heartbeat_file=os.getenv("V5S_CRITICAL_ALERTS_HEARTBEAT_FILE", "v5s_critical_alerts_heartbeat.json"),
     )
