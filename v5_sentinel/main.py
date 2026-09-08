@@ -400,10 +400,13 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
     """Runs the watch-zone state machine for one cycle -- see
     watch_zone.py for the full design. Returns (direction, tag, sl_tf) if
     a watch-zone-driven trade should fire THIS cycle, else None -- sl_tf
-    is the CONFIRMING parent's own timeframe (5 or 15), since 2026-09-07
-    that parent OWNS the resulting trade's SL basis and exit trigger, not
-    M3. Arming a new zone and cancelling an invalidated one both happen
-    here as a side effect regardless of whether a trade fires."""
+    is the CONFIRMING parent's own timeframe, since 2026-09-07 that
+    parent OWNS the resulting trade's SL basis and exit trigger, not M3.
+    M5 ONLY as of 2026-09-09 (M15 no longer confirms/owns a watch-zone
+    trade at all -- if M5 is trapped when M3 flips, the design is to
+    wait for M5 itself to flip, not let M15 stand in). Arming a new zone
+    and cancelling an invalidated one both happen here as a side effect
+    regardless of whether a trade fires."""
     zone = wz_store.zone
 
     # Cancellation -- M3 entering a trap, or flipping to a DIFFERENT
@@ -418,15 +421,19 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
     if zone is None:
         return None
 
-    # Look for the MOST RECENT qualifying parent flip (recency-first,
-    # 2026-09-07: a later parent event supersedes an earlier one still
-    # pending) -- M5 always eligible; M15 only counts when M5 is
-    # CURRENTLY trapped, matching bias.py's own M5-primary/M15-fallback
-    # table (M15 has no vote at all while M5 is decisive, agree or not).
+    # Look for the MOST RECENT qualifying parent flip -- M5 ONLY, removed
+    # 2026-09-09 (was: M15 also counted as a fallback confirming/owning
+    # parent when M5 was trapped). User's own reasoning: M5 is the parent
+    # now, and the pullback method + M3's own qualifying price already
+    # cover "M3 flips first, parent confirms shortly after" -- if M5 is
+    # trapped when M3 flips, the design is simply to wait for M5 itself
+    # to flip and take the trade off that, not let M15 stand in and own
+    # it. bias.py's own M5-primary/M15-fallback table (used to judge
+    # whether a fresh M3 event is VALID at all, separate from who OWNS
+    # the resulting trade) is deliberately UNCHANGED -- only this
+    # watch-zone confirming-parent list lost M15.
     candidates = []
     parent_candidates = [("M5", "5", parent.m5)]
-    if parent.m5.watching is not None:
-        parent_candidates.append(("M15", "15", parent.m15))
     for name, tf_code, fs in parent_candidates:
         if fs is not None and fs.event_just_happened() and fs.confirmed.value == zone.direction:
             candidates.append((fs.last_event.bar_time, name, tf_code, fs.last_close))
