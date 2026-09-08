@@ -55,10 +55,17 @@ def load_config() -> Config:
         chart_url=os.getenv("V5S_TV_SCRAPER_CHART_URL", "https://www.tradingview.com/chart/mL7E68j4/"),
         symbol=os.getenv("V5S_TV_SCRAPER_SYMBOL", "XAUUSD"),
         timeframe=os.getenv("V5S_TV_SCRAPER_TIMEFRAME", "5"),
-        # Deliberately its OWN Chrome/Brave profile dir + CDP port (below)
-        # -- an independent browser instance from v3's, so both can run at
-        # once without fighting over the same profile lock or DevTools port.
-        profile_dir=os.getenv("V5S_TV_SCRAPER_PROFILE_DIR", "v5s_tv_scraper_profile"),
+        # SAME real Brave profile as TV_SCRAPER_PROFILE_DIR (v3's own) --
+        # confirmed live 2026-09-09: a fresh, separate profile has no saved
+        # TradingView login, defeating the point of "already logged in."
+        # Own CDP port (below) still keeps this launch independent in
+        # principle, but since both point at the SAME profile directory,
+        # Chromium only ever lets one of the two scrapers hold it open at
+        # a time -- don't run v3's and v5's tv_scraper simultaneously
+        # until/unless this needs revisiting (e.g. a second, separately-
+        # logged-in Brave profile).
+        profile_dir=os.getenv("V5S_TV_SCRAPER_PROFILE_DIR",
+                               r"C:\Users\ARK\AppData\Local\BraveSoftware\Brave-Browser\User Data"),
         poll_seconds=float(os.getenv("V5S_TV_SCRAPER_POLL_SECONDS", "5")),
         zone_state_file=os.getenv("V5S_TV_SCRAPER_ZONE_STATE_FILE", "v5s_tv_scraper_zones.json"),
         first_seen_state_file=os.getenv("V5S_TV_SCRAPER_FIRST_SEEN_FILE", "v5s_tv_scraper_first_seen.json"),
@@ -67,15 +74,28 @@ def load_config() -> Config:
         mitigation_track_file=os.getenv("V5S_TV_SCRAPER_MITIGATION_TRACK_FILE", "v5s_tv_scraper_mitigation_track.json"),
         zone_history_log_file=os.getenv("V5S_TV_SCRAPER_ZONE_HISTORY_LOG_FILE", "v5s_tv_scraper_zone_history.jsonl"),
         browser_executable_path=os.getenv("V5S_TV_SCRAPER_BROWSER_PATH") or None,
-        # Same 6x1 stacked-timeframe grid as v3's own already-proven XAUUSD
-        # setup, per "everything is same" -- override via env if this
-        # chart's actual layout differs.
-        grid_rows=int(os.getenv("V5S_TV_SCRAPER_GRID_ROWS", "6")),
-        grid_cols=int(os.getenv("V5S_TV_SCRAPER_GRID_COLS", "1")),
-        window_x=int(os.getenv("V5S_TV_SCRAPER_WINDOW_X", "0")),
-        window_y=int(os.getenv("V5S_TV_SCRAPER_WINDOW_Y", "0")),
-        window_width=int(os.getenv("V5S_TV_SCRAPER_WINDOW_WIDTH", "1720")),
-        window_height=int(os.getenv("V5S_TV_SCRAPER_WINDOW_HEIGHT", "1392")),
+        # 4 columns x 2 rows -- confirmed live 2026-09-09 via a screenshot
+        # of the actual chart (H4/H2/H1/M30 across the top row, M15/M5/
+        # M3/M1 across the bottom). The original 6x1 default here was
+        # blindly copied from v3's own different chart layout ("everything
+        # is same" was about the Pine script/indicator, not this chart's
+        # specific grid shape) -- wrong dimensions against this real 4x2
+        # layout caused every pane to sample only 2 of the 8 real panes
+        # repeatedly (always the center column of whichever real row the
+        # click landed in), confirmed live before this fix.
+        grid_rows=int(os.getenv("V5S_TV_SCRAPER_GRID_ROWS", "2")),
+        grid_cols=int(os.getenv("V5S_TV_SCRAPER_GRID_COLS", "4")),
+        # Matches TV_SCRAPER_WINDOW_* (v3's own proven, already-tuned-to-
+        # this-machine's-real-monitors values) -- confirmed live 2026-09-09
+        # that v5's original smaller default window caused panes to
+        # overlap/misread each other (documented failure mode, see
+        # project_tv_scraper_window_maximized memory: "a shrunk window
+        # silently duplicates data across grid panes with no error
+        # logged").
+        window_x=int(os.getenv("V5S_TV_SCRAPER_WINDOW_X", "822")),
+        window_y=int(os.getenv("V5S_TV_SCRAPER_WINDOW_Y", "-1440")),
+        window_width=int(os.getenv("V5S_TV_SCRAPER_WINDOW_WIDTH", "3440")),
+        window_height=int(os.getenv("V5S_TV_SCRAPER_WINDOW_HEIGHT", "1440")),
         # Own CDP port, distinct from v3 tv_scraper's default 9222 -- lets
         # both run simultaneously as fully independent browser instances.
         cdp_port=int(os.getenv("V5S_TV_SCRAPER_CDP_PORT", "9223")),
