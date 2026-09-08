@@ -126,21 +126,29 @@ def run_once(cfg: WatchdogConfig, state: WatchdogState, subscribers: SubscriberS
 
         if currently_stale and not was_stale:
             age_text = "no heartbeat file at all" if age is None else f"last heartbeat {_format_age(age)} ago"
-            text = f"\U0001F6A8 {bot_name} appears STUCK -- {age_text} (process may still show as running)"
-            print(f"[V5S-WATCHDOG] {text}")
+            # Windows console stdout is cp1252, which can't encode emoji --
+            # confirmed live, crashed the whole process on its first alert
+            # (and the except-handler's own fallback print of the error
+            # ALSO failed, since exc!r embeds the same text). Emoji stay in
+            # the TELEGRAM message only; the console log line is plain
+            # ASCII.
+            log_text = f"{bot_name} appears STUCK -- {age_text} (process may still show as running)"
+            telegram_text = f"\U0001F6A8 {log_text}"
+            print(f"[V5S-WATCHDOG] {log_text}")
             for chat_id in subscribers.approved_chat_ids():
                 try:
-                    send_message(cfg.telegram_bot_token, chat_id, text)
+                    send_message(cfg.telegram_bot_token, chat_id, telegram_text)
                 except Exception as exc:  # noqa: BLE001 -- alerting must never break the loop
                     print(f"[V5S-WATCHDOG] telegram send failed for {chat_id}: {exc!r}")
             state.set_stale(bot_name, True)
 
         elif was_stale and not currently_stale:
-            text = f"✅ {bot_name} recovered -- heartbeat is fresh again"
-            print(f"[V5S-WATCHDOG] {text}")
+            log_text = f"{bot_name} recovered -- heartbeat is fresh again"
+            telegram_text = f"✅ {log_text}"
+            print(f"[V5S-WATCHDOG] {log_text}")
             for chat_id in subscribers.approved_chat_ids():
                 try:
-                    send_message(cfg.telegram_bot_token, chat_id, text)
+                    send_message(cfg.telegram_bot_token, chat_id, telegram_text)
                 except Exception as exc:  # noqa: BLE001
                     print(f"[V5S-WATCHDOG] telegram send failed for {chat_id}: {exc!r}")
             state.set_stale(bot_name, False)
