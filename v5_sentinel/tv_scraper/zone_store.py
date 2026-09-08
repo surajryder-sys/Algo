@@ -36,9 +36,9 @@ class TVZone:
     # 10000-bar limit, ~35 days on M5). Confirmed live: a zone past that
     # ceiling gets timestamped "as if formed just now" by the wall-clock
     # fallback, even though it could genuinely be over a month old and
-    # already gone through its real retest/mitigation cycle -- v3's
-    # Alert Manager uses this flag to skip alerting on such zones
-    # entirely, since their apparent freshness is fabricated, not real.
+    # already gone through its real retest/mitigation cycle -- any
+    # downstream alerting logic should check this flag and skip such
+    # zones, since their apparent freshness is fabricated, not real.
     # Defaults True so records written before this field existed don't
     # break on load -- harmless, since apply_formed() rewrites every
     # still-visible zone's record on its very next poll anyway, so the

@@ -1,9 +1,7 @@
 """Keeps a real, persistently logged-in TradingView session open and polls
-its Data Window panel for the current OB-zone state -- ported 2026-09-07
-from v3/tv_scraper/scraper.py at the user's explicit direction ("everything
-is same, even the chart url everything is same, just port or copy from
-there and add it in v5"). Feeds V5-Sentinel's second Reversal Manager
-component (OB-zone based, alongside the existing STR/ATR-trail one).
+its Data Window panel for the current OB-zone state. Feeds V5-Sentinel's
+second Reversal Manager component (OB-zone based, alongside the existing
+STR/ATR-trail one).
 
 Run with: python -m v5_sentinel.tv_scraper.scraper
 
@@ -11,23 +9,21 @@ First run: no saved login exists yet, so a VISIBLE browser window opens and
 this process waits for you to log into TradingView in it (open the chart
 manually if it doesn't load, log in, then press Enter here). The session is
 saved into V5S_TV_SCRAPER_PROFILE_DIR and reused on every future run -- you
-only log in once. Runs as its OWN independent browser instance (own CDP
-port, own profile dir) so it can run alongside v3's tv_scraper without
-either fighting over the same browser lock.
+only log in once.
 
-DELIBERATELY NARROWER than v3's scraper: this only tracks OB zone state
-(formed/retested/top/btm) -- no ATR-trail reading, no AtrStore, no
-AtrTrendTracker. "MT5 data is only for execution, ATR based" (user,
-2026-09-07): M3/M1 LTF confirmation and SL basis stay exactly as STR
-already built them (bridge-only), unchanged by this component. This
-scraper's only job is supplying the OB zone side of the picture.
+DELIBERATELY NARROW: this only tracks OB zone state (formed/retested/top/
+btm) -- no ATR-trail reading, no AtrStore, no AtrTrendTracker. "MT5 data
+is only for execution, ATR based" (user, 2026-09-07): M3/M1 LTF
+confirmation and SL basis stay exactly as STR already built them
+(bridge-only), unchanged by this component. This scraper's only job is
+supplying the OB zone side of the picture.
 
 Everything else -- the pane-focus/settle-verification/stuck-pane-detection
 machinery, the full zone lifecycle tracking (formation, retest, mitigation
-debounce, resurrection, orphan reconciliation) -- is carried over verbatim
-from v3's already-proven, battle-tested implementation. See each imported
-module's own docstring for the specific live incidents that shaped it;
-none of that history is repeated here.
+debounce, resurrection, orphan reconciliation) -- is a proven,
+battle-tested implementation shaped by many confirmed live incidents. See
+each imported module's own docstring for the specific incidents that
+shaped it; none of that history is repeated here.
 """
 from __future__ import annotations
 
@@ -53,9 +49,8 @@ _DATA_WINDOW_TAB = "Data window"
 
 # Plausible price range per symbol -- a zone whose top/btm falls outside its
 # OWN labeled symbol's range here is rejected outright rather than written
-# to the store. Carried over from v3/tv_scraper/scraper.py's own
-# cross-symbol contamination guard -- kept even though this scraper is
-# XAUUSD-only for now, since it costs nothing and the same class of
+# to the store. A cross-symbol contamination guard, kept even though this
+# scraper is XAUUSD-only for now, since it costs nothing and the same class of
 # pane-focus/repaint race that caused that module's confirmed live incident
 # could in principle happen here too if this grid is ever widened to more
 # symbols.
@@ -179,8 +174,8 @@ def _collect_data_window_text(page: Page, steps: int = 16) -> str:
 
     steps=16 matches the row count of the current OBD_SecretTrader.pine
     build (Top/Btm/Retested/FormedMinutesRef/RetestedMinutesRef x 4 slots x
-    2 directions = 40 rows) -- see v3/tv_scraper/scraper.py's own comment
-    for the full history of why this number matters."""
+    2 directions = 40 rows) -- this needs to track the indicator's own
+    plot count exactly, or a row goes unread every time it changes."""
     point = _panel_scroll_point(page)
     if point is None:
         # Can't safely locate the panel -- read whatever's there right now
@@ -261,8 +256,9 @@ def _find_resurrectable(zone_store: ZoneStore, symbol: str, timeframe: str, dire
     display churn, not a genuine LuxAlgo invalidation) reappear under its
     OWN original identity instead of minting a duplicate with a fresh
     start_time and a blank retest history. Exact match, not a tolerance
-    window -- see v3/tv_scraper/scraper.py's own docstring for the
-    confirmed-live collision a tolerance window used to cause here."""
+    window -- a tolerance window was confirmed live to cause a real
+    collision here (two unrelated zones' reconstructed times landing
+    close enough to get merged), which exact matching avoids entirely."""
     if formed_hint is None:
         return None
     for z in zone_store.zones(symbol, timeframe, direction):
@@ -280,18 +276,17 @@ def _apply_direction(zones: ZoneStore, first_seen: FirstSeenStore, retested: Ret
                       ) -> tuple[dict[int, int], dict[int, int], dict[int, int], dict[int, int], dict[int, int]]:
     """Applies formed zones for one direction and marks any zone that has
     dropped out of view for _MITIGATION_DEBOUNCE_POLLS consecutive polls as
-    mitigated. Ported verbatim (logic unchanged) from
-    v3/tv_scraper/scraper.py -- see that module's own extensive docstring
-    for the full rationale and confirmed-live incidents behind every piece
-    of this: the 2-poll debounce, hint-based resurrection, the row-
+    mitigated. See this function's own comments below for the full
+    rationale and confirmed-live incidents behind every piece of this:
+    the 2-poll debounce, hint-based resurrection, the row-
     corruption consistency guard, the 2-poll retest confirmation gate,
     already-recorded-value correction, and orphan reconciliation."""
     price_field = "btm" if direction == "bull" else "top"
     now = int(time.time())
 
     # Reconcile ZoneStore entries that have no corresponding
-    # previously_seen record at all -- see v3's own docstring for the
-    # confirmed-live incident (a 202-day-old orphaned zone, immune to
+    # previously_seen record at all -- confirmed live incident (a
+    # 202-day-old orphaned zone, immune to
     # mitigation detection because it was never in previously_seen to
     # begin with).
     current_price_keys = {_price_key(z) for z in current if _price_plausible(symbol, z["top"], z["btm"])}
@@ -478,10 +473,10 @@ def _zone_signature(zones_list: list[dict]) -> tuple:
 
 def _parsed_values_agree(a, b) -> bool:
     """True only if two ParsedState reads agree on bull/bear zone top/btm
-    AND Close. Deliberately does NOT compare ATR here (v3's own version
-    does -- this scraper doesn't consume ATR at all, see module docstring,
-    so an ATR mismatch between two reads is irrelevant to what this module
-    actually writes downstream)."""
+    AND Close. Deliberately does NOT compare ATR here -- this scraper
+    doesn't consume ATR at all (see module docstring), so an ATR mismatch
+    between two reads is irrelevant to what this module actually writes
+    downstream."""
     return (_zone_signature(a.bull_zones) == _zone_signature(b.bull_zones)
             and _zone_signature(a.bear_zones) == _zone_signature(b.bear_zones)
             and a.close == b.close)
@@ -490,10 +485,9 @@ def _parsed_values_agree(a, b) -> bool:
 # The single most-recently-successfully-processed pane's own data signature
 # -- guards against a SUSTAINED stuck-focus read (a pane's click never
 # actually moving focus, so it keeps reading a neighboring pane's data
-# indefinitely). See v3/tv_scraper/scraper.py's own module-level docstring
-# for the two confirmed-live incidents (a fake USTEC M15 OB, a stale
-# XAUUSD M5 read stuck on M15's data for over an hour) this guards against,
-# and why timeframe/close are deliberately excluded from the signature.
+# indefinitely). Confirmed live twice (a fake USTEC M15 OB, a stale
+# XAUUSD M5 read stuck on M15's data for over an hour) -- both are why
+# timeframe/close are deliberately excluded from the signature.
 _last_processed_pane: Optional[tuple] = None
 
 
@@ -608,7 +602,7 @@ def run_once(page: Page, zones: ZoneStore, first_seen: FirstSeenStore,
 
 # Anti-throttling flags -- Windows-native window-occlusion detection
 # (CalculateNativeWinOcclusion) throttles the whole renderer process when
-# the window is minimized/covered, confirmed live (in v3's own scraper) to
+# the window is minimized/covered, confirmed live to
 # freeze data updates solid even with the page-JS visibility override (see
 # main()) also in place. Chromium only honors the LAST --disable-features
 # on the command line, so this repeats Playwright's own default list
