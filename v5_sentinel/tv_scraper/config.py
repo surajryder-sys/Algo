@@ -69,11 +69,16 @@ def load_config() -> Config:
         zone_history_log_file=os.getenv("V5S_TV_SCRAPER_ZONE_HISTORY_LOG_FILE", "v5s_tv_scraper_zone_history.jsonl"),
         browser_executable_path=os.getenv("V5S_TV_SCRAPER_BROWSER_PATH") or None,
         # 4 columns x 2 rows -- confirmed live 2026-09-09 via a screenshot
-        # of the actual chart (H4/H2/H1/M30 across the top row, M15/M5/
-        # M3/M1 across the bottom). An earlier, wrongly-guessed single-
-        # column layout caused every pane to sample only 2 of the 8 real
-        # panes repeatedly (always the center column of whichever real
-        # row the click landed in), confirmed live before this fix.
+        # of the actual chart. An earlier, wrongly-guessed single-column
+        # layout caused every pane to sample only 2 of the 8 real panes
+        # repeatedly (always the center column of whichever real row the
+        # click landed in), confirmed live before this fix. Grid shape is
+        # unaffected by which 8 timeframes actually populate the panes --
+        # each pane self-detects its own symbol/timeframe from the Data
+        # Window header, so changing the chart's own timeframe selection
+        # (as the user did the same day, swapping H2 out for D1) needs no
+        # code change here, only a scraper restart to pick up the new
+        # panes.
         grid_rows=int(os.getenv("V5S_TV_SCRAPER_GRID_ROWS", "2")),
         grid_cols=int(os.getenv("V5S_TV_SCRAPER_GRID_COLS", "4")),
         # Window position/size tuned to this machine's real monitor
