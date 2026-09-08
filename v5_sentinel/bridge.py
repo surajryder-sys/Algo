@@ -51,16 +51,61 @@ from v5_sentinel.rates import TrailSeries
 BRIDGE_FOLDER_NAME = "OBBridge"
 MAX_AGE_SECONDS = 30.0  # indicator republishes every ~2s; well past that means stale/dead
 
+# 2026-09-08, found live: "updated" alone isn't enough. A real trade's SL
+# was computed off a bridge file whose "updated" timestamp looked fresh
+# (touched within the last couple seconds, easily inside MAX_AGE_SECONDS)
+# but whose line1/line2 VALUES were actually 3 whole bars (9 minutes on
+# M3) stale -- OnCalculate had fallen behind real bar closes for a
+# stretch, so the file kept getting re-touched with the SAME old computed
+# values instead of the current ones. Confirmed via a one-shot dump of the
+# indicator's own historical buffer (which never gets recomputed once a
+# bar closes, so it still held the real numbers): the SL basis read
+# 4423.24 (the 3-bars-ago value) when the real, current far line was
+# 4411.93. "updated" only proves the FILE was touched recently, not that
+# the DATA inside kept pace with actual bar closes -- bar_time (added
+# 2026-09-07) is what actually tracks that. Under normal operation
+# `now - bar_time` cycles between 0 and one bar's length; allowing up to
+# 2 full bar-lengths gives a full bar's buffer for ordinary publish
+# latency before treating it as genuinely stale, same margin that would
+# have caught the confirmed live incident (3 bars late) with room to
+# spare.
+BAR_STALENESS_MULTIPLIER = 2.0
+
 
 def _bridge_root() -> Path:
     appdata = os.environ["APPDATA"]
     return Path(appdata) / "MetaQuotes" / "Terminal" / "Common" / "Files" / BRIDGE_FOLDER_NAME
 
 
+def _bar_time_stale(raw: dict, tf_minutes: int, symbol: str) -> bool:
+    """True if this snapshot's own bar_time has fallen behind real bar
+    closes by more than BAR_STALENESS_MULTIPLIER bar-lengths -- see
+    BAR_STALENESS_MULTIPLIER's own comment for the confirmed live incident
+    this catches. Silently passes (returns False) if bar_time isn't
+    present at all -- an older bridge build that predates this field, or
+    one that's never published a closed bar yet; MAX_AGE_SECONDS above is
+    still the only check that applies in that case, unchanged from
+    before."""
+    bar_time = raw.get("bar_time")
+    if bar_time is None:
+        return False
+    bar_age = time.time() - bar_time
+    max_bar_age = tf_minutes * 60 * BAR_STALENESS_MULTIPLIER
+    if bar_age > max_bar_age:
+        print(f"[V5S-BRIDGE] {symbol} M{tf_minutes}: bar_time is {bar_age:.0f}s old "
+              f"(max {max_bar_age:.0f}s) despite the file looking freshly updated -- "
+              f"treating as stale, OnCalculate likely fell behind real bar closes")
+        return True
+    return False
+
+
 def read_lines(symbol: str, tf_minutes: int) -> Optional[tuple[float, float]]:
     """(line1.trail_stop, line2.trail_stop) from the live bridge -- the
     raw trail VALUES, deliberately not the bundled "structure" field, see
-    module docstring. None if the file is missing, unreadable, or stale."""
+    module docstring. None if the file is missing, unreadable, or stale
+    (either the file itself hasn't been touched recently, OR it has but
+    its own bar_time shows the DATA inside has fallen behind -- see
+    _bar_time_stale)."""
     path = _bridge_root() / f"ATRSTATE_DUAL_{symbol}_{tf_minutes}.json"
     try:
         raw = json.loads(path.read_text())
@@ -69,6 +114,8 @@ def read_lines(symbol: str, tf_minutes: int) -> Optional[tuple[float, float]]:
 
     age = time.time() - raw.get("updated", 0)
     if age > MAX_AGE_SECONDS:
+        return None
+    if _bar_time_stale(raw, tf_minutes, symbol):
         return None
 
     try:
@@ -95,6 +142,8 @@ def read_close(symbol: str, tf_minutes: int) -> Optional[tuple[float, int]]:
 
     age = time.time() - raw.get("updated", 0)
     if age > MAX_AGE_SECONDS:
+        return None
+    if _bar_time_stale(raw, tf_minutes, symbol):
         return None
 
     try:
