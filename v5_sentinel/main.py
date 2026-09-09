@@ -84,7 +84,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bias, bridge, broker, critical_alerts_subscribers, flip_state, heartbeat, htf_levels, rates, sl_manager, trade_manager, watch_zone
+from v5_sentinel import bias, bridge, broker, flip_state, heartbeat, htf_levels, rates, sl_manager, trade_manager, watch_zone
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.bridge_flip import StaleAlertTracker, far_near
 from v5_sentinel.config import Config, load_config
@@ -106,38 +106,6 @@ def _send_alert(text: str) -> None:
         _telegram_send(token, chat_id, text)
     except Exception as exc:  # noqa: BLE001 -- alerting must never break the loop
         print(f"[V5S-ALERT] send failed: {exc!r} -- message was: {text}")
-
-
-# Lazily created + reused across cycles -- SubscriberStore's own file read
-# only needs to happen once per process, not once per blocked entry.
-_critical_subscribers: Optional["critical_alerts_subscribers.SubscriberStore"] = None
-
-
-def _send_critical_alert(text: str) -> None:
-    """Broadcasts to the critical-alerts bot (SecretTrader_Critical_Bot),
-    same channel + same approved-subscriber-list pattern
-    critical_alerts_watcher.py and watchdog.py already use -- added
-    2026-09-09 for the ATR Long/Short Blocked safeguard, per the user's
-    own direction: "whenever a buy gets blocked or sell gets blocked i
-    need an alert on critical bot." Deliberately a SEPARATE bot/channel
-    from _send_alert()'s @smcsecret_bot (bridge-staleness only) -- this
-    is a trading-decision alert, not an infrastructure one. Never
-    raises, same fail-soft contract as _send_alert()."""
-    global _critical_subscribers
-    token = os.getenv("CRITICAL_ALERTS_TELEGRAM_BOT_TOKEN")
-    owner_chat_id = os.getenv("CRITICAL_ALERTS_TELEGRAM_CHAT_ID")
-    if not token or not owner_chat_id:
-        print(f"[V5S-CRITICAL-ALERT] (no bot configured) {text}")
-        return
-    if _critical_subscribers is None:
-        subscribers_file = os.getenv("V5S_CRITICAL_ALERTS_SUBSCRIBERS_FILE",
-                                      "v5_sentinel_critical_alerts_subscribers.json")
-        _critical_subscribers = critical_alerts_subscribers.SubscriberStore(subscribers_file, owner_chat_id)
-    for chat_id in _critical_subscribers.approved_chat_ids():
-        try:
-            _telegram_send(token, chat_id, text)
-        except Exception as exc:  # noqa: BLE001 -- alerting must never break the loop
-            print(f"[V5S-CRITICAL-ALERT] send failed for {chat_id}: {exc!r} -- message was: {text}")
 
 
 class RuntimeState:
@@ -325,9 +293,7 @@ def _open_position(cfg: Config, direction: int, sl_tf: int, comment: str) -> Non
     block_reason = _atr_block_check(cfg, direction, entry_price)
     if block_reason is not None:
         label = "ATR Long Blocked" if direction == 1 else "ATR Short Blocked"
-        msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({comment}) skipped"
-        print(f"[V5S-ENTRY] {msg}")
-        _send_critical_alert(f"\U0001F6D1 {msg}")
+        print(f"[V5S-ENTRY] {label} -- {block_reason} -- skipping {_DIR_LABEL[direction]} ({comment})")
         return
 
     print(f"[V5S-ENTRY] {_DIR_LABEL[direction]} ({comment}) far_line={far:.3f} sl={sl:.3f}")
