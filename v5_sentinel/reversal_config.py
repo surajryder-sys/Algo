@@ -77,6 +77,13 @@ class RMConfig:
     ict_sl_state_file: str
     ict_state_file: str
 
+    # Persistent decision log (2026-09-09, mirrors main.py's own -- see
+    # decision_log.py) -- every M3-signal-found and entry/close outcome
+    # for BOTH components gets one record here, so "which exact zone
+    # fired this trade" and "why didn't this fire" are answerable from
+    # this file instead of reconstructed after the fact from state files.
+    decision_log_file: str
+
     mt5_terminal_path: str | None
     mt5_login: int | None
     mt5_password: str | None
@@ -109,6 +116,7 @@ def load_config() -> RMConfig:
         ict_magic_number=int(os.getenv("V5S_RM_ICT_MAGIC_NUMBER", "26090702")),
         ict_sl_state_file=os.getenv("V5S_RM_ICT_SL_STATE_FILE", "v5s_reversal_manager_ict_sl_state.json"),
         ict_state_file=os.getenv("V5S_RM_ICT_STATE_FILE", "v5s_reversal_manager_ict_state.json"),
+        decision_log_file=os.getenv("V5S_RM_DECISION_LOG_FILE", "v5s_reversal_manager_decision_log.jsonl"),
         mt5_terminal_path=os.getenv("MT5_TERMINAL_PATH") or None,
         mt5_login=int(login_raw) if login_raw else None,
         mt5_password=os.getenv("MT5_PASSWORD") or None,

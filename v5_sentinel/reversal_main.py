@@ -107,7 +107,7 @@ import time
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bridge, broker, heartbeat, htf_levels, reversal_entry, reversal_ict, sl_manager, trade_manager
+from v5_sentinel import bridge, broker, decision_log, heartbeat, htf_levels, reversal_entry, reversal_ict, sl_manager, trade_manager
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.bridge_flip import StaleAlertTracker, m3_far_line
 from v5_sentinel.critical_alerts_telegram import send_message as _telegram_send
@@ -188,13 +188,20 @@ def _open_position(cfg: RMConfig, component: str, magic_number: int, direction: 
     print(f"[V5S-{component}-ENTRY] {_DIR_LABEL[direction]} ({tag}) {ref_desc} sl={sl:.3f}")
     if not cfg.enable_trading:
         print(f"[V5S-{component}-ENTRY] enable_trading is false -- decision only, no order sent")
+        decision_log.log(cfg.decision_log_file, "entry_decision_only", component=component,
+                         direction=_DIR_LABEL[direction], tag=tag, ref=ref_desc, sl=sl)
         return True
     result = broker.send_market_order(cfg.symbol, direction, cfg.lots, sl, magic_number,
                                       cfg.deviation_points, comment)
     if not result.ok:
         print(f"[V5S-{component}-ENTRY] order_send failed: retcode={result.retcode} comment={result.comment}")
+        decision_log.log(cfg.decision_log_file, "entry_failed", component=component,
+                         direction=_DIR_LABEL[direction], tag=tag, ref=ref_desc, retcode=result.retcode,
+                         broker_comment=result.comment)
         return False
     print(f"[V5S-{component}-ENTRY] filled, ticket={result.ticket}")
+    decision_log.log(cfg.decision_log_file, "entry_filled", component=component, direction=_DIR_LABEL[direction],
+                     tag=tag, ref=ref_desc, sl=sl, ticket=result.ticket)
     return True
 
 
@@ -207,7 +214,11 @@ def _close_position(cfg: RMConfig, component: str, position, action_label: str, 
                                    comment=_action_comment(component, tag, action_code))
     if not result.ok:
         print(f"[V5S-{component}-EXIT] close failed: retcode={result.retcode} comment={result.comment}")
+        decision_log.log(cfg.decision_log_file, "close_failed", component=component, ticket=position.ticket,
+                         action=action_label, retcode=result.retcode)
         return False
+    decision_log.log(cfg.decision_log_file, "close_filled", component=component, ticket=position.ticket,
+                     action=action_label, tag=tag)
     return True
 
 
@@ -308,6 +319,8 @@ def _process_signal(cfg: RMConfig, component: str, magic_number: int, direction:
               f"position is already open on #{position.ticket} -- marked traded, no new entry")
         print(msg)
         _send_alert(msg)
+        decision_log.log(cfg.decision_log_file, "redundant_signal", component=component,
+                         direction=_DIR_LABEL[direction], tag=tag, ref=ref_desc, existing_ticket=position.ticket)
 
 
 def _check_stale(cfg: RMConfig, stale_tracker: StaleAlertTracker) -> None:
@@ -341,6 +354,24 @@ def run_once(cfg: RMConfig, sl_mgr_str: sl_manager.SLManager, tm_mgr_str: trade_
     # reversal_ict.py's own docstring for the full entry rule.
     ict_signals = reversal_ict.find_ict_signals(cfg.symbol, cfg.nlb_nsb_block_state_file, ict_eligibility,
                                                 tracker, cfg.sl_buffer)
+
+    # Logged BEFORE _process_signal acts on them, listing EVERY qualifying
+    # signal this cycle (not just the one that becomes a real position) --
+    # 2026-09-09, added specifically because a multi-zone-match cycle
+    # (several signals qualifying the same M3 flip at once) left no
+    # record of WHICH exact zone/level became the real trade vs. which
+    # got marked redundant, only reconstructable after the fact from
+    # state files. _process_signal runs str_signals/ict_signals in THIS
+    # SAME order below, so index 0 here is always the one that actually
+    # got the position (assuming no position was already open).
+    if str_signals:
+        decision_log.log(cfg.decision_log_file, "str_signals_found", count=len(str_signals), signals=[
+            {"tf_minutes": s.timeframe_minutes, "line_no": s.line_no, "direction": _DIR_LABEL[s.direction],
+             "trigger": s.trigger, "level_value": s.level_value, "sl": s.sl} for s in str_signals])
+    if ict_signals:
+        decision_log.log(cfg.decision_log_file, "ict_signals_found", count=len(ict_signals), signals=[
+            {"zone_id": s.zone_id, "timeframe_name": s.timeframe_name, "direction": _DIR_LABEL[s.direction],
+             "trigger": s.trigger, "zone_top": s.zone_top, "zone_btm": s.zone_btm, "sl": s.sl} for s in ict_signals])
 
     # Each component's own magic-number-scoped positions, pruned/acted on
     # entirely independently -- see module docstring, this is no longer a
