@@ -82,7 +82,7 @@ class ICTSignal:
     timeframe_name: str          # "H1"
     zone_top: float
     zone_btm: float
-    trigger: str                  # always "ATR_FLIP" for this entry method
+    trigger: str                  # always "3F" for this entry method -- same trigger label STR's own M3 ATR flip uses (2026-09-09, user's own direction: "dont use ATR flip on comment, You can use 3F"); the "V5S-RM-{STR|ICT}-" component prefix already tells the two apart, so reusing "3F" here isn't ambiguous.
     sl: float
 
 
@@ -153,6 +153,6 @@ def find_ict_signals(
             continue
         signals.append(ICTSignal(
             direction=m3_flip_dir, zone_id=zone.zone_id, timeframe_name=zone.timeframe_name,
-            zone_top=zone.top, zone_btm=zone.btm, trigger="ATR_FLIP", sl=sl,
+            zone_top=zone.top, zone_btm=zone.btm, trigger="3F", sl=sl,
         ))
     return signals
