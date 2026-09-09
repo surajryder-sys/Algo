@@ -84,7 +84,10 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bias, bridge, broker, flip_state, heartbeat, rates, sl_manager, trade_manager, watch_zone
+from v5_sentinel import (
+    bias, bridge, broker, critical_alerts_subscribers, flip_state, heartbeat, nlb_nsb_block, rates, sl_manager,
+    trade_manager, watch_zone,
+)
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.bridge_flip import StaleAlertTracker, far_near
 from v5_sentinel.config import Config, load_config
@@ -106,6 +109,38 @@ def _send_alert(text: str) -> None:
         _telegram_send(token, chat_id, text)
     except Exception as exc:  # noqa: BLE001 -- alerting must never break the loop
         print(f"[V5S-ALERT] send failed: {exc!r} -- message was: {text}")
+
+
+# Lazily created + reused across cycles -- SubscriberStore's own file read
+# only needs to happen once per process, not once per blocked entry.
+_critical_subscribers: Optional["critical_alerts_subscribers.SubscriberStore"] = None
+
+
+def _send_critical_alert(text: str) -> None:
+    """Broadcasts to the critical-alerts bot (SecretTrader_Critical_Bot),
+    same channel + same approved-subscriber-list pattern
+    critical_alerts_watcher.py and watchdog.py already use -- re-added
+    2026-09-09 for the ICT Guard (replaces the earlier ATR trail-based
+    safeguard, which used this same alerting and was removed the same
+    day). Deliberately a SEPARATE bot/channel from _send_alert()'s
+    @smcsecret_bot (bridge-staleness only) -- this is a trading-decision
+    alert, not an infrastructure one. Never raises, same fail-soft
+    contract as _send_alert()."""
+    global _critical_subscribers
+    token = os.getenv("CRITICAL_ALERTS_TELEGRAM_BOT_TOKEN")
+    owner_chat_id = os.getenv("CRITICAL_ALERTS_TELEGRAM_CHAT_ID")
+    if not token or not owner_chat_id:
+        print(f"[V5S-CRITICAL-ALERT] (no bot configured) {text}")
+        return
+    if _critical_subscribers is None:
+        subscribers_file = os.getenv("V5S_CRITICAL_ALERTS_SUBSCRIBERS_FILE",
+                                      "v5_sentinel_critical_alerts_subscribers.json")
+        _critical_subscribers = critical_alerts_subscribers.SubscriberStore(subscribers_file, owner_chat_id)
+    for chat_id in _critical_subscribers.approved_chat_ids():
+        try:
+            _telegram_send(token, chat_id, text)
+        except Exception as exc:  # noqa: BLE001 -- alerting must never break the loop
+            print(f"[V5S-CRITICAL-ALERT] send failed for {chat_id}: {exc!r} -- message was: {text}")
 
 
 class RuntimeState:
@@ -250,12 +285,57 @@ def _action_comment(tag: str, action_code: str) -> str:
     return f"V5S-TM-{tag}-{action_code}"
 
 
+def _ict_guard_check(cfg: Config, direction: int, entry_price: float) -> Optional[str]:
+    """ICT Guard -- replaces the earlier ATR trail-based safeguard
+    (removed 2026-09-09), now checking the NLB/NSB Block instead of ATR
+    trail lines. User's own rule (2026-09-09): "ob edge of bullish ob
+    should be minimum 5 points away for short, ob edge of bearish ob
+    should be minimum 5 points away for long" -- "when i say edge,
+    bullish ob edge is top, bearish ob edge is bottom." So: a LONG checks
+    every NLB (bearish OB) zone's own BOTTOM edge; a SHORT checks every
+    NSB (bullish OB) zone's own TOP edge. Scoped to whatever's currently
+    in the block -- nlb_nsb_block.py only ever seeds/tracks the same 6
+    timeframes ob_levels.py does (D1, H4, H1, M30, M15, M5), so M3/M1 are
+    already out of scope by construction, matching the user's own "we
+    have nothing to do with M3 and M1 zones... we gonna ignore m3 and m1
+    now" -- nothing extra to filter here.
+
+    Reads the block fresh every call (cheap JSON file) rather than
+    caching it in memory -- the block is written by a SEPARATE process
+    (nlb_nsb_watcher.py), so a cached copy here would silently drift from
+    whatever that process has actually seen live.
+
+    Returns a human-readable block reason (which timeframe, which exact
+    zone, how close) if blocked, else None."""
+    target_role = "no_long_buffer" if direction == 1 else "no_short_buffer"
+    store = nlb_nsb_block.BlockStore(cfg.nlb_nsb_block_state_file)
+    for zone in store.zones():
+        if zone.role != target_role:
+            continue
+        edge = zone.btm if target_role == "no_long_buffer" else zone.top
+        gap = abs(entry_price - edge)
+        if gap < cfg.ict_guard_buffer_points:
+            return (f"{zone.timeframe_name} {zone.role} [{zone.btm:.3f}-{zone.top:.3f}] "
+                   f"edge@{edge:.3f} is only {gap:.3f}pts away")
+    return None
+
+
 def _open_position(cfg: Config, direction: int, sl_tf: int, comment: str) -> None:
     far = _far_line_for(cfg.symbol, sl_tf, direction)
     if far is None:
         print(f"[V5S-ENTRY] M{sl_tf} bridge stale/missing -- cannot compute SL, skipping {_DIR_LABEL[direction]} ({comment})")
         return
     sl = far - cfg.sl_buffer if direction == 1 else far + cfg.sl_buffer
+
+    bid, ask = broker.get_tick_price(cfg.symbol)
+    entry_price = ask if direction == 1 else bid
+    block_reason = _ict_guard_check(cfg, direction, entry_price)
+    if block_reason is not None:
+        label = "ICT Long Blocked" if direction == 1 else "ICT Short Blocked"
+        msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({comment}) skipped"
+        print(f"[V5S-ENTRY] {msg}")
+        _send_critical_alert(f"\U0001F6D1 {msg}")
+        return
 
     print(f"[V5S-ENTRY] {_DIR_LABEL[direction]} ({comment}) far_line={far:.3f} sl={sl:.3f}")
     if not cfg.enable_trading:
