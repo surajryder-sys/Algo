@@ -85,8 +85,8 @@ from typing import Optional
 import MetaTrader5 as mt5
 
 from v5_sentinel import (
-    bias, bridge, broker, critical_alerts_subscribers, flip_state, heartbeat, nlb_nsb_block, rates, sl_manager,
-    trade_manager, watch_zone,
+    bias, bridge, broker, critical_alerts_subscribers, decision_log, flip_state, heartbeat, nlb_nsb_block, rates,
+    sl_manager, trade_manager, watch_zone,
 )
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.bridge_flip import StaleAlertTracker, far_near
@@ -335,19 +335,27 @@ def _open_position(cfg: Config, direction: int, sl_tf: int, comment: str) -> Non
         msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({comment}) skipped"
         print(f"[V5S-ENTRY] {msg}")
         _send_critical_alert(f"\U0001F6D1 {msg}")
+        decision_log.log(cfg.decision_log_file, "ict_guard_blocked", direction=_DIR_LABEL[direction],
+                         comment=comment, reason=block_reason, entry_price=entry_price)
         return
 
     print(f"[V5S-ENTRY] {_DIR_LABEL[direction]} ({comment}) far_line={far:.3f} sl={sl:.3f}")
     if not cfg.enable_trading:
         print("[V5S-ENTRY] enable_trading is false -- decision only, no order sent")
+        decision_log.log(cfg.decision_log_file, "entry_decision_only", direction=_DIR_LABEL[direction],
+                         comment=comment, sl=sl, entry_price=entry_price)
         return
 
     result = broker.send_market_order(cfg.symbol, direction, cfg.lots, sl, cfg.magic_number,
                                       cfg.deviation_points, comment)
     if not result.ok:
         print(f"[V5S-ENTRY] order_send failed: retcode={result.retcode} comment={result.comment}")
+        decision_log.log(cfg.decision_log_file, "entry_failed", direction=_DIR_LABEL[direction],
+                         comment=comment, retcode=result.retcode, broker_comment=result.comment)
     else:
         print(f"[V5S-ENTRY] filled, ticket={result.ticket}")
+        decision_log.log(cfg.decision_log_file, "entry_filled", direction=_DIR_LABEL[direction],
+                         comment=comment, ticket=result.ticket, sl=sl, entry_price=entry_price)
 
 
 def _close_position(cfg: Config, position, action_label: str, tag: str, action_code: str) -> bool:
@@ -492,6 +500,8 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
         reason = "M3 trapped" if fs_m3.watching is not None else "M3 flipped opposite"
         print(f"[V5S-WATCHZONE] cancelled ({reason}) -- was {_DIR_LABEL[zone.direction]} "
               f"@ {zone.qualifying_price:.3f}")
+        decision_log.log(cfg.decision_log_file, "watchzone_cancelled", reason=reason,
+                         direction=_DIR_LABEL[zone.direction], qualifying_price=zone.qualifying_price)
         wz_store.cancel()
         zone = None
 
@@ -530,11 +540,16 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
                 else:
                     print(f"[V5S-WATCHZONE] {name} confirms within {gap:.3f}pts of qualifying price "
                           f"{zone.qualifying_price:.3f} -- straight fire")
+                    decision_log.log(cfg.decision_log_file, "watchzone_straight_fire", parent_name=name,
+                                     direction=_DIR_LABEL[zone.direction], gap=gap,
+                                     qualifying_price=zone.qualifying_price)
                     wz_store.clear()
                     return zone.direction, f"{name}/{tf_code}F", int(tf_code)
             else:
                 print(f"[V5S-WATCHZONE] {name} confirms {gap:.3f}pts away -- arming "
                       f"{watch_zone.PULLBACK_RETRACE_FRACTION:.0%} pullback target")
+                decision_log.log(cfg.decision_log_file, "watchzone_pullback_armed", parent_name=name,
+                                 direction=_DIR_LABEL[zone.direction], gap=gap, anchor_close=close)
                 wz_store.set_pending(name, tf_code, close, bar_time)
 
     zone = wz_store.zone  # re-read -- set_pending() above may have just changed it
@@ -571,6 +586,8 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
                           f"(price={price:.3f}) -- but M{parent_tf} bridge stale, deferring, will retry once fresh")
                 else:
                     print(f"[V5S-WATCHZONE] {p.parent_name} pullback target {target:.3f} reached (price={price:.3f})")
+                    decision_log.log(cfg.decision_log_file, "watchzone_pullback_fired", parent_name=p.parent_name,
+                                     direction=_DIR_LABEL[zone.direction], target=target, price=price)
                     wz_store.clear()
                     return zone.direction, f"{p.parent_name}-PB", parent_tf
             else:
@@ -638,12 +655,18 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
         if valid and _far_line_for(cfg.symbol, 3, new_dir) is None:
             print(f"[V5S] M3 {label} -> {_DIR_LABEL[new_dir]} at {event.bar_time} -- "
                   f"M3 bridge stale -- deferring this event, will retry once fresh")
+            decision_log.log(cfg.decision_log_file, "m3_event_deferred_stale", event_type=label,
+                             direction=_DIR_LABEL[new_dir], bar_time=event.bar_time)
         else:
             runtime.mark_seen(fs_m3.last_event.bar_time)
 
             print(f"[V5S] M3 {label} -> {_DIR_LABEL[new_dir]} at {event.bar_time} "
                   f"(parent={parent.source}, M5={parent.m5.label()}, M15={parent.m15.label()}, "
                   f"bull_allowed={parent.bull_allowed}, bear_allowed={parent.bear_allowed}, valid={valid})")
+            decision_log.log(cfg.decision_log_file, "m3_event", event_type=label, direction=_DIR_LABEL[new_dir],
+                             bar_time=event.bar_time, parent_source=parent.source, m5_label=parent.m5.label(),
+                             m15_label=parent.m15.label(), bull_allowed=parent.bull_allowed,
+                             bear_allowed=parent.bear_allowed, valid=valid)
 
             if valid:
                 new_event_tag = _tag(parent, new_dir, label)
@@ -672,6 +695,8 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
                     # if triggered before any partial exit happened yet.
                     print(f"[V5S] M3 TRAP_RESOLVED reconfirms M{owner_tf}-owned position's own "
                           f"{_DIR_LABEL[new_dir]} direction -- refreshing to full size, handing ownership to M3")
+                    decision_log.log(cfg.decision_log_file, "trap_resolved_handover", direction=_DIR_LABEL[new_dir],
+                                     from_owner=owner_tf)
                     if _close_position(cfg, position, "HANDOVER", new_event_tag, "HO"):
                         _open_position(cfg, new_dir, 3, _comment_for_tag(new_event_tag))
                         positions = broker.get_positions(cfg.symbol, cfg.magic_number)
@@ -695,6 +720,8 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
                 wz_store.arm(new_dir, fs_m3.last_close, event.bar_time)
                 print(f"[V5S-WATCHZONE] armed {_DIR_LABEL[new_dir]} @ {fs_m3.last_close:.3f} "
                       f"(parent disagrees, {label})")
+                decision_log.log(cfg.decision_log_file, "watchzone_armed", direction=_DIR_LABEL[new_dir],
+                                 qualifying_price=fs_m3.last_close, event_type=label, parent_source=parent.source)
 
     wz_signal = _check_watch_zone(cfg, wz_store, parent, fs_m3)
     if wz_signal is not None:
@@ -726,6 +753,8 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
                     owner_name = "M5" if owner_tf == 5 else "M15"
                     owner_tag = f"{owner_name}/{owner_tf}F"
                     print(f"[V5S] M{owner_tf} owner-flip -> {_DIR_LABEL[owner_dir]} -- reversing M{owner_tf}-owned position")
+                    decision_log.log(cfg.decision_log_file, "owner_flip_reversal", owner_tf=owner_tf,
+                                     direction=_DIR_LABEL[owner_dir])
                     position, owner_tf = _maybe_apply(cfg, position, owner_tf, owner_dir, owner_tag, owner_tf,
                                                       tm_mgr, f"M{owner_tf} owner-flip")
             else:
