@@ -1,10 +1,24 @@
-"""V5-Sentinel Reversal Manager -- main loop, now TWO components sharing
-one magic number and one position slot. Design confirmed with the user
+"""V5-Sentinel Reversal Manager -- main loop, now running TWO fully
+INDEPENDENT components in one process. Design confirmed with the user
 2026-09-06/07 for the original (STR) component (see htf_levels.py and
 reversal_entry.py for its own data/detection layers), extended 2026-09-09
 with a second (ICT) component (see reversal_ict.py for its own design --
 OB-zone/NLB-NSB-Block-based, first of two planned entry methods, the
 second, "candle identification strategy", still deferred).
+
+INDEPENDENCE (confirmed with the user 2026-09-09, "no keep them both
+seperate... no interference"): the two components do NOT share a magic
+number or a position slot -- each has its own (RMConfig.magic_number/
+ict_magic_number), own SL Manager/Trade Manager state files, and runs
+its own entirely separate position lifecycle. They can both be open on
+the same symbol at the same time, in the same or opposite directions,
+without ever squaring each other off. This was an explicit revision away
+from an earlier same-day design (both sharing STR's own magic number and
+position slot) once the user clarified that wasn't what "square off on
+opposite side... fire opposite side" was meant to describe -- that
+phrase is about EACH component's own internal lifecycle (an opposite
+signal from the SAME component squares off ITS OWN prior position), not
+the two components squaring off against each other.
 
 Run with: python -m v5_sentinel.reversal_main
 
@@ -63,14 +77,15 @@ Summary of the STR component's own full rule set:
     square-off/refresh. RM-STR (not just STR) is the literal prefix --
     briefly dropped the "RM-" 2026-09-07 to save space while the tag
     still carried a trailing timestamp, then added back the same day
-    once that timestamp was removed elsewhere freed up plenty of room,
-    since the later OB-based ICT sub-component needs "RM-ICT-" as its
-    own distinct prefix to actually differentiate from this one (both
-    share Reversal Manager's magic number space conceptually, but only
-    the comment prefix tells them apart at a glance). _extract_tag()
-    still accepts the older bare "V5S-STR-{tag}" shape too, for any
-    position opened before this change whose entry comment is already
-    frozen on the broker side.
+    once that timestamp was removed elsewhere freed up plenty of room.
+    ICT's own positions carry "V5S-RM-ICT-{tag}" instead -- since the two
+    components now run on separate magic numbers, the prefix is purely
+    for readability (a human glancing at the terminal/MT5 history), not
+    needed to tell them apart programmatically the way it briefly was
+    when a shared-magic-number design was considered the same day.
+    _extract_tag() still accepts the older bare "V5S-STR-{tag}" shape
+    too, for any position opened before this change whose entry comment
+    is already frozen on the broker side.
   - Alerts: a qualifying-but-not-acted-on signal (the "ignore" case above)
     pushes to the existing @smcsecret_bot (TELEGRAM_BOT_TOKEN/
     TELEGRAM_CHAT_ID in .env, confirmed 2026-09-07) -- best-effort, never
@@ -129,19 +144,6 @@ def _extract_tag(comment: str) -> str:
     return "UNK"
 
 
-def _component_from_comment(comment: str) -> str:
-    """Which of the two Reversal Manager components owns a given
-    position, read back from its own entry comment -- 2026-09-09, added
-    for RM-ICT (see reversal_ict.py's own docstring). Defaults "STR" for
-    the older bare "V5S-STR-{tag}" shape or anything unrecognized,
-    matching this system's original, only-ever-STR behavior before ICT
-    existed."""
-    parts = comment.split("-") if comment else []
-    if len(parts) >= 3 and parts[0] == "V5S" and parts[1] == "RM" and parts[2] in _COMPONENTS:
-        return parts[2]
-    return "STR"
-
-
 def _entry_comment(component: str, tag: str) -> str:
     return f"V5S-RM-{component}-{tag}"
 
@@ -165,7 +167,8 @@ def _send_alert(text: str) -> None:
 
 
 
-def _open_position(cfg: RMConfig, component: str, direction: int, sl: float, tag: str, ref_desc: str) -> bool:
+def _open_position(cfg: RMConfig, component: str, magic_number: int, direction: int, sl: float, tag: str,
+                   ref_desc: str) -> bool:
     """Returns True if the entry actually went through (filled, or
     enable_trading is False so it's decision-only and conceptually
     "accepted") -- False only on a genuine order rejection while live.
@@ -176,15 +179,17 @@ def _open_position(cfg: RMConfig, component: str, direction: int, sl: float, tag
     silently dropping a genuinely valid setup that never actually got a
     position. Generalized 2026-09-09 to serve both STR and ICT (see
     reversal_ict.py) -- component picks the log prefix and comment
-    prefix, ref_desc is just a human-readable description of whatever
-    triggered this (an HTF level's value for STR, a zone's own range for
-    ICT) since the two components have no other field in common to print."""
+    prefix, magic_number is THAT component's own (they're independent,
+    see module docstring), ref_desc is just a human-readable description
+    of whatever triggered this (an HTF level's value for STR, a zone's
+    own range for ICT) since the two components have no other field in
+    common to print."""
     comment = _entry_comment(component, tag)
     print(f"[V5S-{component}-ENTRY] {_DIR_LABEL[direction]} ({tag}) {ref_desc} sl={sl:.3f}")
     if not cfg.enable_trading:
         print(f"[V5S-{component}-ENTRY] enable_trading is false -- decision only, no order sent")
         return True
-    result = broker.send_market_order(cfg.symbol, direction, cfg.lots, sl, cfg.magic_number,
+    result = broker.send_market_order(cfg.symbol, direction, cfg.lots, sl, magic_number,
                                       cfg.deviation_points, comment)
     if not result.ok:
         print(f"[V5S-{component}-ENTRY] order_send failed: retcode={result.retcode} comment={result.comment}")
@@ -230,7 +235,7 @@ def _run_sl_manager(cfg: RMConfig, mgr: sl_manager.SLManager, position) -> None:
         print(f"[V5S-STR-SL] modify failed: retcode={result.retcode} comment={result.comment}")
 
 
-def _run_trade_manager(cfg: RMConfig, mgr: trade_manager.TradeManager, position) -> None:
+def _run_trade_manager(cfg: RMConfig, component: str, mgr: trade_manager.TradeManager, position) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = bid if direction == 1 else ask
@@ -245,9 +250,11 @@ def _run_trade_manager(cfg: RMConfig, mgr: trade_manager.TradeManager, position)
         return
     volume, label = outcome
     action_code = "P1" if label == "partial1" else "P2"
-    entry_comment = mgr.get_entry_comment(position.ticket) or ""
-    component = _component_from_comment(entry_comment)
-    entry_tag = _extract_tag(entry_comment)
+    # component is passed in by the caller now (2026-09-09) -- each
+    # component only ever manages its OWN magic-number-scoped position
+    # (see run_once()), so which one owns this position is already known
+    # from context, no need to infer it back from the comment any more.
+    entry_tag = _extract_tag(mgr.get_entry_comment(position.ticket) or "")
 
     print(f"[V5S-{component}-TM] #{position.ticket} booking {label}: {volume} lots")
     if not cfg.enable_trading:
@@ -259,16 +266,15 @@ def _run_trade_manager(cfg: RMConfig, mgr: trade_manager.TradeManager, position)
         print(f"[V5S-{component}-TM] partial close failed: retcode={result.retcode} comment={result.comment}")
 
 
-def _process_signal(cfg: RMConfig, component: str, direction: int, sl: float, tag: str, ref_desc: str,
-                    mark_traded, tm_mgr: trade_manager.TradeManager) -> None:
+def _process_signal(cfg: RMConfig, component: str, magic_number: int, direction: int, sl: float, tag: str,
+                    ref_desc: str, mark_traded, tm_mgr: trade_manager.TradeManager) -> None:
     """Acts on ONE signal against whatever position is ACTUALLY open right
-    now (re-queried, so an earlier signal's own action this same cycle is
-    visible here) -- shared by BOTH Reversal Manager components (STR and
-    ICT, 2026-09-09), since they share the same magic number and the same
-    one-position-at-a-time slot: "any leftovers, or whatever condition of
-    trade, square off on opposite side valid setup and fire opposite
-    side" (user's own words) is exactly this same branching regardless of
-    which component's signal it is. mark_traded is a zero-arg callback
+    now on THIS component's own magic number (re-queried, so an earlier
+    signal's own action this same cycle is visible here). Shared CODE
+    between both Reversal Manager components (STR and ICT, 2026-09-09),
+    but each call is scoped entirely to its own magic_number -- they
+    never see or touch each other's position, see module docstring for
+    why (independent, not shared). mark_traded is a zero-arg callback
     (STR's own store.mark_traded(tf, direction) or ICT's own
     eligibility.mark_traded(zone_id), bound by the caller) so this
     function stays agnostic to which component's own eligibility scheme
@@ -278,11 +284,11 @@ def _process_signal(cfg: RMConfig, component: str, direction: int, sl: float, ta
     order_send used to consume eligibility anyway, silently dropping a
     genuinely valid setup that never got a position (see _open_position's
     own docstring)."""
-    positions = broker.get_positions(cfg.symbol, cfg.magic_number)
+    positions = broker.get_positions(cfg.symbol, magic_number)
     position = positions[0] if positions else None
 
     if position is None:
-        if _open_position(cfg, component, direction, sl, tag, ref_desc):
+        if _open_position(cfg, component, magic_number, direction, sl, tag, ref_desc):
             mark_traded()
         return
 
@@ -290,11 +296,11 @@ def _process_signal(cfg: RMConfig, component: str, direction: int, sl: float, ta
 
     if direction != pos_direction:
         if (_close_position(cfg, component, position, "SQOFF", tag, "SQ")
-                and _open_position(cfg, component, direction, sl, tag, ref_desc)):
+                and _open_position(cfg, component, magic_number, direction, sl, tag, ref_desc)):
             mark_traded()
     elif tm_mgr.is_partially_cut(position.ticket):
         if (_close_position(cfg, component, position, "REFRESH", tag, "RF")
-                and _open_position(cfg, component, direction, sl, tag, ref_desc)):
+                and _open_position(cfg, component, magic_number, direction, sl, tag, ref_desc)):
             mark_traded()
     else:
         mark_traded()
@@ -314,7 +320,8 @@ def _check_stale(cfg: RMConfig, stale_tracker: StaleAlertTracker) -> None:
         _send_alert(msg)
 
 
-def run_once(cfg: RMConfig, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager,
+def run_once(cfg: RMConfig, sl_mgr_str: sl_manager.SLManager, tm_mgr_str: trade_manager.TradeManager,
+            sl_mgr_ict: sl_manager.SLManager, tm_mgr_ict: trade_manager.TradeManager,
             store: htf_levels.LevelEligibilityStore, ict_eligibility: reversal_ict.ICTEligibilityStore,
             tracker: BridgeBarFlipTracker, stale_tracker: StaleAlertTracker) -> None:
     htf_states = htf_levels.compute_all_htf_states(cfg.symbol)
@@ -335,41 +342,50 @@ def run_once(cfg: RMConfig, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.
     ict_signals = reversal_ict.find_ict_signals(cfg.symbol, cfg.nlb_nsb_block_state_file, ict_eligibility,
                                                 tracker, cfg.sl_buffer)
 
-    positions = broker.get_positions(cfg.symbol, cfg.magic_number)
-    sl_mgr.prune({p.ticket for p in positions})
-    tm_mgr.prune({p.ticket for p in positions})
+    # Each component's own magic-number-scoped positions, pruned/acted on
+    # entirely independently -- see module docstring, this is no longer a
+    # shared position slot.
+    str_positions = broker.get_positions(cfg.symbol, cfg.magic_number)
+    sl_mgr_str.prune({p.ticket for p in str_positions})
+    tm_mgr_str.prune({p.ticket for p in str_positions})
+    ict_positions = broker.get_positions(cfg.symbol, cfg.ict_magic_number)
+    sl_mgr_ict.prune({p.ticket for p in ict_positions})
+    tm_mgr_ict.prune({p.ticket for p in ict_positions})
 
-    # STR scanned first, then ICT -- fixed order so behaviour stays
-    # deterministic when both happen to qualify the same cycle, same
-    # reasoning reversal_entry.find_signals()'s own docstring gives for
-    # its own fixed HTF scan order. Each runs against whatever position
-    # is ACTUALLY open at that moment, so an earlier signal's own action
-    # this same cycle is visible to the next one (_process_signal
-    # re-queries every time).
     for sig in str_signals:
-        _process_signal(cfg, "STR", sig.direction, sig.sl, _tag(sig), f"level={sig.level_value:.3f}",
-                        lambda tf=sig.timeframe_minutes, d=sig.direction: store.mark_traded(tf, d), tm_mgr)
+        _process_signal(cfg, "STR", cfg.magic_number, sig.direction, sig.sl, _tag(sig),
+                        f"level={sig.level_value:.3f}",
+                        lambda tf=sig.timeframe_minutes, d=sig.direction: store.mark_traded(tf, d), tm_mgr_str)
     for sig in ict_signals:
-        _process_signal(cfg, "ICT", sig.direction, sig.sl, _ict_tag(sig),
+        _process_signal(cfg, "ICT", cfg.ict_magic_number, sig.direction, sig.sl, _ict_tag(sig),
                         f"zone=[{sig.zone_btm:.3f}-{sig.zone_top:.3f}]",
-                        lambda zid=sig.zone_id: ict_eligibility.mark_traded(zid), tm_mgr)
+                        lambda zid=sig.zone_id: ict_eligibility.mark_traded(zid), tm_mgr_ict)
 
-    positions = broker.get_positions(cfg.symbol, cfg.magic_number)
-    position = positions[0] if positions else None
-    if position is not None:
-        _run_sl_manager(cfg, sl_mgr, position)
-        _run_trade_manager(cfg, tm_mgr, position)
+    str_positions = broker.get_positions(cfg.symbol, cfg.magic_number)
+    str_position = str_positions[0] if str_positions else None
+    if str_position is not None:
+        _run_sl_manager(cfg, sl_mgr_str, str_position)
+        _run_trade_manager(cfg, "STR", tm_mgr_str, str_position)
+
+    ict_positions = broker.get_positions(cfg.symbol, cfg.ict_magic_number)
+    ict_position = ict_positions[0] if ict_positions else None
+    if ict_position is not None:
+        _run_sl_manager(cfg, sl_mgr_ict, ict_position)
+        _run_trade_manager(cfg, "ICT", tm_mgr_ict, ict_position)
 
 
 def main() -> None:
     cfg = load_config()
-    print(f"[V5S-STR] starting -- symbol={cfg.symbol} magic={cfg.magic_number} "
-          f"enable_trading={cfg.enable_trading} poll={cfg.poll_seconds}s")
+    print(f"[V5S-STR] starting -- symbol={cfg.symbol} str_magic={cfg.magic_number} "
+          f"ict_magic={cfg.ict_magic_number} enable_trading={cfg.enable_trading} poll={cfg.poll_seconds}s")
 
     broker.connect(cfg)
-    sl_mgr = sl_manager.SLManager(cfg.sl_state_file, cfg.breakeven_trigger_points, cfg.sl_buffer)
-    tm_mgr = trade_manager.TradeManager(cfg.state_file, cfg.partial1_trigger_points, cfg.partial1_fraction,
-                                        cfg.partial2_trigger_points, cfg.partial2_fraction)
+    sl_mgr_str = sl_manager.SLManager(cfg.sl_state_file, cfg.breakeven_trigger_points, cfg.sl_buffer)
+    tm_mgr_str = trade_manager.TradeManager(cfg.state_file, cfg.partial1_trigger_points, cfg.partial1_fraction,
+                                            cfg.partial2_trigger_points, cfg.partial2_fraction)
+    sl_mgr_ict = sl_manager.SLManager(cfg.ict_sl_state_file, cfg.breakeven_trigger_points, cfg.sl_buffer)
+    tm_mgr_ict = trade_manager.TradeManager(cfg.ict_state_file, cfg.partial1_trigger_points, cfg.partial1_fraction,
+                                            cfg.partial2_trigger_points, cfg.partial2_fraction)
     store = htf_levels.LevelEligibilityStore(cfg.levels_state_file)
     ict_eligibility = reversal_ict.ICTEligibilityStore(cfg.ict_eligibility_state_file)
     tracker = BridgeBarFlipTracker(cfg.bridge_bar_flip_state_file)
@@ -378,7 +394,8 @@ def main() -> None:
     try:
         while True:
             try:
-                run_once(cfg, sl_mgr, tm_mgr, store, ict_eligibility, tracker, stale_tracker)
+                run_once(cfg, sl_mgr_str, tm_mgr_str, sl_mgr_ict, tm_mgr_ict, store, ict_eligibility,
+                        tracker, stale_tracker)
             except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
                 print(f"[V5S-STR] cycle error: {exc!r}")
             # See heartbeat.py's own docstring -- proves the loop itself

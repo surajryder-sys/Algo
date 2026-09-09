@@ -65,8 +65,17 @@ class RMConfig:
     # Block (read-only, owned/written by the separate nlb_nsb_watcher.py
     # process) and keeps its own eligibility bookkeeping entirely
     # separate from it, see reversal_ict.py's own docstring for why.
+    # FULLY INDEPENDENT from the STR component (confirmed with the user
+    # 2026-09-09, "no keep them both seperate... no interference") -- its
+    # own magic number, own position slot, own SL/Trade Manager state
+    # files, so the two can never square each other off or share a
+    # position; STR's own magic_number/sl_state_file/state_file above
+    # are untouched by this.
     nlb_nsb_block_state_file: str
     ict_eligibility_state_file: str
+    ict_magic_number: int
+    ict_sl_state_file: str
+    ict_state_file: str
 
     mt5_terminal_path: str | None
     mt5_login: int | None
@@ -97,6 +106,9 @@ def load_config() -> RMConfig:
         heartbeat_file=os.getenv("V5S_RM_HEARTBEAT_FILE", "v5s_reversal_manager_heartbeat.json"),
         nlb_nsb_block_state_file=os.getenv("V5S_NLB_NSB_BLOCK_STATE_FILE", "v5s_nlb_nsb_block.json"),
         ict_eligibility_state_file=os.getenv("V5S_RM_ICT_ELIGIBILITY_STATE_FILE", "v5s_reversal_manager_ict_eligibility.json"),
+        ict_magic_number=int(os.getenv("V5S_RM_ICT_MAGIC_NUMBER", "26090702")),
+        ict_sl_state_file=os.getenv("V5S_RM_ICT_SL_STATE_FILE", "v5s_reversal_manager_ict_sl_state.json"),
+        ict_state_file=os.getenv("V5S_RM_ICT_STATE_FILE", "v5s_reversal_manager_ict_state.json"),
         mt5_terminal_path=os.getenv("MT5_TERMINAL_PATH") or None,
         mt5_login=int(login_raw) if login_raw else None,
         mt5_password=os.getenv("MT5_PASSWORD") or None,

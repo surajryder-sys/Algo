@@ -133,6 +133,8 @@ v5s_watchdog_state.json
 v5_sentinel_critical_alerts_subscribers.json
 v5s_nlb_nsb_block.json
 v5s_reversal_manager_ict_eligibility.json
+v5s_reversal_manager_ict_sl_state.json
+v5s_reversal_manager_ict_state.json
 v5s_nlb_nsb_watcher_heartbeat.json
 v5s_trend_manager_decision_log.jsonl
 v5_sentinel_critical_alerts_command_offset.json
