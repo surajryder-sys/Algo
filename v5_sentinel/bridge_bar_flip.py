@@ -73,6 +73,18 @@ class _PersistedState:
     last_event_type: Optional[str] = None     # "FLIP" / "TRAP_RESOLVED"
     last_event_confirmed: Optional[int] = None
     last_bar_time_seen: Optional[int] = None
+    # The bridge's own far/near line values AT THE EXACT MOMENT the last
+    # event fired -- frozen, never touched again until the NEXT event.
+    # Added 2026-09-09 for Reversal Manager's own entry SL basis: "M3
+    # flip candle trailing stop with buffer... decision and execution
+    # analysis is based on m3 which is bar close analysis" -- deliberately
+    # SEPARATE from FlipStateResult.far_line/near_line (_to_result()
+    # below), which stay a live re-read on every call on purpose (SL
+    # Manager's ongoing post-breakeven trailing needs that to keep
+    # moving, not freeze). Use BridgeBarFlipTracker.event_far_near() to
+    # read these.
+    event_far: Optional[float] = None
+    event_near: Optional[float] = None
 
 
 class BridgeBarFlipTracker:
@@ -142,6 +154,7 @@ class BridgeBarFlipTracker:
         confirmed, watching, watching_since = state.confirmed, state.watching, state.watching_since_time
         confirmed_since = state.confirmed_since_time
         ev_time, ev_type, ev_dir = state.last_event_bar_time, state.last_event_type, state.last_event_confirmed
+        prior_event_bar_time = state.last_event_bar_time  # to detect a genuinely NEW event below
 
         if watching is None:
             if confirmed == 1:
@@ -176,9 +189,18 @@ class BridgeBarFlipTracker:
                     ev_time, ev_type, ev_dir = bar_time, "TRAP_RESOLVED", 1
                     watching, watching_since = None, None
 
+        if ev_time != prior_event_bar_time and ev_dir is not None:
+            # A genuinely NEW event just fired this call -- freeze far/near
+            # at exactly this moment (lo/hi are the bridge's own values as
+            # of THIS bar, never re-read for this event again).
+            event_far, event_near = far_near_line(ev_dir, lo, hi)
+        else:
+            event_far, event_near = state.event_far, state.event_near
+
         return _PersistedState(confirmed=confirmed, confirmed_since_time=confirmed_since, watching=watching,
                                watching_since_time=watching_since, last_event_bar_time=ev_time,
-                               last_event_type=ev_type, last_event_confirmed=ev_dir, last_bar_time_seen=bar_time)
+                               last_event_type=ev_type, last_event_confirmed=ev_dir, last_bar_time_seen=bar_time,
+                               event_far=event_far, event_near=event_near)
 
     def _to_result(self, symbol: str, tf_minutes: int, state: _PersistedState, last_close: float,
                    last_time: int) -> FlipStateResult:
@@ -206,3 +228,15 @@ class BridgeBarFlipTracker:
             watching_since_time=state.watching_since_time, last_event=last_event,
             far_line=far, near_line=near, last_close=last_close, last_time=last_time,
         )
+
+    def event_far_near(self, tf_minutes: int) -> Optional[tuple[float, float]]:
+        """(far, near) as of the EXACT bar that produced this timeframe's
+        last event (FLIP/TRAP_RESOLVED) -- frozen at that moment, unlike
+        FlipStateResult.far_line/near_line above (see _PersistedState's
+        own docstring for why the two are kept deliberately separate).
+        None if update() hasn't been called for this timeframe yet, or no
+        event has ever fired for it."""
+        state = self._state.get(tf_minutes)
+        if state is None or state.event_far is None or state.event_near is None:
+            return None
+        return state.event_far, state.event_near

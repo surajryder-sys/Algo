@@ -26,8 +26,22 @@ docstring for the full mechanism.
 CONFIRMATION + ENTRY: ONE trigger only -- "3F", M3 ATR flip, PRIVILEGED
 (fires even with price on the WRONG side of the touched level, as long
 as that HTF's own character hasn't yet changed -- i.e. it hasn't itself
-closed to confirm a genuine break). Bridge-only (bridge_flip.py), no
-copy_rates fallback for the signal itself.
+closed to confirm a genuine break). Bridge-sourced, no copy_rates
+fallback for the signal itself.
+
+BAR-CLOSE-GATED, switched 2026-09-09 from the live-tick edge detection
+this used before (bridge_flip.BridgeFlipState.check(), re-evaluated
+every ~1s poll against the bridge's continuously-updating live snapshot
+-- could fire mid-candle, before M3's own bar even closed). User's own
+words: "live tick only for higher timeframe touch analysis, decision
+and execution analysis is based on m3 which is bar close analysis."
+Now uses bridge_bar_flip.BridgeBarFlipTracker -- the SAME bar-close-
+gated state machine Trend Manager's own M3/M5/M15 already run on --
+only ever fires on a genuine FLIP confirmed by an actual closed candle,
+never a live intra-bar crossing. TRAP_RESOLVED events are NOT a trigger
+here (never were, under the old edge-detection either -- a trap
+resolving back to its prior direction doesn't change the persisted
+direction, so it was never detected as an "edge").
 
 History of what used to be here, for context:
   - M5/M3 candle-color triggers ("5C"/"3C") were REMOVED entirely
@@ -46,8 +60,14 @@ If M3's bridge data is missing/stale, no signal is produced this cycle
 bridge_flip.StaleAlertTracker in) fire separately, once per sustained
 staleness episode.
 
-SL: "3F" trigger -> M3's own far trail line +/- buffer, bridge-sourced
-(bridge_flip.m3_far_line()) for consistency with the signal itself.
+SL: "3F" trigger -> M3's own far trail line +/- buffer, FROZEN at the
+exact bar that produced the flip (BridgeBarFlipTracker.event_far_near(),
+2026-09-09) -- NOT a live re-read of the bridge at whatever moment the
+order happens to send. "M3 flip candle trailing stop with buffer, this
+is not [a live re-check's] trailing stop SL" (user's own words). Once a
+position is open and past breakeven, ongoing SL trailing still follows
+M3's CURRENT live far line (bridge_flip.m3_far_line(), unchanged) --
+only the INITIAL entry SL is frozen to the flip's own candle.
 
 find_signals() returns EVERY level that qualifies THIS cycle, in a fixed
 scan order (HTF_TIMEFRAMES_MINUTES order, support level before resistance
@@ -63,7 +83,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from v5_sentinel.bridge_flip import BridgeFlipState, m3_far_line
+from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
+from v5_sentinel.flip_state import EventType
 from v5_sentinel.htf_levels import HTFState, LevelEligibilityStore
 
 
@@ -101,21 +122,31 @@ def find_signals(
     symbol: str,
     htf_states: dict[int, Optional[HTFState]],
     store: LevelEligibilityStore,
-    bridge_flip: BridgeFlipState,
-    bid: float,
-    ask: float,
+    tracker: BridgeBarFlipTracker,
     sl_buffer: float,
 ) -> list[ReversalSignal]:
     """Every armed (touched), untraded HTF level whose direction matches
-    M3's own fresh flip THIS cycle (bridge-only, privileged -- no gate on
-    which side of the level price is currently on)."""
-    m3_flip_dir = bridge_flip.check(symbol, 3, bid, ask)
-    if m3_flip_dir is None:
+    M3's own fresh, BAR-CLOSE-CONFIRMED flip (privileged -- no gate on
+    which side of the level price is currently on). 2026-09-09: bid/ask
+    no longer needed here at all -- the old live-tick edge detection
+    (BridgeFlipState.check(bid, ask)) is gone, replaced by
+    BridgeBarFlipTracker's bar-close-gated state machine (same one Trend
+    Manager runs). Only a genuine FLIP counts as this trigger, never a
+    TRAP_RESOLVED -- matches the OLD edge-detection's own behavior
+    exactly (a trap resolving back to its prior direction never changed
+    the persisted direction, so it was never detected as an edge
+    either)."""
+    fs_m3 = tracker.update(symbol, 3)
+    if fs_m3 is None or not fs_m3.event_just_happened() or fs_m3.last_event is None:
         return []
+    if fs_m3.last_event.event_type != EventType.FLIP:
+        return []
+    m3_flip_dir = fs_m3.last_event.confirmed.value
 
-    far = m3_far_line(symbol, m3_flip_dir)
-    if far is None:
-        return []  # M3 bridge stale/missing -- no SL basis, skip this cycle
+    frozen = tracker.event_far_near(3)
+    if frozen is None:
+        return []  # shouldn't happen once a FLIP has fired, but no basis to guess from
+    far, _near = frozen
     sl = far - sl_buffer if m3_flip_dir == 1 else far + sl_buffer
 
     signals: list[ReversalSignal] = []

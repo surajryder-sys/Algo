@@ -54,7 +54,11 @@ class RMConfig:
     state_file: str
     sl_state_file: str
     levels_state_file: str
-    bridge_flip_state_file: str
+    # State file for BridgeBarFlipTracker (bar-close-gated M3 confirmation,
+    # replaced the old live-tick BridgeFlipState 2026-09-09 -- that class
+    # and its own state file are retired entirely, see reversal_entry.py's
+    # own docstring for why).
+    bridge_bar_flip_state_file: str
     heartbeat_file: str
 
     mt5_terminal_path: str | None
@@ -82,7 +86,7 @@ def load_config() -> RMConfig:
         state_file=os.getenv("V5S_RM_STATE_FILE", "v5s_reversal_manager_state.json"),
         sl_state_file=os.getenv("V5S_RM_SL_STATE_FILE", "v5s_reversal_manager_sl_state.json"),
         levels_state_file=os.getenv("V5S_RM_LEVELS_STATE_FILE", "v5s_reversal_manager_levels_state.json"),
-        bridge_flip_state_file=os.getenv("V5S_RM_BRIDGE_FLIP_STATE_FILE", "v5s_reversal_manager_bridge_flip_state.json"),
+        bridge_bar_flip_state_file=os.getenv("V5S_RM_BRIDGE_BAR_FLIP_STATE_FILE", "v5s_reversal_manager_bridge_bar_flip_state.json"),
         heartbeat_file=os.getenv("V5S_RM_HEARTBEAT_FILE", "v5s_reversal_manager_heartbeat.json"),
         mt5_terminal_path=os.getenv("MT5_TERMINAL_PATH") or None,
         mt5_login=int(login_raw) if login_raw else None,

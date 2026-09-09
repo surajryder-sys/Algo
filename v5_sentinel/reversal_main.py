@@ -88,7 +88,8 @@ import time
 import MetaTrader5 as mt5
 
 from v5_sentinel import bridge, broker, heartbeat, htf_levels, reversal_entry, sl_manager, trade_manager
-from v5_sentinel.bridge_flip import BridgeFlipState, StaleAlertTracker, m3_far_line
+from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
+from v5_sentinel.bridge_flip import StaleAlertTracker, m3_far_line
 from v5_sentinel.critical_alerts_telegram import send_message as _telegram_send
 from v5_sentinel.reversal_config import RMConfig, load_config
 
@@ -274,14 +275,19 @@ def _check_stale(cfg: RMConfig, stale_tracker: StaleAlertTracker) -> None:
 
 
 def run_once(cfg: RMConfig, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager,
-            store: htf_levels.LevelEligibilityStore, bridge_flip: BridgeFlipState,
+            store: htf_levels.LevelEligibilityStore, tracker: BridgeBarFlipTracker,
             stale_tracker: StaleAlertTracker) -> None:
     htf_states = htf_levels.compute_all_htf_states(cfg.symbol)
     bid, ask = broker.get_tick_price(cfg.symbol)
+    # Touch arming stays LIVE-tick (bid/ask against HTF levels) -- only
+    # the M3 confirmation/entry trigger itself moved to bar-close-gated,
+    # 2026-09-09: "live tick only for higher timeframe touch analysis,
+    # decision and execution analysis is based on m3 which is bar close
+    # analysis."
     reversal_entry.scan_touches(htf_states, store, bid, ask)
     _check_stale(cfg, stale_tracker)
 
-    signals = reversal_entry.find_signals(cfg.symbol, htf_states, store, bridge_flip, bid, ask, cfg.sl_buffer)
+    signals = reversal_entry.find_signals(cfg.symbol, htf_states, store, tracker, cfg.sl_buffer)
 
     positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     sl_mgr.prune({p.ticket for p in positions})
@@ -307,13 +313,13 @@ def main() -> None:
     tm_mgr = trade_manager.TradeManager(cfg.state_file, cfg.partial1_trigger_points, cfg.partial1_fraction,
                                         cfg.partial2_trigger_points, cfg.partial2_fraction)
     store = htf_levels.LevelEligibilityStore(cfg.levels_state_file)
-    bridge_flip = BridgeFlipState(cfg.bridge_flip_state_file)
+    tracker = BridgeBarFlipTracker(cfg.bridge_bar_flip_state_file)
     stale_tracker = StaleAlertTracker()
 
     try:
         while True:
             try:
-                run_once(cfg, sl_mgr, tm_mgr, store, bridge_flip, stale_tracker)
+                run_once(cfg, sl_mgr, tm_mgr, store, tracker, stale_tracker)
             except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
                 print(f"[V5S-STR] cycle error: {exc!r}")
             # See heartbeat.py's own docstring -- proves the loop itself
