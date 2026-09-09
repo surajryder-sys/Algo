@@ -61,6 +61,13 @@ class RMConfig:
     bridge_bar_flip_state_file: str
     heartbeat_file: str
 
+    # RM-ICT (second component, 2026-09-09) -- reads the shared NLB/NSB
+    # Block (read-only, owned/written by the separate nlb_nsb_watcher.py
+    # process) and keeps its own eligibility bookkeeping entirely
+    # separate from it, see reversal_ict.py's own docstring for why.
+    nlb_nsb_block_state_file: str
+    ict_eligibility_state_file: str
+
     mt5_terminal_path: str | None
     mt5_login: int | None
     mt5_password: str | None
@@ -88,6 +95,8 @@ def load_config() -> RMConfig:
         levels_state_file=os.getenv("V5S_RM_LEVELS_STATE_FILE", "v5s_reversal_manager_levels_state.json"),
         bridge_bar_flip_state_file=os.getenv("V5S_RM_BRIDGE_BAR_FLIP_STATE_FILE", "v5s_reversal_manager_bridge_bar_flip_state.json"),
         heartbeat_file=os.getenv("V5S_RM_HEARTBEAT_FILE", "v5s_reversal_manager_heartbeat.json"),
+        nlb_nsb_block_state_file=os.getenv("V5S_NLB_NSB_BLOCK_STATE_FILE", "v5s_nlb_nsb_block.json"),
+        ict_eligibility_state_file=os.getenv("V5S_RM_ICT_ELIGIBILITY_STATE_FILE", "v5s_reversal_manager_ict_eligibility.json"),
         mt5_terminal_path=os.getenv("MT5_TERMINAL_PATH") or None,
         mt5_login=int(login_raw) if login_raw else None,
         mt5_password=os.getenv("MT5_PASSWORD") or None,

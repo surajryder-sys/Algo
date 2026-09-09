@@ -111,6 +111,14 @@ class BlockZone:
     retested: bool
     retested_at: Optional[int]     # OUR OWN timestamp -- wall-clock when WE marked it
     retested_source: str            # "" (not yet), "seed" (scraper already showed tested), "live" (we caught it ourselves)
+    # Same value as this zone's own dict key in BlockStore -- carried
+    # on the record itself too (2026-09-09, for RM-ICT's own eligibility
+    # tracking, see reversal_ict.py) so a caller holding just a BlockZone
+    # (from zones()/reversal_zones()) doesn't need the store's internal
+    # dict to reference it later. Defaults "" so a block file written
+    # before this field existed still loads -- BlockStore._load()
+    # backfills it from the dict key the very next time that happens.
+    zone_id: str = ""
 
 
 def _zone_id(symbol: str, timeframe: str, direction: str, start_time: int) -> str:
@@ -137,7 +145,12 @@ class BlockStore:
             return
         try:
             raw = json.loads(self._path.read_text())
-            self._zones = {zid: BlockZone(**z) for zid, z in raw.items()}
+            self._zones = {}
+            for zid, z in raw.items():
+                zone = BlockZone(**z)
+                if not zone.zone_id:  # backfill for a block file written before this field existed
+                    zone.zone_id = zid
+                self._zones[zid] = zone
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             self._zones = {}
 
@@ -170,6 +183,7 @@ class BlockStore:
                         retested=not virgin,
                         retested_at=int(scraper_retested_at) if (not virgin and scraper_retested_at is not None) else None,
                         retested_source="seed" if not virgin else "",
+                        zone_id=zid,
                     )
                     added += 1
         if added:
