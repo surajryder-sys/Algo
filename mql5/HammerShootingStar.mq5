@@ -101,6 +101,44 @@ double HighestHigh(const int i, const double &high[], bool &ok)
 }
 
 //+------------------------------------------------------------------+
+//| MT5 chart objects show on EVERY timeframe by default (OBJ_ALL_    |
+//| PERIODS) unless OBJPROP_TIMEFRAMES restricts them -- same mapping |
+//| OB_ATR_Bridge_Indicator_v1.00.mq5's CurrentPeriodObjectMaskFor()   |
+//| already uses. Without this, a Hammer found on M5 kept showing up  |
+//| after switching to M15/H1/etc (confirmed live, 2026-09-10) -- the |
+//| label isn't wrong, it's just not restricted to the timeframe it   |
+//| was actually detected on.                                         |
+//+------------------------------------------------------------------+
+long CurrentPeriodObjectMask()
+{
+   switch(_Period)
+   {
+      case PERIOD_M1:   return OBJ_PERIOD_M1;
+      case PERIOD_M2:   return OBJ_PERIOD_M2;
+      case PERIOD_M3:   return OBJ_PERIOD_M3;
+      case PERIOD_M4:   return OBJ_PERIOD_M4;
+      case PERIOD_M5:   return OBJ_PERIOD_M5;
+      case PERIOD_M6:   return OBJ_PERIOD_M6;
+      case PERIOD_M10:  return OBJ_PERIOD_M10;
+      case PERIOD_M12:  return OBJ_PERIOD_M12;
+      case PERIOD_M15:  return OBJ_PERIOD_M15;
+      case PERIOD_M20:  return OBJ_PERIOD_M20;
+      case PERIOD_M30:  return OBJ_PERIOD_M30;
+      case PERIOD_H1:   return OBJ_PERIOD_H1;
+      case PERIOD_H2:   return OBJ_PERIOD_H2;
+      case PERIOD_H3:   return OBJ_PERIOD_H3;
+      case PERIOD_H4:   return OBJ_PERIOD_H4;
+      case PERIOD_H6:   return OBJ_PERIOD_H6;
+      case PERIOD_H8:   return OBJ_PERIOD_H8;
+      case PERIOD_H12:  return OBJ_PERIOD_H12;
+      case PERIOD_D1:   return OBJ_PERIOD_D1;
+      case PERIOD_W1:   return OBJ_PERIOD_W1;
+      case PERIOD_MN1:  return OBJ_PERIOD_MN1;
+   }
+   return OBJ_ALL_PERIODS;
+}
+
+//+------------------------------------------------------------------+
 //| One label object, created once, never moved/deleted afterward --  |
 //| a closed bar's OHLC (and therefore its classification) is final   |
 //| the moment it closes, so there's nothing to ever update.          |
@@ -117,6 +155,7 @@ void CreateSignalLabel(const string name, const datetime bar_time, const double 
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 10);
    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
    ObjectSetInteger(0, name, OBJPROP_ANCHOR, anchor);
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, CurrentPeriodObjectMask());
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
    ObjectSetInteger(0, name, OBJPROP_BACK, false);
