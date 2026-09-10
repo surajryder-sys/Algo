@@ -1,30 +1,32 @@
-"""Parent bias -- REVISED 2026-09-07: M5 is now the PRIMARY parent, M15
-only ever gets a vote when M5 ITSELF is trapped (not an equal second
-parent any more -- that 2026-09-03 design, where M5/M15 disagreement
-opened both directions, is retired). M5/ICT (OB-formation-based) is
-still deferred for both timeframes; each parent's own bias is STR-only
-(ATR trail flip_state), same mechanism as M3 execution just on its own
-data.
+"""Parent bias -- REVISED 2026-09-10: M15 removed COMPLETELY as a parent.
+User's own words: "lets remove completely M15 as parent, follow m5 as
+parent, and m3 as execution." This retires the 2026-09-07 M5-primary/
+M15-fallback design (M15 voting only when M5 itself was trapped), which
+itself had retired the original 2026-09-03 design (M5/M15 as equal
+co-parents, disagreement opening both directions). M5/ICT (OB-formation-
+based) is still deferred; M5's own bias is STR-only (ATR trail
+flip_state), same mechanism as M3 execution just on its own data.
 
-Decision table (confirmed with the user, 2026-09-07 -- "if m5 trapped,
-then only check m15, if m15 also trapped, wait for m5 confirmation
-either side and follow m5"):
+Rule now (confirmed with the user, 2026-09-10):
 
-  M5 clear (either direction)  -> follow M5 alone. M15 is NOT consulted
-                                   at all -- it has no vote while M5 is
-                                   decisive, agree or disagree.
-  M5 trapped, M15 clear        -> follow M15 alone.
-  M5 trapped, M15 ALSO trapped -> NEITHER direction allowed -- wait for
-                                   M5 itself to resolve one way or the
-                                   other, then follow M5's new direction
-                                   (M15 stops mattering again the moment
-                                   M5 clears).
+  M5 clear (either direction) -> follow M5 alone.
+  M5 trapped                  -> NEITHER direction allowed, full stop --
+                                   wait for M5 itself to resolve one way
+                                   or the other. No fallback vote from
+                                   any other timeframe.
 
-"Trapped" means that parent's OWN flip_state is currently in the
-watching/ambiguous phase (FlipStateResult.watching is not None) --
-regardless of what its `confirmed` value still reads, since a trapped
-parent's confirmed direction is exactly the stale value under question,
-not a reliable vote.
+"Trapped" means M5's OWN flip_state is currently in the watching/
+ambiguous phase (FlipStateResult.watching is not None) -- regardless of
+what its `confirmed` value still reads, since a trapped parent's
+confirmed direction is exactly the stale value under question, not a
+reliable vote.
+
+M15's own flip_state is still computed and carried on ParentBiasResult
+(and still shown in decision_log's m15_label field) purely for
+diagnostic/logging visibility -- e.g. explaining a chart that doesn't
+visually look like it matches M5's own bias. It has ZERO effect on
+bull_allowed/bear_allowed any more; nothing in main.py reads M15 for a
+gating decision.
 
 2026-09-07: switched from copy_rates+bridge-tie-breaker to BRIDGE-ONLY
 (bridge_bar_flip.BridgeBarFlipTracker) -- user's explicit direction:
@@ -72,8 +74,8 @@ class ParentBiasResult:
     bull_allowed: bool
     bear_allowed: bool
     m5: FlipStateResult
-    m15: FlipStateResult
-    source: str   # "M5" / "M15" / "BOTH_TRAPPED" -- informational, for logging/tagging
+    m15: FlipStateResult   # diagnostics/logging only, 2026-09-10 -- never gates bull_allowed/bear_allowed
+    source: str   # "M5" / "M5_TRAPPED" -- informational, for logging/tagging
 
     def allows(self, direction: int) -> bool:
         return self.bull_allowed if direction == 1 else self.bear_allowed
@@ -81,7 +83,7 @@ class ParentBiasResult:
 
 def compute_parent_bias(tracker: BridgeBarFlipTracker, symbol: str) -> Optional[ParentBiasResult]:
     fs5 = tracker.update(symbol, 5)
-    fs15 = tracker.update(symbol, 15)
+    fs15 = tracker.update(symbol, 15)  # still fetched -- diagnostics only, see module docstring
     if fs5 is None or fs15 is None:
         return None
 
@@ -89,13 +91,9 @@ def compute_parent_bias(tracker: BridgeBarFlipTracker, symbol: str) -> Optional[
         bull = fs5.confirmed == Confirmed.BULL
         bear = fs5.confirmed == Confirmed.BEAR
         source = "M5"
-    elif fs15.watching is None:
-        bull = fs15.confirmed == Confirmed.BULL
-        bear = fs15.confirmed == Confirmed.BEAR
-        source = "M15"
     else:
         bull = False
         bear = False
-        source = "BOTH_TRAPPED"
+        source = "M5_TRAPPED"
 
     return ParentBiasResult(bull_allowed=bull, bear_allowed=bear, m5=fs5, m15=fs15, source=source)

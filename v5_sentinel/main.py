@@ -22,13 +22,16 @@ for now (see bias.py).
 Run with: python -m v5_sentinel.main
 
 Rules implemented here (full design recap):
-  - Parent bias, REVISED 2026-09-07: M5 is the PRIMARY parent, M15 only
-    gets a vote when M5 ITSELF is trapped (see bias.compute_parent_bias's
-    own docstring for the full table) -- this retires the 2026-09-03
-    "M5 AND M15 both act as parents, disagreement opens both directions"
-    design. Short version: M5 clear -> follow M5 alone, M15 not
-    consulted at all. M5 trapped, M15 clear -> follow M15 alone. Both
-    trapped -> NEITHER direction allowed, wait for M5 to resolve.
+  - Parent bias, REVISED 2026-09-10: M5 is the ONLY parent -- M15 removed
+    completely (see bias.compute_parent_bias's own docstring), user's own
+    words: "lets remove completely M15 as parent, follow m5 as parent,
+    and m3 as execution." This retires the 2026-09-07 M5-primary/M15-
+    fallback design (M15 voting only when M5 was trapped), which itself
+    had retired the 2026-09-03 "M5 AND M15 both act as parents,
+    disagreement opens both directions" design. Short version: M5 clear
+    -> follow M5 alone. M5 trapped -> NEITHER direction allowed, wait for
+    M5 to resolve, full stop -- no fallback vote from any other
+    timeframe.
   - M3 execution: flip_state on M3's own trail lines. A fresh event
     (FLIP or TRAP_RESOLVED) on the LAST CLOSED bar is the only thing that
     ever triggers an entry/exit decision -- a merely-persisting confirmed
@@ -225,14 +228,15 @@ def _owner_timeframe(tag: str) -> int:
 
 
 def _parent_tag(parent: "bias.ParentBiasResult", direction: int) -> str:
-    """Which parent to credit in the entry comment. 2026-09-07: bias.py's
-    source is now literally "M5" or "M15" (M5 decided, or M5 was trapped
-    and M15 decided instead) -- BOTH_TRAPPED never reaches here in
-    practice, since allows() is False for both directions in that case,
-    but "M15M5" is kept as a safe fallback label just in case."""
-    if parent.source in ("M5", "M15"):
+    """Which parent to credit in the entry comment. 2026-09-10: M15
+    removed entirely as a parent (see bias.py's own docstring) -- source
+    is now always "M5" whenever this is even reached (allows() is False
+    for both directions when source=="M5_TRAPPED", so a valid trade can
+    never get here with anything else), "M5" kept as a safe fallback
+    just in case."""
+    if parent.source == "M5":
         return parent.source
-    return "M15M5"  # BOTH_TRAPPED -- shouldn't normally be reached, see above
+    return "M5"  # M5_TRAPPED -- shouldn't normally be reached, see above
 
 
 def _tag(parent: "bias.ParentBiasResult", direction: int, label: str) -> str:
@@ -510,13 +514,12 @@ def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: 
 
     # Look for the MOST RECENT qualifying parent flip (recency-first,
     # 2026-09-07: a later parent event supersedes an earlier one still
-    # pending) -- M5 always eligible; M15 only counts when M5 is
-    # CURRENTLY trapped, matching bias.py's own M5-primary/M15-fallback
-    # table (M15 has no vote at all while M5 is decisive, agree or not).
+    # pending) -- M5 ONLY, 2026-09-10: M15 removed entirely as a parent
+    # (see bias.py's own docstring), so there is no fallback candidate
+    # here any more -- if M5 itself is trapped, there's simply nothing to
+    # confirm with until it resolves.
     candidates = []
     parent_candidates = [("M5", "5", parent.m5)]
-    if parent.m5.watching is not None:
-        parent_candidates.append(("M15", "15", parent.m15))
     for name, tf_code, fs in parent_candidates:
         if fs is not None and fs.event_just_happened() and fs.confirmed.value == zone.direction:
             candidates.append((fs.last_event.bar_time, name, tf_code, fs.last_close))
