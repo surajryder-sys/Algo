@@ -2,12 +2,24 @@
 position. Persisted to disk (keyed by ticket) so a bot restart doesn't
 lose entry price / manual-override state mid-trade.
 
-Rule (confirmed in design discussion, resume behavior refined 2026-09-04):
-  - Untouched until the trade is `breakeven_trigger_points` in favor.
-  - At that point, SL -> breakeven (entry price), and from that exact
-    moment on, SL continuously follows M3's own FAR trail line (whichever
-    of its two lines sits farther from price, see flip_state.far_near_line)
-    minus/plus `sl_buffer`, on the trade's own direction.
+Rule (confirmed in design discussion, resume behavior refined 2026-09-04;
+breakeven condition REVISED 2026-09-12):
+  - Untouched until PARTIAL BOOKING has actually happened for this ticket
+    (Trade Manager's own partial1/partial2, i.e. TradeManager.is_partially_
+    cut()) -- NOT a standalone points-in-favor threshold any more. User's
+    own words: "we are setting breakeven when it goes 7 points in favour
+    ... breakeven is only when partial booking is done." Since partial1
+    itself triggers at 10 points (above the old 7-point breakeven
+    threshold), this pushes breakeven later and ties it to a REAL booking
+    event actually having fired, not just price having crossed a level.
+    Applies universally -- confirmed with the user this isn't TM-only,
+    RM's STR and ICT components (which reuse this exact class) get the
+    same change immediately, not deferred to "later."
+  - Once partial-booked, SL -> breakeven (entry price), and from that
+    exact moment on, SL continuously follows M3's own FAR trail line
+    (whichever of its two lines sits farther from price, see
+    flip_state.far_near_line) minus/plus `sl_buffer`, on the trade's own
+    direction.
   - SL only ever tightens -- never loosens, even if the far line itself
     retraces.
   - A manual SL EDIT (broker SL differs from what this manager itself
@@ -64,6 +76,10 @@ class PositionSLState:
 class SLManager:
     def __init__(self, path: str, breakeven_trigger_points: float, sl_buffer: float):
         self._path = Path(path)
+        # 2026-09-12: no longer used to GATE breakeven (see compute()'s own
+        # docstring/module docstring for why) -- kept as a constructor param
+        # purely so every existing call site (main.py, reversal_main.py x2)
+        # doesn't need touching for this change; harmless if unused.
         self._breakeven_trigger_points = breakeven_trigger_points
         self._sl_buffer = sl_buffer
         self._state: dict[int, PositionSLState] = {}
@@ -91,11 +107,17 @@ class SLManager:
             self._save()
 
     def compute(self, ticket: int, direction: int, entry_price: float, current_price: float,
-               current_broker_sl: Optional[float], far_line: float) -> Optional[float]:
+               current_broker_sl: Optional[float], far_line: float, partial_booked: bool) -> Optional[float]:
         """Returns a new SL to apply this cycle, or None if nothing should
         change. Does NOT assume the caller actually applied the returned
         value -- call confirm_applied() only after the broker call
-        succeeds, same contract as algo_v2/sl_manager.py."""
+        succeeds, same contract as algo_v2/sl_manager.py.
+
+        partial_booked (2026-09-12): the caller's own TradeManager.
+        is_partially_cut(ticket) for this SAME position -- breakeven now
+        gates on this instead of a standalone points-in-favor threshold,
+        see module docstring for why. Passed in rather than computed here
+        since Trade Manager, not SL Manager, owns that bookkeeping."""
         state = self._state.get(ticket)
 
         if state is None:
@@ -127,14 +149,12 @@ class SLManager:
             self._save()
             return None
 
-        favor = (current_price - entry_price) if direction == 1 else (entry_price - current_price)
-
-        if favor < self._breakeven_trigger_points:
+        if not partial_booked:
             if current_broker_sl is None:
                 # Just resumed from a clear, still pre-breakeven -- the
                 # position currently has ZERO protection. Re-establish the
                 # same initial-SL formula fresh off the current far line
-                # rather than leaving it bare until +7 points arrives.
+                # rather than leaving it bare until partial booking fires.
                 proposed = far_line - self._sl_buffer if direction == 1 else far_line + self._sl_buffer
                 self._save()
                 return proposed

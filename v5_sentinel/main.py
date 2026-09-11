@@ -428,7 +428,8 @@ def _maybe_apply(cfg: Config, position, owner_tf: int, new_dir: int, tag: str, s
     return new_position, sl_tf
 
 
-def _run_sl_manager(cfg: Config, mgr: sl_manager.SLManager, position, owner_tf: int) -> None:
+def _run_sl_manager(cfg: Config, mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager, position,
+                    owner_tf: int) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = bid if direction == 1 else ask  # the side that matters for "favor" is the closing side
@@ -438,7 +439,11 @@ def _run_sl_manager(cfg: Config, mgr: sl_manager.SLManager, position, owner_tf: 
         return
     current_sl = position.sl if position.sl else None
 
-    proposed = mgr.compute(position.ticket, direction, position.price_open, current_price, current_sl, far)
+    # 2026-09-12: breakeven now gates on Trade Manager's own partial-booking
+    # progress, not a standalone points-in-favor check -- see sl_manager.py's
+    # own docstring.
+    proposed = mgr.compute(position.ticket, direction, position.price_open, current_price, current_sl, far,
+                           tm_mgr.is_partially_cut(position.ticket))
     if proposed is None:
         return
 
@@ -767,7 +772,7 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
                 runtime.mark_owner_event_seen(owner_tf, fs_owner.last_event.bar_time)
 
     if position is not None:
-        _run_sl_manager(cfg, sl_mgr, position, owner_tf)
+        _run_sl_manager(cfg, sl_mgr, tm_mgr, position, owner_tf)
         _run_trade_manager(cfg, tm_mgr, position)
 
 

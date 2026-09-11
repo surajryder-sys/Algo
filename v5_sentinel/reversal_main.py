@@ -222,7 +222,7 @@ def _close_position(cfg: RMConfig, component: str, position, action_label: str, 
     return True
 
 
-def _run_sl_manager(cfg: RMConfig, mgr: sl_manager.SLManager, position) -> None:
+def _run_sl_manager(cfg: RMConfig, mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager, position) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = bid if direction == 1 else ask
@@ -232,7 +232,12 @@ def _run_sl_manager(cfg: RMConfig, mgr: sl_manager.SLManager, position) -> None:
         return
     current_sl = position.sl if position.sl else None
 
-    proposed = mgr.compute(position.ticket, direction, position.price_open, current_price, current_sl, far)
+    # 2026-09-12: breakeven now gates on Trade Manager's own partial-booking
+    # progress, not a standalone points-in-favor check -- see sl_manager.py's
+    # own docstring. Applies to both STR and ICT (whichever tm_mgr the
+    # caller passes in for this SAME ticket).
+    proposed = mgr.compute(position.ticket, direction, position.price_open, current_price, current_sl, far,
+                           tm_mgr.is_partially_cut(position.ticket))
     if proposed is None:
         return
     print(f"[V5S-STR-SL] #{position.ticket} -> {proposed:.3f}")
@@ -395,13 +400,13 @@ def run_once(cfg: RMConfig, sl_mgr_str: sl_manager.SLManager, tm_mgr_str: trade_
     str_positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     str_position = str_positions[0] if str_positions else None
     if str_position is not None:
-        _run_sl_manager(cfg, sl_mgr_str, str_position)
+        _run_sl_manager(cfg, sl_mgr_str, tm_mgr_str, str_position)
         _run_trade_manager(cfg, "STR", tm_mgr_str, str_position)
 
     ict_positions = broker.get_positions(cfg.symbol, cfg.ict_magic_number)
     ict_position = ict_positions[0] if ict_positions else None
     if ict_position is not None:
-        _run_sl_manager(cfg, sl_mgr_ict, ict_position)
+        _run_sl_manager(cfg, sl_mgr_ict, tm_mgr_ict, ict_position)
         _run_trade_manager(cfg, "ICT", tm_mgr_ict, ict_position)
 
 
