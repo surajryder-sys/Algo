@@ -1,77 +1,78 @@
-"""V5-Sentinel Trend Manager -- main loop.
-
-Data path (rewritten 2026-09-07): M3/M5/M15 are all BRIDGE-ONLY now --
-user's explicit direction: "remove dependancy of copy rates for
-M5,M3,M1 -- follow exactly bridge, nothing else... not just for RM,
-even for TM, it should use bridge data." Still strictly bar-close-gated
-("strictly on bar close even on bridge data", not live/tick-driven) --
-see bridge_bar_flip.py for the mechanism: copy_rates is used ONLY to
-detect when a bar closed and what its close price was (no ATR/trail
-computation of our own at all), the bridge's CURRENT line values decide
-what that close confirms. If a timeframe's bridge data is missing/stale
-right when its bar closes, that bar is simply skipped (state stays as
-it was) -- no fallback, no guess -- and a sustained-staleness alert
-fires via the same @smcsecret_bot channel Reversal Manager uses. This
-replaces the old copy_rates-primary/bridge-tie-breaker design (2026-09-
-04) entirely, after that same drift issue (independent recompute vs.
-live chart divergence) kept needing patch after patch -- see bridge.py's
-OWN docstring for that history, now superseded. M5/ICT and M15/ICT
-(OB-formation bias) are NOT implemented yet; both parents are STR-only
-for now (see bias.py).
+"""V5-Sentinel Trend Manager -- main loop. REWRITTEN 2026-09-12: M5
+parent bias and M3 execution both now run on the merged Supertrend+ATR
+"structure signal" (see structure.py's own docstring for the full
+design) -- this retires the old M15-removed-but-still-single-ATR-signal
+model (2026-09-10) entirely, along with watch_zone.py (no longer used
+here) and the old M5/M15-ownership concept (no longer meaningful once
+there's only ever one parent and one execution timeframe).
 
 Run with: python -m v5_sentinel.main
 
-Rules implemented here (full design recap):
-  - Parent bias, REVISED 2026-09-10: M5 is the ONLY parent -- M15 removed
-    completely (see bias.compute_parent_bias's own docstring), user's own
-    words: "lets remove completely M15 as parent, follow m5 as parent,
-    and m3 as execution." This retires the 2026-09-07 M5-primary/M15-
-    fallback design (M15 voting only when M5 was trapped), which itself
-    had retired the 2026-09-03 "M5 AND M15 both act as parents,
-    disagreement opens both directions" design. Short version: M5 clear
-    -> follow M5 alone. M5 trapped -> NEITHER direction allowed, wait for
-    M5 to resolve, full stop -- no fallback vote from any other
-    timeframe.
-  - M3 execution: flip_state on M3's own trail lines. A fresh event
-    (FLIP or TRAP_RESOLVED) on the LAST CLOSED bar is the only thing that
-    ever triggers an entry/exit decision -- a merely-persisting confirmed
-    state (no new event this bar) never does anything by itself.
-  - A fresh M3 event only leads to a trade if its direction is allowed by
-    the current parent bias ("valid setup"). An invalid TRAP_RESOLVED
-    leaves any open position alone -- it just waits for its own SL. An
-    invalid FLIP instead arms the WATCH ZONE (watch_zone.py, added
-    2026-09-07) -- fixes a real gap where the parent gate was rejecting
-    exactly the trades that matter most (an M3 flip at the START of a
-    real trending move, before the slower parent has caught up -- normal
-    M1->M3->M5->M15 lag, not an edge case). A parent flipping into
-    agreement shortly after either fires the trade immediately (price
-    still within 2pts of M3's own qualifying price) or arms a 45%
-    pullback target (recomputed every cycle off that parent's own
-    current near trail line) to wait for instead. See watch_zone.py for
-    the full design, including cancellation and the "one trade per flip"
-    rule as it applies here.
-  - No position open + valid fresh event -> open a new position (full
-    lot size) in that direction.
-  - Position open, valid fresh event, OPPOSITE direction -> square off
-    the current position, open a new one in the new direction.
-  - Position open, valid fresh event, SAME direction (structurally only
-    possible via TRAP_RESOLVED, since FLIP always changes the confirmed
-    side) -> only refresh (square off leftover + reopen full size) if the
-    current position has already been partially cut by Trade Manager;
-    a still-full-size matching position has nothing to refresh.
-  - Ownership (added 2026-09-07, see _owner_timeframe()): once a
-    watch-zone trade is taken over by M5 or M15 (straight-fire or
-    pullback), that timeframe OWNS the resulting position for its whole
-    life -- SL trails THAT timeframe's own far line (not M3's), and only
-    THAT SAME timeframe's own fresh opposite-direction flip can close/
-    reverse it. M3 activity (and, symmetrically, the other of M5/M15) has
-    ZERO effect on an owned position while it's open -- see
-    _maybe_apply()'s gating. A normal M3-triggered position is unaffected,
-    still M3-owned as before.
-  - Every cycle, regardless of the above: SL Manager and Trade Manager
-    both run against whatever position ends up open (or the fresh one
-    just opened this same cycle).
-  - Only ever one position at a time.
+Full design recap (confirmed with the user 2026-09-12):
+
+  PARENT BIAS (M5) -- structure.compute_structure_signal(tracker, symbol,
+  5). Always decisive (direction is always 1 or -1, never "neither
+  allowed" the way the old M5-trapped-blocks-everything design worked)
+  -- whichever of M5's own Supertrend flip or ATR dual-line clear event
+  is most recent sets the bias, with its own event_time.
+
+  M3 EXECUTION -- structure.compute_structure_signal(tracker, symbol, 3)
+  gives M3 the SAME merged-signal treatment. Two triggers, both gated on
+  M3's own signal direction matching the parent bias's direction:
+
+    Trigger 1 (fresh) -- M3's own event_time is AFTER the parent bias's
+    own event_time (M3 flipped/reconfirmed to match AFTER M5 already set
+    its bias) -> fires immediately, "on the flip candle".
+
+    Trigger 2 (catch-up) -- M3's own event_time is AT OR BEFORE the
+    parent bias's event_time (M3 was already favoring before M5 even
+    caught up) -> M3's own flip candle CLOSE becomes the "qualifying
+    price". Two targets armed simultaneously, race to whichever price
+    reaches first (recomputed fresh every cycle from the same frozen
+    M3 event_time, so nothing drifts):
+      - qualifying price +/- 2 points (the near target)
+      - 40% retracement from qualifying price toward M3's OWN near ATR
+        trail line (the deeper target, for when price hasn't pulled
+        back that close) -- structure.event_reference() computes both
+        the qualifying price and the near line via copy_rates at that
+        EXACT historical bar, so neither one drifts with live price the
+        way the old watch-zone's target used to before it was fixed the
+        same way.
+    If neither target is ever reached (price never comes back, the
+    opportunity goes stale), nothing fires -- just wait for a genuinely
+    fresh M3 event instead (Trigger 1's own mechanism naturally covers
+    that next).
+
+  ELIGIBILITY -- "only one trade per flip as per M5" (user's own words):
+  M5FlipEligibility persists the event_time of whichever M5 bias event a
+  trade has already fired for. Once traded, that SAME M5 event can never
+  fire again, even if M3 produces further matching events (redundant
+  ones are simply ignored, matching the same "already in a full-size
+  trade -- marked traded, no new entry" pattern RM's own components use)
+  -- eligibility only resets the moment M5 itself produces a genuinely
+  new event_time.
+
+  INITIAL SL -- "purely based on parent who gave bias... m3 has nothing
+  to do with initial sl" (user's own words): parent.sl_value (the
+  Supertrend line value if Supertrend was the more recent driver, or
+  M5's own ATR far line if the ATR structure was) +/- cfg.sl_buffer,
+  regardless of which M3 trigger actually fired the entry.
+
+  ONGOING SL (post-breakeven trailing) -- UNCHANGED, still M3's own live
+  far ATR trail line, same sl_manager.py mechanism as before (this was
+  never part of the rewrite -- "everything remains same" except the
+  pieces explicitly listed here). Breakeven itself now gates on Trade
+  Manager's own partial-booking progress, not a points threshold (see
+  sl_manager.py's own docstring, 2026-09-12, applies here and to RM).
+
+  POSITION LIFECYCLE -- unchanged shape: no position + valid M3 signal
+  -> open fresh. Position open, valid M3 signal, OPPOSITE direction ->
+  square off + reopen ("M5 sets bias... can also square off trade if
+  you're in opposite side" -- the squaring-off happens together with
+  firing the new-direction entry, not as a standalone action with no
+  replacement). Same direction, already partially cut -> refresh. Same
+  direction, still full size -> no-op, mark the M5 flip traded anyway
+  (nothing left to fire for it).
 
 Safety: V5S_ENABLE_TRADING must be explicitly set to true in .env for any
 order to actually be sent/modified/cancelled. Left unset (default false),
@@ -88,8 +89,8 @@ from typing import Optional
 import MetaTrader5 as mt5
 
 from v5_sentinel import (
-    bias, bridge, broker, critical_alerts_subscribers, decision_log, flip_state, heartbeat, nlb_nsb_block, rates,
-    sl_manager, trade_manager, watch_zone,
+    bridge, broker, critical_alerts_subscribers, decision_log, heartbeat, nlb_nsb_block, sl_manager, structure,
+    trade_manager,
 )
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.bridge_flip import StaleAlertTracker, far_near
@@ -97,7 +98,11 @@ from v5_sentinel.config import Config, load_config
 from v5_sentinel.critical_alerts_telegram import send_message as _telegram_send
 
 _M3_MINUTES = 3
+_M5_MINUTES = 5
 _DIR_LABEL = {1: "BUY", -1: "SELL"}
+_TRIGGER_CODE = {"FRESH": "3F", "QUALIFY": "3Q", "PULLBACK": "3P"}
+_PULLBACK_RETRACE_FRACTION = 0.40
+_QUALIFY_GATE_POINTS = 2.0
 
 
 def _send_alert(text: str) -> None:
@@ -122,13 +127,11 @@ _critical_subscribers: Optional["critical_alerts_subscribers.SubscriberStore"] =
 def _send_critical_alert(text: str) -> None:
     """Broadcasts to the critical-alerts bot (SecretTrader_Critical_Bot),
     same channel + same approved-subscriber-list pattern
-    critical_alerts_watcher.py and watchdog.py already use -- re-added
-    2026-09-09 for the ICT Guard (replaces the earlier ATR trail-based
-    safeguard, which used this same alerting and was removed the same
-    day). Deliberately a SEPARATE bot/channel from _send_alert()'s
-    @smcsecret_bot (bridge-staleness only) -- this is a trading-decision
-    alert, not an infrastructure one. Never raises, same fail-soft
-    contract as _send_alert()."""
+    critical_alerts_watcher.py and watchdog.py already use. Deliberately
+    a SEPARATE bot/channel from _send_alert()'s @smcsecret_bot
+    (bridge-staleness only) -- this is a trading-decision alert, not an
+    infrastructure one. Never raises, same fail-soft contract as
+    _send_alert()."""
     global _critical_subscribers
     token = os.getenv("CRITICAL_ALERTS_TELEGRAM_BOT_TOKEN")
     owner_chat_id = os.getenv("CRITICAL_ALERTS_TELEGRAM_CHAT_ID")
@@ -146,28 +149,18 @@ def _send_critical_alert(text: str) -> None:
             print(f"[V5S-CRITICAL-ALERT] send failed for {chat_id}: {exc!r} -- message was: {text}")
 
 
-class RuntimeState:
-    """Persists the bar_time of the last M3 event actually EVALUATED, so a
-    fresh event only ever gets acted on once. FIXED 2026-09-03, confirmed
-    live: flip_state.event_just_happened() stays True for the entire
-    ~3-minute window that bar remains the most recent CLOSED one, not just
-    the single poll right after it closed -- without this dedup, the same
-    decision (square-off + reopen, in a live valid case) would have fired
-    on every ~1s poll for the whole window instead of once. This specific
-    incident was a SELL flip against a bullish M5 Bias (valid=False), so
-    the order-sending code path was never reached and no position was
-    ever opened -- confirmed by checking live positions afterward -- but
-    a VALID matching event would have repeatedly re-fired real orders."""
+class M5FlipEligibility:
+    """Persists the event_time of the M5 bias event a trade has already
+    been fired for -- "only one trade per flip as per M5" (user's own
+    words, 2026-09-12). Only the CURRENT M5 bias event ever matters (an
+    older one is moot the instant M5 produces a new one), so this only
+    ever needs to remember the single most recently traded event_time,
+    not a growing set -- eligibility for a new M5 event_time is implicit
+    (it simply won't match the stored one)."""
 
     def __init__(self, path: str):
         self._path = Path(path)
-        self.last_m3_event_time: Optional[int] = None
-        # 2026-09-07: same dedup problem, now also needed for a M5/M15-
-        # OWNED position's own opposite-flip exit trigger (see
-        # _owner_timeframe/_maybe_apply) -- keyed by timeframe since M5
-        # and M15 each need their own independent "already acted on this
-        # bar" tracking.
-        self.last_owner_event_time: dict[int, int] = {}
+        self._traded_event_time: Optional[int] = None
         self._load()
 
     def _load(self) -> None:
@@ -175,28 +168,20 @@ class RuntimeState:
             return
         try:
             data = json.loads(self._path.read_text())
-            self.last_m3_event_time = data.get("last_m3_event_time")
-            self.last_owner_event_time = {int(k): v for k, v in data.get("last_owner_event_time", {}).items()}
+            self._traded_event_time = data.get("traded_event_time")
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
-            self.last_m3_event_time = None
-            self.last_owner_event_time = {}
+            self._traded_event_time = None
 
     def _save(self) -> None:
-        self._path.write_text(json.dumps({
-            "last_m3_event_time": self.last_m3_event_time,
-            "last_owner_event_time": self.last_owner_event_time,
-        }))
+        self._path.write_text(json.dumps({"traded_event_time": self._traded_event_time}))
 
-    def mark_seen(self, bar_time: int) -> None:
-        self.last_m3_event_time = bar_time
-        self._save()
+    def is_traded(self, event_time: int) -> bool:
+        return self._traded_event_time == event_time
 
-    def owner_event_already_seen(self, tf_minutes: int, bar_time: int) -> bool:
-        return self.last_owner_event_time.get(tf_minutes) == bar_time
-
-    def mark_owner_event_seen(self, tf_minutes: int, bar_time: int) -> None:
-        self.last_owner_event_time[tf_minutes] = bar_time
-        self._save()
+    def mark_traded(self, event_time: int) -> None:
+        if self._traded_event_time != event_time:
+            self._traded_event_time = event_time
+            self._save()
 
 
 def _far_line_for(symbol: str, tf_minutes: int, direction: int) -> Optional[float]:
@@ -204,59 +189,21 @@ def _far_line_for(symbol: str, tf_minutes: int, direction: int) -> Optional[floa
     return None if result is None else result[0]
 
 
-def _owner_timeframe(tag: str) -> int:
-    """Which timeframe currently governs this position's SL trailing
-    basis and exit/reversal trigger, READ BACK from its own comment tag
-    -- 2026-09-07: "a M5 [watch-zone] trade shouldn't check for M3
-    structure once it takes over... it follows SL of M5, and nothing
-    [closes/reverses it] unless M5 itself makes the flip." A watch-zone
-    trade credited to M5 or M15 (tag ending "/5F"/"/15F", or exactly
-    "M5-PB"/"M15-PB") is owned by that same timeframe -- M3 activity has
-    zero effect on it -- UNLESS a later M3 TRAP_RESOLVED reconfirms the
-    SAME direction, added 2026-09-08: that hands ownership to M3 (see
-    run_once's own handover branch), reopening the position under a
-    fresh M3-owned tag so this function reads the new ownership back
-    correctly on a later restart too, not just for the rest of this
-    process's run. A normal M3-triggered trade (tag ending "/3F" or
-    "/3T") is unaffected, still M3-owned. Unrecognized tags default to
-    3, matching this system's original, only-ever-M3 behavior."""
-    if tag.endswith("/5F") or tag == "M5-PB":
-        return 5
-    if tag.endswith("/15F") or tag == "M15-PB":
-        return 15
-    return 3
-
-
-def _parent_tag(parent: "bias.ParentBiasResult", direction: int) -> str:
-    """Which parent to credit in the entry comment. 2026-09-10: M15
-    removed entirely as a parent (see bias.py's own docstring) -- source
-    is now always "M5" whenever this is even reached (allows() is False
-    for both directions when source=="M5_TRAPPED", so a valid trade can
-    never get here with anything else), "M5" kept as a safe fallback
-    just in case."""
-    if parent.source == "M5":
-        return parent.source
-    return "M5"  # M5_TRAPPED -- shouldn't normally be reached, see above
-
-
-def _tag(parent: "bias.ParentBiasResult", direction: int, label: str) -> str:
-    """"{parent}/3{F|T}" -- e.g. "M5/3F", "M15M5/3T". The core identity
-    piece shared by every comment this bot writes."""
-    event_code = "F" if label == "FLIP" else "T"
-    return f"{_parent_tag(parent, direction)}/3{event_code}"
+def _tag(trigger_type: str) -> str:
+    """"M5/{3F|3Q|3P}" -- the parent is always M5 now, so the tag only
+    needs to carry which of M3's own triggers actually fired: 3F (fresh
+    flip candle, Trigger 1), 3Q (qualifying-price +/-2pt hit, Trigger 2
+    near target), 3P (40% pullback hit, Trigger 2 deep target)."""
+    return f"M5/{_TRIGGER_CODE[trigger_type]}"
 
 
 def _extract_tag(comment: str) -> str:
     """Pulls the tag back out of one of our own past comments
     (V5S-TM-{tag}-...) -- used to carry an ENTRY's own tag forward onto
-    its later partial-booking comments, so a partial-close deal can be
-    traced back to what opened the position by comment alone (2026-09-04,
-    confirmed with the user). Joins everything from parts[2] onward
-    (not just parts[2] alone) -- 2026-09-07: watch-zone tags like "M5-PB"
-    contain a "-" themselves, so a naive parts[2] would silently truncate
-    them to "M5" on a later partial-booking comment. Falls back to "UNK"
-    if the given comment isn't in our own format (predates this scheme,
-    missing, etc.) -- never raises."""
+    its later partial-booking comments. Joins everything from parts[2]
+    onward (not just parts[2] alone) so a dash-containing tag survives
+    intact. Falls back to "UNK" if the given comment isn't in our own
+    format (predates this scheme, missing, etc.) -- never raises."""
     parts = comment.split("-") if comment else []
     if len(parts) >= 3 and parts[0] == "V5S" and parts[1] == "TM":
         return "-".join(parts[2:])
@@ -264,53 +211,29 @@ def _extract_tag(comment: str) -> str:
 
 
 def _comment_for_tag(tag: str) -> str:
-    """"V5S-TM-{tag}" -- the shared entry-comment shape, e.g.
-    "V5S-TM-M5/3F", "V5S-TM-M15M5/3T", or a watch-zone tag like
-    "V5S-TM-M5/5F" (straight-fire) / "V5S-TM-M5-PB" (pullback-triggered,
-    see watch_zone.py). No trailing timestamp (dropped 2026-09-07 at the
-    user's request -- purely cosmetic, nothing in the logic ever read it
-    back; _extract_tag() only ever looks at parts[0]/[1]/[2:], and the
-    bar-time dedup that actually matters lives in RuntimeState's own
-    JSON, not the comment string)."""
     return f"V5S-TM-{tag}"
 
 
-def _entry_comment(parent: "bias.ParentBiasResult", direction: int, label: str) -> str:
-    return _comment_for_tag(_tag(parent, direction, label))
-
-
 def _action_comment(tag: str, action_code: str) -> str:
-    """"V5S-TM-{tag}-{action_code}" -- the shared shape for every non-entry
-    comment (P1/P2/SQ/RF). action_code is kept to 2 letters deliberately:
-    the worst-case tag ("M15M5/3F") plus a longer word like "SQOFF" would
-    exceed MT5's real 31-char comment limit on this account (confirmed:
-    "V5S-TM-M15M5/3F-SQOFF" territory) -- P1/P2/SQ/RF all stay comfortably
-    under it instead. No trailing timestamp, see _entry_comment()."""
     return f"V5S-TM-{tag}-{action_code}"
 
 
 def _ict_guard_check(cfg: Config, direction: int, entry_price: float) -> Optional[str]:
-    """ICT Guard -- replaces the earlier ATR trail-based safeguard
-    (removed 2026-09-09), now checking the NLB/NSB Block instead of ATR
-    trail lines. User's own rule (2026-09-09): "ob edge of bullish ob
-    should be minimum 5 points away for short, ob edge of bearish ob
-    should be minimum 5 points away for long" -- "when i say edge,
-    bullish ob edge is top, bearish ob edge is bottom." So: a LONG checks
-    every NLB (bearish OB) zone's own BOTTOM edge; a SHORT checks every
-    NSB (bullish OB) zone's own TOP edge. Scoped to whatever's currently
-    in the block -- nlb_nsb_block.py only ever seeds/tracks the same 6
-    timeframes ob_levels.py does (D1, H4, H1, M30, M15, M5), so M3/M1 are
-    already out of scope by construction, matching the user's own "we
-    have nothing to do with M3 and M1 zones... we gonna ignore m3 and m1
-    now" -- nothing extra to filter here.
+    """ICT Guard -- checks the NLB/NSB Block. User's own rule: "ob edge of
+    bullish ob should be minimum 5 points away for short, ob edge of
+    bearish ob should be minimum 5 points away for long" -- "when i say
+    edge, bullish ob edge is top, bearish ob edge is bottom." A LONG
+    checks every NLB (bearish OB) zone's own BOTTOM edge; a SHORT checks
+    every NSB (bullish OB) zone's own TOP edge. Scoped to whatever's
+    currently in the block -- nlb_nsb_block.py only ever seeds/tracks
+    D1/H4/H1/M30/M15/M5, so M3/M1 are already out of scope by
+    construction.
 
     Reads the block fresh every call (cheap JSON file) rather than
     caching it in memory -- the block is written by a SEPARATE process
-    (nlb_nsb_watcher.py), so a cached copy here would silently drift from
-    whatever that process has actually seen live.
+    (nlb_nsb_watcher.py), so a cached copy here would silently drift.
 
-    Returns a human-readable block reason (which timeframe, which exact
-    zone, how close) if blocked, else None."""
+    Returns a human-readable block reason if blocked, else None."""
     target_role = "no_long_buffer" if direction == 1 else "no_short_buffer"
     store = nlb_nsb_block.BlockStore(cfg.nlb_nsb_block_state_file)
     for zone in store.zones():
@@ -324,13 +247,14 @@ def _ict_guard_check(cfg: Config, direction: int, entry_price: float) -> Optiona
     return None
 
 
-def _open_position(cfg: Config, direction: int, sl_tf: int, comment: str) -> None:
-    far = _far_line_for(cfg.symbol, sl_tf, direction)
-    if far is None:
-        print(f"[V5S-ENTRY] M{sl_tf} bridge stale/missing -- cannot compute SL, skipping {_DIR_LABEL[direction]} ({comment})")
-        return
-    sl = far - cfg.sl_buffer if direction == 1 else far + cfg.sl_buffer
-
+def _open_position(cfg: Config, direction: int, sl: float, comment: str, ref_desc: str) -> bool:
+    """Returns True if the entry actually went through (filled, or
+    enable_trading is False so it's decision-only and conceptually
+    "accepted") -- False only on a genuine order rejection or an ICT
+    Guard block. Caller must NOT mark the M5 flip's eligibility consumed
+    on a False return -- same "don't drop a genuinely valid setup that
+    never got a position" lesson this project has already learned the
+    hard way more than once (see RM's own _open_position docstrings)."""
     bid, ask = broker.get_tick_price(cfg.symbol)
     entry_price = ask if direction == 1 else bid
     block_reason = _ict_guard_check(cfg, direction, entry_price)
@@ -341,14 +265,14 @@ def _open_position(cfg: Config, direction: int, sl_tf: int, comment: str) -> Non
         _send_critical_alert(f"\U0001F6D1 {msg}")
         decision_log.log(cfg.decision_log_file, "ict_guard_blocked", direction=_DIR_LABEL[direction],
                          comment=comment, reason=block_reason, entry_price=entry_price)
-        return
+        return False
 
-    print(f"[V5S-ENTRY] {_DIR_LABEL[direction]} ({comment}) far_line={far:.3f} sl={sl:.3f}")
+    print(f"[V5S-ENTRY] {_DIR_LABEL[direction]} ({comment}) {ref_desc} sl={sl:.3f}")
     if not cfg.enable_trading:
         print("[V5S-ENTRY] enable_trading is false -- decision only, no order sent")
         decision_log.log(cfg.decision_log_file, "entry_decision_only", direction=_DIR_LABEL[direction],
                          comment=comment, sl=sl, entry_price=entry_price)
-        return
+        return True
 
     result = broker.send_market_order(cfg.symbol, direction, cfg.lots, sl, cfg.magic_number,
                                       cfg.deviation_points, comment)
@@ -356,18 +280,15 @@ def _open_position(cfg: Config, direction: int, sl_tf: int, comment: str) -> Non
         print(f"[V5S-ENTRY] order_send failed: retcode={result.retcode} comment={result.comment}")
         decision_log.log(cfg.decision_log_file, "entry_failed", direction=_DIR_LABEL[direction],
                          comment=comment, retcode=result.retcode, broker_comment=result.comment)
-    else:
-        print(f"[V5S-ENTRY] filled, ticket={result.ticket}")
-        decision_log.log(cfg.decision_log_file, "entry_filled", direction=_DIR_LABEL[direction],
-                         comment=comment, ticket=result.ticket, sl=sl, entry_price=entry_price)
+        return False
+
+    print(f"[V5S-ENTRY] filled, ticket={result.ticket}")
+    decision_log.log(cfg.decision_log_file, "entry_filled", direction=_DIR_LABEL[direction],
+                     comment=comment, ticket=result.ticket, sl=sl, entry_price=entry_price)
+    return True
 
 
 def _close_position(cfg: Config, position, action_label: str, tag: str, action_code: str) -> bool:
-    """action_label is the human-readable log word (e.g. "SQOFF"); tag is
-    the "{parent}/3{F|T}" of whatever NEW event triggered this close (not
-    the position's own entry tag -- SQOFF/REFRESH are about why it's
-    closing now, unlike P1/P2 which trace back to the entry instead, see
-    _run_trade_manager); action_code is the short comment code (SQ/RF)."""
     print(f"[V5S-EXIT] closing #{position.ticket} ({action_label}), volume={position.volume}")
     if not cfg.enable_trading:
         print("[V5S-EXIT] enable_trading is false -- decision only, no order sent")
@@ -381,67 +302,20 @@ def _close_position(cfg: Config, position, action_label: str, tag: str, action_c
     return True
 
 
-def _apply_signal(cfg: Config, position, new_dir: int, tag: str, sl_tf: int, tm_mgr: trade_manager.TradeManager):
-    """Shared position-lifecycle branching -- used by every trigger source
-    (normal M3 event, watch-zone signal, or a M5/M15-owned position's own
-    reversal, all 2026-09-07), so they all behave identically once a
-    direction+tag+sl_tf is decided: no position -> open; opposite
-    direction -> square off + reopen; same direction + already partially
-    cut -> refresh (square off + reopen full size); same direction +
-    still full size -> no-op. Returns the resulting position (re-queried
-    after any broker action)."""
-    comment = _comment_for_tag(tag)
-    if position is None:
-        _open_position(cfg, new_dir, sl_tf, comment)
-        positions = broker.get_positions(cfg.symbol, cfg.magic_number)
-        return positions[0] if positions else None
-
-    pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
-    if new_dir != pos_direction:
-        if _close_position(cfg, position, "SQOFF", tag, "SQ"):
-            _open_position(cfg, new_dir, sl_tf, comment)
-            positions = broker.get_positions(cfg.symbol, cfg.magic_number)
-            return positions[0] if positions else None
-        return position
-
-    if tm_mgr.is_partially_cut(position.ticket):
-        if _close_position(cfg, position, "REFRESH", tag, "RF"):
-            _open_position(cfg, new_dir, sl_tf, comment)
-            positions = broker.get_positions(cfg.symbol, cfg.magic_number)
-            return positions[0] if positions else None
-        return position
-
-    return position  # same direction, still full size -- nothing to refresh
-
-
-def _maybe_apply(cfg: Config, position, owner_tf: int, new_dir: int, tag: str, sl_tf: int,
-                 tm_mgr: trade_manager.TradeManager, source_label: str) -> tuple:
-    """Gate before _apply_signal -- 2026-09-07: once a position is open,
-    ONLY its own owning timeframe's signals may touch it. A different
-    timeframe's activity (e.g. M3 noise while an M5-owned trade is open)
-    is simply ignored -- no SQOFF, no refresh, nothing. Returns
-    (position, owner_tf), updated if a broker action actually happened."""
-    if position is not None and owner_tf != sl_tf:
-        print(f"[V5S] {source_label} ignored -- current position is M{owner_tf}-owned")
-        return position, owner_tf
-    new_position = _apply_signal(cfg, position, new_dir, tag, sl_tf, tm_mgr)
-    return new_position, sl_tf
-
-
-def _run_sl_manager(cfg: Config, mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager, position,
-                    owner_tf: int) -> None:
+def _run_sl_manager(cfg: Config, mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager, position) -> None:
+    """Ongoing (post-breakeven) trailing -- UNCHANGED, still M3's own
+    live far ATR trail line regardless of which trigger opened the
+    position or which signal set the parent bias. Breakeven itself gates
+    on partial booking, not a points threshold -- see sl_manager.py."""
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
-    current_price = bid if direction == 1 else ask  # the side that matters for "favor" is the closing side
-    far = _far_line_for(cfg.symbol, owner_tf, direction)
+    current_price = bid if direction == 1 else ask
+    far = _far_line_for(cfg.symbol, _M3_MINUTES, direction)
     if far is None:
-        print(f"[V5S-SL] M{owner_tf} bridge stale/missing -- skipping SL update this cycle")
+        print("[V5S-SL] M3 bridge stale/missing -- skipping SL update this cycle")
         return
     current_sl = position.sl if position.sl else None
 
-    # 2026-09-12: breakeven now gates on Trade Manager's own partial-booking
-    # progress, not a standalone points-in-favor check -- see sl_manager.py's
-    # own docstring.
     proposed = mgr.compute(position.ticket, direction, position.price_open, current_price, current_sl, far,
                            tm_mgr.is_partially_cut(position.ticket))
     if proposed is None:
@@ -475,10 +349,6 @@ def _run_trade_manager(cfg: Config, mgr: trade_manager.TradeManager, position) -
 
     volume, label = outcome
     action_code = "P1" if label == "partial1" else "P2"
-    # Traces back to the ENTRY's own tag (not any current event) -- this
-    # is a pure profit-threshold booking, nothing new "happened" on M3 to
-    # tag it with. get_entry_comment() is the position's comment as it
-    # read at first sighting, before MT5 overwrote it on the broker side.
     entry_tag = _extract_tag(mgr.get_entry_comment(position.ticket) or "")
 
     print(f"[V5S-TM] #{position.ticket} booking {label}: {volume} lots")
@@ -492,120 +362,54 @@ def _run_trade_manager(cfg: Config, mgr: trade_manager.TradeManager, position) -
         print(f"[V5S-TM] partial close failed: retcode={result.retcode} comment={result.comment}")
 
 
-def _check_watch_zone(cfg: Config, wz_store: watch_zone.WatchZoneStore, parent: "bias.ParentBiasResult",
-                      fs_m3) -> Optional[tuple[int, str, int]]:
-    """Runs the watch-zone state machine for one cycle -- see
-    watch_zone.py for the full design. Returns (direction, tag, sl_tf) if
-    a watch-zone-driven trade should fire THIS cycle, else None -- sl_tf
-    is the CONFIRMING parent's own timeframe (5 or 15), since 2026-09-07
-    that parent OWNS the resulting trade's SL basis and exit trigger, not
-    M3. Arming a new zone and cancelling an invalidated one both happen
-    here as a side effect regardless of whether a trade fires."""
-    zone = wz_store.zone
-
-    # Cancellation -- M3 entering a trap, or flipping to a DIFFERENT
-    # confirmed direction than the zone's own, both invalidate it.
-    if zone is not None and (fs_m3.watching is not None or fs_m3.confirmed.value != zone.direction):
-        reason = "M3 trapped" if fs_m3.watching is not None else "M3 flipped opposite"
-        print(f"[V5S-WATCHZONE] cancelled ({reason}) -- was {_DIR_LABEL[zone.direction]} "
-              f"@ {zone.qualifying_price:.3f}")
-        decision_log.log(cfg.decision_log_file, "watchzone_cancelled", reason=reason,
-                         direction=_DIR_LABEL[zone.direction], qualifying_price=zone.qualifying_price)
-        wz_store.cancel()
-        zone = None
-
-    if zone is None:
+def _find_m3_signal(cfg: Config, tracker: BridgeBarFlipTracker,
+                    parent: "structure.StructureSignal") -> Optional[tuple[str, str]]:
+    """Returns (trigger_type, ref_desc) if M3 qualifies THIS cycle to
+    fire against the current M5 bias, else None. trigger_type is
+    "FRESH"/"QUALIFY"/"PULLBACK" (see module docstring). Direction is
+    always parent.direction -- M3 only ever fires IN AGREEMENT with the
+    parent, never against it. Does NOT check eligibility -- caller's
+    job, since eligibility also gates the "already open, same
+    direction" no-op branch, not just fresh entries."""
+    m3 = structure.compute_structure_signal(tracker, cfg.symbol, _M3_MINUTES)
+    if m3 is None or m3.direction != parent.direction:
         return None
 
-    # Look for the MOST RECENT qualifying parent flip (recency-first,
-    # 2026-09-07: a later parent event supersedes an earlier one still
-    # pending) -- M5 ONLY, 2026-09-10: M15 removed entirely as a parent
-    # (see bias.py's own docstring), so there is no fallback candidate
-    # here any more -- if M5 itself is trapped, there's simply nothing to
-    # confirm with until it resolves.
-    candidates = []
-    parent_candidates = [("M5", "5", parent.m5)]
-    for name, tf_code, fs in parent_candidates:
-        if fs is not None and fs.event_just_happened() and fs.confirmed.value == zone.direction:
-            candidates.append((fs.last_event.bar_time, name, tf_code, fs.last_close))
+    if m3.event_time > parent.event_time:
+        ref_desc = f"m3_source={m3.source} m3_event={m3.event_time}"
+        return "FRESH", ref_desc
 
-    if candidates:
-        candidates.sort()
-        bar_time, name, tf_code, close = candidates[-1]
-        already = zone.pending is not None and zone.pending.source_bar_time == bar_time
-        if not already:
-            gap = abs(close - zone.qualifying_price)
-            if gap <= watch_zone.PULLBACK_GATE_POINTS:
-                # Staleness pre-check, same reasoning/incident as the M3
-                # event path above (2026-09-08) -- wz_store.clear() used to
-                # run unconditionally before _open_position ever got a
-                # chance to fail on a stale far line, permanently losing
-                # this fire (the zone would already be gone, nothing left
-                # to retry) instead of just skipping one cycle.
-                if _far_line_for(cfg.symbol, int(tf_code), zone.direction) is None:
-                    print(f"[V5S-WATCHZONE] {name} confirms within {gap:.3f}pts -- "
-                          f"but M{tf_code} bridge stale, deferring straight-fire, will retry once fresh")
-                else:
-                    print(f"[V5S-WATCHZONE] {name} confirms within {gap:.3f}pts of qualifying price "
-                          f"{zone.qualifying_price:.3f} -- straight fire")
-                    decision_log.log(cfg.decision_log_file, "watchzone_straight_fire", parent_name=name,
-                                     direction=_DIR_LABEL[zone.direction], gap=gap,
-                                     qualifying_price=zone.qualifying_price)
-                    wz_store.clear()
-                    return zone.direction, f"{name}/{tf_code}F", int(tf_code)
-            else:
-                print(f"[V5S-WATCHZONE] {name} confirms {gap:.3f}pts away -- arming "
-                      f"{watch_zone.PULLBACK_RETRACE_FRACTION:.0%} pullback target")
-                decision_log.log(cfg.decision_log_file, "watchzone_pullback_armed", parent_name=name,
-                                 direction=_DIR_LABEL[zone.direction], gap=gap, anchor_close=close)
-                wz_store.set_pending(name, tf_code, close, bar_time)
+    # Trigger 2 -- M3 was already favoring before/at M5's own bias event.
+    ref = structure.event_reference(cfg.symbol, _M3_MINUTES, m3.event_time, parent.direction)
+    if ref is None:
+        return None
+    qualifying_price, near = ref
 
-    zone = wz_store.zone  # re-read -- set_pending() above may have just changed it
-    if zone is not None and zone.pending is not None:
-        p = zone.pending
-        parent_tf = 5 if p.parent_tf_code == "5" else 15
-        # FROZEN at the confirming parent's OWN flip bar, not live --
-        # 2026-09-07, see watch_zone.py's own docstring for why (a real
-        # trade was missed when this re-read the live bridge every cycle
-        # instead: the near line ratcheted past the anchor close over a
-        # sustained rally, and the target kept drifting rather than
-        # staying put). The bridge has no history endpoint at all, so
-        # this specific lookup has to go through copy_rates.
-        parent_series = rates.read_trail_series(cfg.symbol, parent_tf)
-        result = (rates.trail_values_at(parent_series, p.source_bar_time)
-                 if parent_series is not None else None)
-        if result is not None:
-            _far, near = flip_state.far_near_line(zone.direction, result[0], result[1])
-            if zone.direction == 1:
-                target = p.anchor_close - watch_zone.PULLBACK_RETRACE_FRACTION * (p.anchor_close - near)
-            else:
-                target = p.anchor_close + watch_zone.PULLBACK_RETRACE_FRACTION * (near - p.anchor_close)
+    if parent.direction == 1:
+        pullback_target = qualifying_price - _PULLBACK_RETRACE_FRACTION * (qualifying_price - near)
+    else:
+        pullback_target = qualifying_price + _PULLBACK_RETRACE_FRACTION * (near - qualifying_price)
 
-            bid, ask = broker.get_tick_price(cfg.symbol)
-            price = bid if zone.direction == 1 else ask
-            reached = price <= target if zone.direction == 1 else price >= target
-            if reached:
-                # Same staleness pre-check as the straight-fire branch above
-                # (2026-09-08) -- clearing the zone before confirming
-                # _open_position can get a fresh far line would permanently
-                # lose this fire instead of retrying next cycle.
-                if _far_line_for(cfg.symbol, parent_tf, zone.direction) is None:
-                    print(f"[V5S-WATCHZONE] {p.parent_name} pullback target {target:.3f} reached "
-                          f"(price={price:.3f}) -- but M{parent_tf} bridge stale, deferring, will retry once fresh")
-                else:
-                    print(f"[V5S-WATCHZONE] {p.parent_name} pullback target {target:.3f} reached (price={price:.3f})")
-                    decision_log.log(cfg.decision_log_file, "watchzone_pullback_fired", parent_name=p.parent_name,
-                                     direction=_DIR_LABEL[zone.direction], target=target, price=price)
-                    wz_store.clear()
-                    return zone.direction, f"{p.parent_name}-PB", parent_tf
-            else:
-                print(f"[V5S-WATCHZONE] pending {p.parent_name} pullback -- target={target:.3f} current={price:.3f}")
+    bid, ask = broker.get_tick_price(cfg.symbol)
+    price = bid if parent.direction == 1 else ask
 
+    qualify_hit = abs(price - qualifying_price) <= _QUALIFY_GATE_POINTS
+    pullback_hit = (price <= pullback_target) if parent.direction == 1 else (price >= pullback_target)
+
+    if qualify_hit:
+        ref_desc = f"qualifying_price={qualifying_price:.3f} price={price:.3f}"
+        return "QUALIFY", ref_desc
+    if pullback_hit:
+        ref_desc = f"pullback_target={pullback_target:.3f} (40% toward near={near:.3f}) price={price:.3f}"
+        return "PULLBACK", ref_desc
+
+    print(f"[V5S] M3 pending -- qualifying={qualifying_price:.3f} (+/-{_QUALIFY_GATE_POINTS}pts) or "
+          f"pullback={pullback_target:.3f}, current={price:.3f}")
     return None
 
 
 def _check_stale(cfg: Config, stale_tracker: StaleAlertTracker) -> None:
-    for tf in (3, 5, 15):
+    for tf in (_M3_MINUTES, _M5_MINUTES):
         msg = stale_tracker.check(tf, bridge.read_lines(cfg.symbol, tf) is not None)
         if msg is not None:
             print(msg)
@@ -613,14 +417,12 @@ def _check_stale(cfg: Config, stale_tracker: StaleAlertTracker) -> None:
 
 
 def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager,
-            runtime: RuntimeState, wz_store: watch_zone.WatchZoneStore, tracker: BridgeBarFlipTracker,
-            stale_tracker: StaleAlertTracker) -> None:
+            eligibility: M5FlipEligibility, tracker: BridgeBarFlipTracker, stale_tracker: StaleAlertTracker) -> None:
     _check_stale(cfg, stale_tracker)
 
-    parent = bias.compute_parent_bias(tracker, cfg.symbol)
-    fs_m3 = tracker.update(cfg.symbol, _M3_MINUTES)
-    if parent is None or fs_m3 is None:
-        print("[V5S] waiting for enough bar history (parent bias / M3 state unavailable)")
+    parent = structure.compute_structure_signal(tracker, cfg.symbol, _M5_MINUTES)
+    if parent is None:
+        print("[V5S] waiting for enough bar history (M5 structure signal unavailable)")
         return
 
     positions = broker.get_positions(cfg.symbol, cfg.magic_number)
@@ -629,150 +431,46 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
     sl_mgr.prune({p.ticket for p in positions})
     tm_mgr.prune({p.ticket for p in positions})
 
-    # Which timeframe owns the CURRENT position's SL basis + exit trigger
-    # -- 2026-09-07: a watch-zone trade taken over by M5/M15 is immune to
-    # M3 (and to the other of M5/M15) once open, see _owner_timeframe().
-    owner_tf = 3
-    if position is not None:
-        entry_tag = _extract_tag(tm_mgr.get_entry_comment(position.ticket) or "")
-        owner_tf = _owner_timeframe(entry_tag)
+    if not eligibility.is_traded(parent.event_time):
+        signal = _find_m3_signal(cfg, tracker, parent)
+        if signal is not None:
+            trigger_type, ref_desc = signal
+            tag = _tag(trigger_type)
+            comment = _comment_for_tag(tag)
+            sl = parent.sl_value - cfg.sl_buffer if parent.direction == 1 else parent.sl_value + cfg.sl_buffer
 
-    # event_just_happened() alone stays True for the whole ~3-minute window
-    # this bar remains the most recent CLOSED one -- the bar_time dedup
-    # below is what makes this fire exactly ONCE per genuine event, not
-    # once per poll while it's still the latest bar. See RuntimeState.
-    if fs_m3.event_just_happened() and fs_m3.last_event.bar_time != runtime.last_m3_event_time:
-        event = fs_m3.last_event
-        new_dir = event.confirmed.value
-        valid = parent.allows(new_dir)
-        label = event.event_type.value
+            print(f"[V5S] M3 {trigger_type} -> {_DIR_LABEL[parent.direction]} "
+                  f"(parent_source={parent.source}, parent_event={parent.event_time}, {ref_desc})")
+            decision_log.log(cfg.decision_log_file, "m3_signal", trigger_type=trigger_type,
+                             direction=_DIR_LABEL[parent.direction], parent_source=parent.source,
+                             parent_event_time=parent.event_time, sl=sl, ref=ref_desc)
 
-        # Staleness pre-check, added 2026-09-08 (found live: a real trade's
-        # SL was computed off a bridge read that was 3 bars/9 minutes stale
-        # -- fixed at the bridge.py layer, see its own bar_time-staleness
-        # comment). That fix alone would have LOST the trade instead: the
-        # event used to get marked "seen" unconditionally, before knowing
-        # whether _open_position could even get a fresh far line -- a
-        # stale-at-the-wrong-instant bridge meant the event was consumed
-        # and never retried, even once the bridge recovered moments later.
-        # Only mark_seen() once we know this specific attempt can actually
-        # proceed with fresh data -- event_just_happened() stays True for
-        # this bar's whole ~3-minute window (see comment above), so leaving
-        # it unmarked here means the very next fresh-bridge cycle retries
-        # the SAME event instead of silently dropping it.
-        if valid and _far_line_for(cfg.symbol, 3, new_dir) is None:
-            print(f"[V5S] M3 {label} -> {_DIR_LABEL[new_dir]} at {event.bar_time} -- "
-                  f"M3 bridge stale -- deferring this event, will retry once fresh")
-            decision_log.log(cfg.decision_log_file, "m3_event_deferred_stale", event_type=label,
-                             direction=_DIR_LABEL[new_dir], bar_time=event.bar_time)
-        else:
-            runtime.mark_seen(fs_m3.last_event.bar_time)
-
-            print(f"[V5S] M3 {label} -> {_DIR_LABEL[new_dir]} at {event.bar_time} "
-                  f"(parent={parent.source}, M5={parent.m5.label()}, M15={parent.m15.label()}, "
-                  f"bull_allowed={parent.bull_allowed}, bear_allowed={parent.bear_allowed}, valid={valid})")
-            decision_log.log(cfg.decision_log_file, "m3_event", event_type=label, direction=_DIR_LABEL[new_dir],
-                             bar_time=event.bar_time, parent_source=parent.source, m5_label=parent.m5.label(),
-                             m15_label=parent.m15.label(), bull_allowed=parent.bull_allowed,
-                             bear_allowed=parent.bear_allowed, valid=valid)
-
-            if valid:
-                new_event_tag = _tag(parent, new_dir, label)
-                if (label == "TRAP_RESOLVED" and position is not None and owner_tf in (5, 15)
-                        and new_dir == (1 if position.type == mt5.POSITION_TYPE_BUY else -1)):
-                    # M3 TRAP_RESOLVED reconfirming an M5/M15-owned
-                    # position's OWN direction -- 2026-09-08, user
-                    # direction: the M5/M15 ownership rule exists so a
-                    # trade isn't missed when M3 flips first and the
-                    # parent only confirms later; once that trade has run
-                    # long enough to take partial exits, and M3 itself
-                    # THEN independently resolves back in agreement, the
-                    # parent and M3 are back in full alignment -- refresh
-                    # to full size (closes any partial-cut leftover, same
-                    # mechanism _apply_signal's own REFRESH branch already
-                    # uses) AND hand ownership over to M3 from here on,
-                    # not just for this cycle: reopening under M3's own
-                    # tag makes the handover durable across a restart too
-                    # (_owner_timeframe reads ownership back from the
-                    # position's own comment, not from any separately
-                    # persisted "current owner" -- an in-memory-only
-                    # reassignment here would silently revert on the next
-                    # restart otherwise). Always refreshes (not gated on
-                    # is_partially_cut like a normal same-direction event)
-                    # specifically so the handover is always durable, even
-                    # if triggered before any partial exit happened yet.
-                    print(f"[V5S] M3 TRAP_RESOLVED reconfirms M{owner_tf}-owned position's own "
-                          f"{_DIR_LABEL[new_dir]} direction -- refreshing to full size, handing ownership to M3")
-                    decision_log.log(cfg.decision_log_file, "trap_resolved_handover", direction=_DIR_LABEL[new_dir],
-                                     from_owner=owner_tf)
-                    if _close_position(cfg, position, "HANDOVER", new_event_tag, "HO"):
-                        _open_position(cfg, new_dir, 3, _comment_for_tag(new_event_tag))
-                        positions = broker.get_positions(cfg.symbol, cfg.magic_number)
-                        position = positions[0] if positions else None
-                        owner_tf = 3
-                else:
-                    position, owner_tf = _maybe_apply(cfg, position, owner_tf, new_dir, new_event_tag, 3, tm_mgr, "M3 event")
+            if position is None:
+                if _open_position(cfg, parent.direction, sl, comment, ref_desc):
+                    eligibility.mark_traded(parent.event_time)
             else:
-                # Invalid M3 event (FLIP or TRAP_RESOLVED) -- park it in
-                # the watch zone instead of dropping it outright, so a
-                # parent catching up shortly after still gets to trade the
-                # move. TRAP_RESOLVED used to be excluded from this
-                # (dropped outright when invalid, per the ORIGINAL "trap
-                # and resolve enters as it is" design) -- found live
-                # 2026-09-08 to miss a real BUY: M3 resolved bullish while
-                # M5 still disagreed, M5 itself confirmed bullish just ONE
-                # MINUTE later, but nothing was parked to catch that
-                # confirmation. Both event types now get the same
-                # treatment. Doesn't need far_line at all (uses
-                # last_close), so no staleness pre-check applies here.
-                wz_store.arm(new_dir, fs_m3.last_close, event.bar_time)
-                print(f"[V5S-WATCHZONE] armed {_DIR_LABEL[new_dir]} @ {fs_m3.last_close:.3f} "
-                      f"(parent disagrees, {label})")
-                decision_log.log(cfg.decision_log_file, "watchzone_armed", direction=_DIR_LABEL[new_dir],
-                                 qualifying_price=fs_m3.last_close, event_type=label, parent_source=parent.source)
-
-    wz_signal = _check_watch_zone(cfg, wz_store, parent, fs_m3)
-    if wz_signal is not None:
-        wz_dir, wz_tag, wz_sl_tf = wz_signal
-        position, owner_tf = _maybe_apply(cfg, position, owner_tf, wz_dir, wz_tag, wz_sl_tf, tm_mgr, "watch-zone signal")
-
-    # A M5/M15-OWNED position's own reversal trigger -- 2026-09-07: "it
-    # shouldn't impact the M5 based trade [if M3 changes]... nothing to
-    # do unless M5 doesn't make the flip." Only that SAME owning
-    # timeframe's own fresh opposite-direction flip can close/reverse it.
-    if position is not None and owner_tf in (5, 15):
-        fs_owner = parent.m5 if owner_tf == 5 else parent.m15
-        if (fs_owner.event_just_happened()
-                and not runtime.owner_event_already_seen(owner_tf, fs_owner.last_event.bar_time)):
-            owner_dir = fs_owner.confirmed.value
-            pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
-            if owner_dir != pos_direction:
-                # Staleness pre-check, same reasoning/incident as the M3
-                # event and watch-zone paths above (2026-09-08) -- only
-                # mark_owner_event_seen once we know _open_position can get
-                # a fresh far line; a stale-at-the-wrong-instant read here
-                # would otherwise permanently skip this reversal instead of
-                # retrying next cycle.
-                if _far_line_for(cfg.symbol, owner_tf, owner_dir) is None:
-                    print(f"[V5S] M{owner_tf} owner-flip -> {_DIR_LABEL[owner_dir]} -- "
-                          f"M{owner_tf} bridge stale, deferring reversal, will retry once fresh")
+                pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+                if parent.direction != pos_direction:
+                    if (_close_position(cfg, position, "SQOFF", tag, "SQ")
+                            and _open_position(cfg, parent.direction, sl, comment, ref_desc)):
+                        eligibility.mark_traded(parent.event_time)
+                elif tm_mgr.is_partially_cut(position.ticket):
+                    if (_close_position(cfg, position, "REFRESH", tag, "RF")
+                            and _open_position(cfg, parent.direction, sl, comment, ref_desc)):
+                        eligibility.mark_traded(parent.event_time)
                 else:
-                    runtime.mark_owner_event_seen(owner_tf, fs_owner.last_event.bar_time)
-                    owner_name = "M5" if owner_tf == 5 else "M15"
-                    owner_tag = f"{owner_name}/{owner_tf}F"
-                    print(f"[V5S] M{owner_tf} owner-flip -> {_DIR_LABEL[owner_dir]} -- reversing M{owner_tf}-owned position")
-                    decision_log.log(cfg.decision_log_file, "owner_flip_reversal", owner_tf=owner_tf,
-                                     direction=_DIR_LABEL[owner_dir])
-                    position, owner_tf = _maybe_apply(cfg, position, owner_tf, owner_dir, owner_tag, owner_tf,
-                                                      tm_mgr, f"M{owner_tf} owner-flip")
-            else:
-                # Same direction -- nothing to act on, safe to mark seen
-                # unconditionally (no staleness risk since no far_line read
-                # happens on this branch).
-                runtime.mark_owner_event_seen(owner_tf, fs_owner.last_event.bar_time)
+                    eligibility.mark_traded(parent.event_time)
+                    msg = (f"[V5S] {tag} qualifies ({_DIR_LABEL[parent.direction]}) but a full-size "
+                          f"{_DIR_LABEL[pos_direction]} position is already open on #{position.ticket} "
+                          f"-- marked traded, no new entry")
+                    print(msg)
+                    _send_alert(msg)
+
+            positions = broker.get_positions(cfg.symbol, cfg.magic_number)
+            position = positions[0] if positions else None
 
     if position is not None:
-        _run_sl_manager(cfg, sl_mgr, tm_mgr, position, owner_tf)
+        _run_sl_manager(cfg, sl_mgr, tm_mgr, position)
         _run_trade_manager(cfg, tm_mgr, position)
 
 
@@ -785,15 +483,14 @@ def main() -> None:
     sl_mgr = sl_manager.SLManager(cfg.sl_state_file, cfg.breakeven_trigger_points, cfg.sl_buffer)
     tm_mgr = trade_manager.TradeManager(cfg.state_file, cfg.partial1_trigger_points, cfg.partial1_fraction,
                                         cfg.partial2_trigger_points, cfg.partial2_fraction)
-    runtime = RuntimeState(cfg.runtime_state_file)
-    wz_store = watch_zone.WatchZoneStore(cfg.watch_zone_state_file)
+    eligibility = M5FlipEligibility(cfg.runtime_state_file)
     tracker = BridgeBarFlipTracker(cfg.bridge_bar_flip_state_file)
     stale_tracker = StaleAlertTracker()
 
     try:
         while True:
             try:
-                run_once(cfg, sl_mgr, tm_mgr, runtime, wz_store, tracker, stale_tracker)
+                run_once(cfg, sl_mgr, tm_mgr, eligibility, tracker, stale_tracker)
             except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
                 print(f"[V5S] cycle error: {exc!r}")
             # Written every iteration regardless of whether run_once
