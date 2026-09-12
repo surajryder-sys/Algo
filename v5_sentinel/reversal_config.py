@@ -77,6 +77,16 @@ class RMConfig:
     ict_sl_state_file: str
     ict_state_file: str
 
+    # ICT Guard -- 2026-09-12, user's own direction: "RM-STR component
+    # should also follow ICT safegaurd... only ICT based component will
+    # trade individually." Same NLB/NSB Block proximity check main.py's
+    # own ICT Guard already runs, now ALSO applied to RM-STR's own
+    # entries (see reversal_main.py's own _ict_guard_check()) -- RM-ICT
+    # itself is deliberately exempt, since its own entries are already
+    # sourced FROM these exact zones; gating it against the very level
+    # it's trading off of would make no sense.
+    ict_guard_buffer_points: float
+
     # Persistent decision log (2026-09-09, mirrors main.py's own -- see
     # decision_log.py) -- every M3-signal-found and entry/close outcome
     # for BOTH components gets one record here, so "which exact zone
@@ -117,6 +127,7 @@ def load_config() -> RMConfig:
         ict_sl_state_file=os.getenv("V5S_RM_ICT_SL_STATE_FILE", "v5s_reversal_manager_ict_sl_state.json"),
         ict_state_file=os.getenv("V5S_RM_ICT_STATE_FILE", "v5s_reversal_manager_ict_state.json"),
         decision_log_file=os.getenv("V5S_RM_DECISION_LOG_FILE", "v5s_reversal_manager_decision_log.jsonl"),
+        ict_guard_buffer_points=float(os.getenv("V5S_ICT_GUARD_BUFFER_POINTS", "5.0")),
         mt5_terminal_path=os.getenv("MT5_TERMINAL_PATH") or None,
         mt5_login=int(login_raw) if login_raw else None,
         mt5_password=os.getenv("MT5_PASSWORD") or None,

@@ -107,7 +107,7 @@ import time
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bridge, broker, decision_log, heartbeat, htf_levels, reversal_entry, reversal_ict, sl_manager, trade_manager
+from v5_sentinel import bridge, broker, decision_log, heartbeat, htf_levels, nlb_nsb_block, reversal_entry, reversal_ict, sl_manager, trade_manager
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.bridge_flip import StaleAlertTracker, m3_far_line
 from v5_sentinel.critical_alerts_telegram import send_message as _telegram_send
@@ -167,11 +167,36 @@ def _send_alert(text: str) -> None:
 
 
 
+def _ict_guard_check(cfg: RMConfig, direction: int, entry_price: float) -> Optional[str]:
+    """ICT Guard -- same NLB/NSB Block proximity check main.py's own ICT
+    Guard runs, now ALSO applied to RM-STR's own entries (2026-09-12,
+    user's own words: "RM-STR component should also follow ICT
+    safegaurd"). A LONG checks every NLB (bearish OB) zone's own BOTTOM
+    edge; a SHORT checks every NSB (bullish OB) zone's own TOP edge.
+    Deliberately NOT applied to RM-ICT's own entries -- "only ICT based
+    component will trade individually" -- RM-ICT's entries are already
+    sourced FROM these exact zones (see reversal_ict.py), so gating it
+    against the very level it's trading off of would make no sense; only
+    _process_signal's STR call site checks this."""
+    target_role = "no_long_buffer" if direction == 1 else "no_short_buffer"
+    store = nlb_nsb_block.BlockStore(cfg.nlb_nsb_block_state_file)
+    for zone in store.zones():
+        if zone.role != target_role:
+            continue
+        edge = zone.btm if target_role == "no_long_buffer" else zone.top
+        gap = abs(entry_price - edge)
+        if gap < cfg.ict_guard_buffer_points:
+            return (f"{zone.timeframe_name} {zone.role} [{zone.btm:.3f}-{zone.top:.3f}] "
+                   f"edge@{edge:.3f} is only {gap:.3f}pts away")
+    return None
+
+
 def _open_position(cfg: RMConfig, component: str, magic_number: int, direction: int, sl: float, tag: str,
                    ref_desc: str) -> bool:
     """Returns True if the entry actually went through (filled, or
     enable_trading is False so it's decision-only and conceptually
-    "accepted") -- False only on a genuine order rejection while live.
+    "accepted") -- False only on a genuine order rejection while live, or
+    an ICT Guard block (STR only, see _ict_guard_check's own docstring).
     2026-09-07 (found live, see htf_levels.py's own bugfix note): the
     caller must NOT mark eligibility consumed on a False return -- a
     failed order (e.g. retcode 10044 "session closed" right at market
@@ -184,6 +209,18 @@ def _open_position(cfg: RMConfig, component: str, magic_number: int, direction: 
     of whatever triggered this (an HTF level's value for STR, a zone's
     own range for ICT) since the two components have no other field in
     common to print."""
+    if component == "STR":
+        bid, ask = broker.get_tick_price(cfg.symbol)
+        entry_price = ask if direction == 1 else bid
+        block_reason = _ict_guard_check(cfg, direction, entry_price)
+        if block_reason is not None:
+            label = "ICT Long Blocked" if direction == 1 else "ICT Short Blocked"
+            msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({tag}) skipped"
+            print(f"[V5S-{component}-ENTRY] {msg}")
+            decision_log.log(cfg.decision_log_file, "ict_guard_blocked", component=component,
+                             direction=_DIR_LABEL[direction], tag=tag, reason=block_reason, entry_price=entry_price)
+            return False
+
     comment = _entry_comment(component, tag)
     print(f"[V5S-{component}-ENTRY] {_DIR_LABEL[direction]} ({tag}) {ref_desc} sl={sl:.3f}")
     if not cfg.enable_trading:
