@@ -31,7 +31,7 @@ wired in by the caller to alert once that's sustained past the
 threshold.
 
 FlipStateResult (from flip_state.py) is reused as the OUTPUT shape, so
-every existing caller (bias.py, main.py, sl_manager.py, watch_zone.py)
+every caller (structure.py, main.py, reversal_entry.py, reversal_ict.py)
 keeps working against the exact same type -- only WHERE that value comes
 from has changed.
 """

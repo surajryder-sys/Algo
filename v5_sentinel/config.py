@@ -38,9 +38,11 @@ class Config:
     # trailing SL both use it) -- XAUUSD points.
     sl_buffer: float
 
-    # SL Manager thresholds (points in favor of the trade).
-    breakeven_trigger_points: float   # SL -> cost once profit reaches this
-    trail_activation_points: float    # far-line trailing starts once profit is at/beyond this (== breakeven_trigger today, see main.py note)
+    # SL Manager breakeven trigger -- kept as a constructor param
+    # SLManager itself no longer uses for gating (breakeven now gates on
+    # Trade Manager's own partial-booking progress, see sl_manager.py's
+    # own docstring, 2026-09-12).
+    breakeven_trigger_points: float
 
     # Trade Manager partial-booking thresholds (points in favor) and the
     # fraction of the ORIGINAL entry quantity booked at each.
@@ -61,8 +63,7 @@ class Config:
 
     state_file: str
     sl_state_file: str
-    runtime_state_file: str
-    watch_zone_state_file: str
+    runtime_state_file: str  # M5FlipEligibility's own persistence, 2026-09-12 (kept the field name for minimal disruption)
     bridge_bar_flip_state_file: str
     heartbeat_file: str
 
@@ -84,7 +85,6 @@ def load_config() -> Config:
         enable_trading=_env_bool("V5S_ENABLE_TRADING", False),
         sl_buffer=float(os.getenv("V5S_SL_BUFFER", "2.0")),
         breakeven_trigger_points=float(os.getenv("V5S_BREAKEVEN_TRIGGER_POINTS", "7")),
-        trail_activation_points=float(os.getenv("V5S_TRAIL_ACTIVATION_POINTS", "7")),
         partial1_trigger_points=float(os.getenv("V5S_PARTIAL1_TRIGGER_POINTS", "10")),
         partial1_fraction=float(os.getenv("V5S_PARTIAL1_FRACTION", "0.70")),
         partial2_trigger_points=float(os.getenv("V5S_PARTIAL2_TRIGGER_POINTS", "15")),
@@ -96,7 +96,6 @@ def load_config() -> Config:
         sl_state_file=os.getenv("V5S_SL_STATE_FILE", "v5s_trend_manager_sl_state.json"),
         runtime_state_file=os.getenv("V5S_RUNTIME_STATE_FILE", "v5s_trend_manager_runtime_state.json"),
         heartbeat_file=os.getenv("V5S_HEARTBEAT_FILE", "v5s_trend_manager_heartbeat.json"),
-        watch_zone_state_file=os.getenv("V5S_WATCH_ZONE_STATE_FILE", "v5s_trend_manager_watch_zone_state.json"),
         bridge_bar_flip_state_file=os.getenv("V5S_BRIDGE_BAR_FLIP_STATE_FILE", "v5s_trend_manager_bridge_bar_flip_state.json"),
         mt5_terminal_path=os.getenv("MT5_TERMINAL_PATH") or None,
         mt5_login=int(login_raw) if login_raw else None,
