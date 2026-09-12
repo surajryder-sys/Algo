@@ -66,3 +66,19 @@ def read_supertrend(symbol: str, tf_minutes: int) -> Optional[SupertrendState]:
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def fresh_flip(symbol: str, tf_minutes: int) -> Optional[SupertrendState]:
+    """The SupertrendState only if it flipped on the CURRENT/latest
+    closed bar (event_time == bar_time) -- 2026-09-12, added for RM's own
+    M1 Supertrend entry trigger ("a flip on m1 by supertrend... will make
+    eligible to enter into the trade"). Same "privileged, momentary"
+    nature as M3's own ATR-flip trigger (flip_state.event_just_happened())
+    -- an OLDER flip that's still the current trend but didn't just
+    happen this bar does NOT count, so this never re-fires once a bar
+    passes without a fresh flip. None if there's no fresh flip, or the
+    bridge has nothing to offer at all right now."""
+    st = read_supertrend(symbol, tf_minutes)
+    if st is None or st.event_time != st.bar_time:
+        return None
+    return st

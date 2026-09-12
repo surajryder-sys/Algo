@@ -58,10 +58,13 @@ Summary of the STR component's own full rule set:
     signals scanned first, then ICT's, always against whatever position
     is ACTUALLY open at that moment (so an earlier signal's own action is
     visible to the next one this same cycle):
-      no position               -> open fresh
-      opposite direction        -> square off + reopen opposite
-      same direction, full size -> ignore, mark traded, alert only
-      same direction, partially cut -> refresh (square off + reopen full)
+      no position        -> open fresh
+      opposite direction -> square off + reopen opposite
+      same direction     -> ignore, mark traded, alert only (whether
+                             still full-size or already partially cut --
+                             2026-09-12, "no closing leftover and
+                             entering full qty again" retired the old
+                             partially-cut-refresh branch)
   - SL Manager, Trade Manager (70%/15% partial booking), and post-
     breakeven trailing all reuse Trend Manager's own classes UNCHANGED,
     just under RM's own magic number/state files -- confirmed 2026-09-07
@@ -320,7 +323,7 @@ def _run_trade_manager(cfg: RMConfig, component: str, mgr: trade_manager.TradeMa
 
 
 def _process_signal(cfg: RMConfig, component: str, magic_number: int, direction: int, sl: float, tag: str,
-                    ref_desc: str, mark_traded, tm_mgr: trade_manager.TradeManager) -> None:
+                    ref_desc: str, mark_traded) -> None:
     """Acts on ONE signal against whatever position is ACTUALLY open right
     now on THIS component's own magic number (re-queried, so an earlier
     signal's own action this same cycle is visible here). Shared CODE
@@ -332,7 +335,7 @@ def _process_signal(cfg: RMConfig, component: str, magic_number: int, direction:
     eligibility.mark_traded(zone_id), bound by the caller) so this
     function stays agnostic to which component's own eligibility scheme
     it's consuming. Only calls it once the entry actually went through
-    (or, for the "already in a full-size trade" case, always -- no order
+    (or, for the "already open, same direction" case, always -- no order
     is even attempted there) -- 2026-09-07, found live: a failed
     order_send used to consume eligibility anyway, silently dropping a
     genuinely valid setup that never got a position (see _open_position's
@@ -351,13 +354,15 @@ def _process_signal(cfg: RMConfig, component: str, magic_number: int, direction:
         if (_close_position(cfg, component, position, "SQOFF", tag, "SQ")
                 and _open_position(cfg, component, magic_number, direction, sl, tag, ref_desc)):
             mark_traded()
-    elif tm_mgr.is_partially_cut(position.ticket):
-        if (_close_position(cfg, component, position, "REFRESH", tag, "RF")
-                and _open_position(cfg, component, magic_number, direction, sl, tag, ref_desc)):
-            mark_traded()
     else:
+        # SAME direction, whether still full-size or already partially
+        # cut -- NO-OP, 2026-09-12: "no closing leftover and entering
+        # full qty again... we not closing leftovers and entering fresh
+        # trade." The old "already partially cut -> refresh (close
+        # leftover + reopen full)" branch is retired -- a same-direction
+        # match now behaves identically regardless of partial-cut state.
         mark_traded()
-        msg = (f"[V5S-{component}] {tag} qualifies ({_DIR_LABEL[direction]}) but a full-size {_DIR_LABEL[pos_direction]} "
+        msg = (f"[V5S-{component}] {tag} qualifies ({_DIR_LABEL[direction]}) but a {_DIR_LABEL[pos_direction]} "
               f"position is already open on #{position.ticket} -- marked traded, no new entry")
         print(msg)
         _send_alert(msg)
@@ -428,11 +433,11 @@ def run_once(cfg: RMConfig, sl_mgr_str: sl_manager.SLManager, tm_mgr_str: trade_
     for sig in str_signals:
         _process_signal(cfg, "STR", cfg.magic_number, sig.direction, sig.sl, _tag(sig),
                         f"level={sig.level_value:.3f}",
-                        lambda tf=sig.timeframe_minutes, d=sig.direction: store.mark_traded(tf, d), tm_mgr_str)
+                        lambda tf=sig.timeframe_minutes, d=sig.direction: store.mark_traded(tf, d))
     for sig in ict_signals:
         _process_signal(cfg, "ICT", cfg.ict_magic_number, sig.direction, sig.sl, _ict_tag(sig),
                         f"zone=[{sig.zone_btm:.3f}-{sig.zone_top:.3f}]",
-                        lambda zid=sig.zone_id: ict_eligibility.mark_traded(zid), tm_mgr_ict)
+                        lambda zid=sig.zone_id: ict_eligibility.mark_traded(zid))
 
     str_positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     str_position = str_positions[0] if str_positions else None

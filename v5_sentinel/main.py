@@ -65,14 +65,16 @@ Full design recap (confirmed with the user 2026-09-12):
   Manager's own partial-booking progress, not a points threshold (see
   sl_manager.py's own docstring, 2026-09-12, applies here and to RM).
 
-  POSITION LIFECYCLE -- unchanged shape: no position + valid M3 signal
-  -> open fresh. Position open, valid M3 signal, OPPOSITE direction ->
-  square off + reopen ("M5 sets bias... can also square off trade if
-  you're in opposite side" -- the squaring-off happens together with
-  firing the new-direction entry, not as a standalone action with no
-  replacement). Same direction, already partially cut -> refresh. Same
-  direction, still full size -> no-op, mark the M5 flip traded anyway
-  (nothing left to fire for it).
+  POSITION LIFECYCLE -- no position + valid M3 signal -> open fresh.
+  Position open, valid M3 signal, OPPOSITE direction -> square off +
+  reopen ("M5 sets bias... can also square off trade if you're in
+  opposite side" -- the squaring-off happens together with firing the
+  new-direction entry, not as a standalone action with no replacement).
+  SAME direction, whether still full-size or already partially cut ->
+  NO-OP, just mark the M5 flip traded -- 2026-09-12, user's own words:
+  "no closing leftover and entering full qty again... we not closing
+  leftovers and entering fresh trade." The old "already partially cut
+  -> refresh (close leftover + reopen full)" branch is retired.
 
 Safety: V5S_ENABLE_TRADING must be explicitly set to true in .env for any
 order to actually be sent/modified/cancelled. Left unset (default false),
@@ -454,13 +456,15 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
                     if (_close_position(cfg, position, "SQOFF", tag, "SQ")
                             and _open_position(cfg, parent.direction, sl, comment, ref_desc)):
                         eligibility.mark_traded(parent.event_time)
-                elif tm_mgr.is_partially_cut(position.ticket):
-                    if (_close_position(cfg, position, "REFRESH", tag, "RF")
-                            and _open_position(cfg, parent.direction, sl, comment, ref_desc)):
-                        eligibility.mark_traded(parent.event_time)
                 else:
+                    # SAME direction, whether still full-size or already
+                    # partially cut -- NO-OP, 2026-09-12: "no closing
+                    # leftover and entering full qty again... we not
+                    # closing leftovers and entering fresh trade." The
+                    # old "already partially cut -> refresh (close
+                    # leftover + reopen full)" branch is retired.
                     eligibility.mark_traded(parent.event_time)
-                    msg = (f"[V5S] {tag} qualifies ({_DIR_LABEL[parent.direction]}) but a full-size "
+                    msg = (f"[V5S] {tag} qualifies ({_DIR_LABEL[parent.direction]}) but a "
                           f"{_DIR_LABEL[pos_direction]} position is already open on #{position.ticket} "
                           f"-- marked traded, no new entry")
                     print(msg)
