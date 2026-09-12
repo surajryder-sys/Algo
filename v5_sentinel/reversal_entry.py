@@ -32,18 +32,23 @@ HTF's own character hasn't yet changed -- i.e. it hasn't itself closed
 to confirm a genuine break:
   - "3F" -- M3's own ATR dual-trail flip (crosses BOTH lines), bridge-
     sourced, bar-close-gated (unchanged mechanically from before).
-  - "1F" -- M1's own Supertrend flip (st_bridge.fresh_flip()), bridge-
+  - "ST1F" -- M1's own Supertrend flip (st_bridge.fresh_flip()), bridge-
     sourced, bar-close-gated the same way on the MQL5 side already (see
     st_bridge.py's own docstring) -- NOT the same "1F" that existed
     before 2026-09-07 (that was a gated path requiring price on the
     correct side of the level; this one is privileged, same as "3F").
+    Labeled "ST1F" (not bare "1F"), 2026-09-12, user's own words: "1F
+    Supertrend flip comment should be, ST1F" -- and M1 itself is scoped
+    to Reversal Manager only, "no where m1 plays any role apart from
+    reversal managers" (Trend Manager's own M5/M3 structure signals,
+    see structure.py, never touch M1 at all).
 Neither requires the other -- whichever happens first (or both, on the
 rare cycle they coincide) produces a signal.
 
 BAR-CLOSE-GATED for both. "3F" uses bridge_bar_flip.BridgeBarFlipTracker
 -- the SAME bar-close-gated state machine Trend Manager's own M3/M5
 already run on -- only ever fires on a genuine FLIP confirmed by an
-actual closed candle, never a live intra-bar crossing. "1F" uses
+actual closed candle, never a live intra-bar crossing. "ST1F" uses
 st_bridge.fresh_flip(), which only returns a result the exact bar the
 MQL5 indicator's own Supertrend trend changed (event_time == bar_time)
 -- same "privileged, momentary" nature, computed on the MQL5 side so
@@ -58,8 +63,8 @@ out to be the mechanism behind a real live incident (H4 TRAP churn,
 ~150 trades, net -$62 on that timeframe alone); the ORIGINAL "1F" (a
 gated Path 1 trigger requiring price on the correct side of the level)
 was removed the same day ("remove 1f logic completely and replace with
-strict 3F confirmation"). The "1F" reintroduced 2026-09-12 is a
-different, privileged mechanism, not a revival of that gated one.
+strict 3F confirmation"). "ST1F", introduced 2026-09-12, is a different,
+privileged mechanism, not a revival of that gated one.
 
 If a trigger's own bridge data is missing/stale, that trigger simply
 produces no signal this cycle -- no fallback, no guess. Staleness
@@ -69,7 +74,7 @@ separately for M3, once per sustained staleness episode.
 SL: "3F" -> M3's own far trail line +/- buffer, FROZEN at the exact bar
 that produced the flip (BridgeBarFlipTracker.event_far_near(),
 2026-09-09) -- NOT a live re-read of the bridge at whatever moment the
-order happens to send. "1F" -> M1's own Supertrend line value +/-
+order happens to send. "ST1F" -> M1's own Supertrend line value +/-
 buffer, read directly off that same fresh-flip bar (the MQL5 side
 already only updates it once per closed bar, so no separate freezing
 mechanism is needed for this one). Once a position is open and past
@@ -80,7 +85,7 @@ the position) -- only the INITIAL entry SL differs by trigger.
 find_signals() returns EVERY level that qualifies THIS cycle, in a fixed
 scan order -- all of "3F"'s own matches first (HTF_TIMEFRAMES_MINUTES
 order, support level before resistance within a timeframe), then all of
-"1F"'s (same ordering), so behaviour is deterministic rather than
+"ST1F"'s (same ordering), so behaviour is deterministic rather than
 scan-order-random when more than one qualifies at once, including the
 rare cycle where both triggers fire together. reversal_main.py decides
 which one becomes the actual trade and which get marked traded + alerted
@@ -106,7 +111,7 @@ class ReversalSignal:
     direction: int              # 1 buy, -1 sell
     timeframe_minutes: int       # the HTF whose level this is
     line_no: int
-    trigger: str                 # "3F" or "1F"
+    trigger: str                 # "3F" or "ST1F"
     level_value: float
     sl: float
 
@@ -159,7 +164,7 @@ def find_signals(
 ) -> list[ReversalSignal]:
     """Every armed (touched), untraded HTF level whose direction matches
     EITHER of M3's own fresh, BAR-CLOSE-CONFIRMED ATR flip ("3F") or M1's
-    own fresh Supertrend flip ("1F") -- both privileged, no gate on which
+    own fresh Supertrend flip ("ST1F") -- both privileged, no gate on which
     side of the level price is currently on, either alone is sufficient
     (2026-09-12). Only a genuine FLIP counts for "3F", never a
     TRAP_RESOLVED."""
@@ -178,6 +183,6 @@ def find_signals(
     m1 = st_bridge.fresh_flip(symbol, _M1_MINUTES)
     if m1 is not None:
         sl = m1.supertrend - sl_buffer if m1.trend == 1 else m1.supertrend + sl_buffer
-        signals.extend(_scan_matching_levels(htf_states, store, m1.trend, "1F", sl))
+        signals.extend(_scan_matching_levels(htf_states, store, m1.trend, "ST1F", sl))
 
     return signals

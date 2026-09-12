@@ -25,19 +25,23 @@ So, TWO independent triggers now, either sufficient alone:
     gated via the SAME BridgeBarFlipTracker Trend Manager and RM's own
     STR component already run on M3. Only a genuine FLIP counts, never
     TRAP_RESOLVED -- same scope as the sibling STR component's own "3F".
-  - "1F" -- M1's own Supertrend flip (st_bridge.fresh_flip()), bar-close-
-    gated the same way on the MQL5 side already (see st_bridge.py).
+  - "ST1F" -- M1's own Supertrend flip (st_bridge.fresh_flip()), bar-
+    close-gated the same way on the MQL5 side already (see st_bridge.py).
+    Labeled "ST1F" (not bare "1F"), 2026-09-12: "1F Supertrend flip
+    comment should be, ST1F" -- and M1 is scoped to Reversal Manager
+    only, "no where m1 plays any role apart from reversal managers"
+    (Trend Manager's own structure signals never touch M1).
   Whichever fires first (or both, on the rare cycle they coincide)
   produces a signal for any retested zone matching its direction.
 
 SL: "3F" -> "sl as per m3 far line with buffer as it is" -- M3's own far
 trail line +/- cfg.sl_buffer, FROZEN at the exact bar that produced the
-flip (BridgeBarFlipTracker.event_far_near()), not a live re-read. "1F"
--> M1's own Supertrend line value +/- cfg.sl_buffer, read directly off
-that fresh-flip bar (the MQL5 side already only updates it once per
-closed bar, so no separate freezing mechanism is needed). Reuses the
-very same sl_buffer value STR uses -- "as it is" means no new/different
-buffer for this component.
+flip (BridgeBarFlipTracker.event_far_near()), not a live re-read.
+"ST1F" -> M1's own Supertrend line value +/- cfg.sl_buffer, read
+directly off that fresh-flip bar (the MQL5 side already only updates it
+once per closed bar, so no separate freezing mechanism is needed).
+Reuses the very same sl_buffer value STR uses -- "as it is" means no
+new/different buffer for this component.
 
 ELIGIBILITY ("traded" tracking): kept in THIS module's OWN separate
 state file (ICTEligibilityStore below), never written back into the
@@ -90,7 +94,7 @@ class ICTSignal:
     timeframe_name: str          # "H1"
     zone_top: float
     zone_btm: float
-    trigger: str                  # "3F" or "1F" -- same labels STR's own triggers use (2026-09-09, user's own direction: "dont use ATR flip on comment, You can use 3F"); the "V5S-RM-{STR|ICT}-" component prefix already tells the two components apart, so reusing STR's labels here isn't ambiguous.
+    trigger: str                  # "3F" or "ST1F" -- same labels STR's own triggers use (2026-09-09, user's own direction: "dont use ATR flip on comment, You can use 3F"); the "V5S-RM-{STR|ICT}-" component prefix already tells the two components apart, so reusing STR's labels here isn't ambiguous.
     sl: float
 
 
@@ -153,7 +157,7 @@ def find_ict_signals(
 ) -> list[ICTSignal]:
     """Every currently-retested, untraded OB zone whose implied direction
     matches EITHER M3's own fresh, bar-close-confirmed ATR flip ("3F") or
-    M1's own fresh Supertrend flip ("1F") -- either alone is sufficient
+    M1's own fresh Supertrend flip ("ST1F") -- either alone is sufficient
     (2026-09-12). Reads the Block fresh (read-only -- this component
     never writes to it) every call, same pattern main.py's own ICT Guard
     already uses."""
@@ -173,6 +177,6 @@ def find_ict_signals(
     m1 = st_bridge.fresh_flip(symbol, _M1_MINUTES)
     if m1 is not None:
         sl = m1.supertrend - sl_buffer if m1.trend == 1 else m1.supertrend + sl_buffer
-        signals.extend(_scan_matching_zones(store, eligibility, m1.trend, "1F", sl))
+        signals.extend(_scan_matching_zones(store, eligibility, m1.trend, "ST1F", sl))
 
     return signals
