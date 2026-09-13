@@ -77,12 +77,21 @@ SL PROGRESSION: see ict_sl_manager.py's own docstring for the full
 three-stage design (OB-based frozen -> structure-confirmed far-line ->
 partial-booked breakeven-floored far-line).
 
-ICT GUARD: deliberately NOT applied to TM-ICT's own entries, same
-reasoning as RM-ICT's own exemption (reversal_main.py's
-_ict_guard_check docstring) -- TM-ICT's entries are already sourced FROM
-OB zones directly, so gating against the very kind of level it trades
-off of would make no sense. (Design inference, not separately confirmed
-with the user -- flagged for review.)
+ICT GUARD: APPLIED to TM-ICT's own entries (corrected 2026-09-14, user's
+own words: "kindly use NLB and NSB for this as well / the 5 points rule
+from qualifying entry level") -- same NLB/NSB Block proximity check
+main.py/reversal_main.py's own _ict_guard_check() already runs (5pt
+default buffer, cfg.ict_guard_buffer_points), reused verbatim here. NOT
+circular the way RM-ICT's own exemption is: RM-ICT trades directly off
+the NLB/NSB Block's OWN zones, so gating it against the very level it's
+entering from would make no sense -- TM-ICT's own zones are a completely
+DIFFERENT set (M3 TV+MT5 zones, not the Block's HTF D1-M5 ones), so this
+is a genuine independent cross-check, same as TM-STR/RM-STR's own. "from
+qualifying entry level" -- checked against whatever price THIS entry is
+actually about to fire at: live ask/bid for Rule 1 (MO) and Rule 3
+(3F/ST3F), the computed pullback target for Rule 2 (PB) -- see
+_open_position()'s own entry_price parameter, not a separate live price
+read at send time.
 
 COMMENT SCHEME (given verbatim by the user, 2026-09-14, deliberately
 WITHOUT the "V5S-" prefix seen elsewhere in this project):
@@ -102,7 +111,10 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bridge_flip, broker, decision_log, heartbeat, ict_ob_block, ict_sl_manager, st_bridge, trade_manager
+from v5_sentinel import (
+    bridge_flip, broker, decision_log, heartbeat, ict_ob_block, ict_sl_manager, nlb_nsb_block, st_bridge,
+    trade_manager,
+)
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.flip_state import EventType, FlipStateResult
 from v5_sentinel.reversal_ict import ICTEligibilityStore
@@ -122,6 +134,7 @@ class TMICTSignal:
     zone_top: float
     zone_btm: float
     formed_time: int
+    entry_price: float   # the "qualifying entry level" the ICT Guard checks -- see module docstring
 
 
 def _tag(trigger: str) -> str:
@@ -164,17 +177,23 @@ def find_signals(cfg: TMICTConfig, store: ict_ob_block.ICTBlockStore, eligibilit
         if _zone_blocked(zone.direction_int, fs_m3, zone.formed_time):
             continue
 
+        market_price = ask if zone.direction_int == 1 else bid
+
         if zone.entry_mode == "MARKET":
             sl = ict_ob_block.initial_sl(zone, cfg.ict_sl_buffer)
             signals.append(TMICTSignal(zone.direction_int, zone.zone_id, "MO", sl, zone.top, zone.btm,
-                                       zone.formed_time))
+                                       zone.formed_time, market_price))
         elif zone.entry_mode == "PENDING" and zone.entry_target is not None:
-            price = ask if zone.direction_int == 1 else bid
-            reached = (price <= zone.entry_target) if zone.direction_int == 1 else (price >= zone.entry_target)
+            reached = (market_price <= zone.entry_target) if zone.direction_int == 1 else \
+                (market_price >= zone.entry_target)
             if reached:
                 sl = ict_ob_block.initial_sl(zone, cfg.ict_sl_buffer)
+                # "the 5 points rule from qualifying entry level" -- the
+                # qualifying level for a pullback entry is the computed
+                # target itself, not whatever live price happens to be
+                # at the exact instant it's reached.
                 signals.append(TMICTSignal(zone.direction_int, zone.zone_id, "PB", sl, zone.top, zone.btm,
-                                           zone.formed_time))
+                                           zone.formed_time, zone.entry_target))
 
         if (fresh_atr_flip and fs_m3.last_event.confirmed.value == zone.direction_int
                 and fs_m3.last_event.bar_time > zone.formed_time):
@@ -183,24 +202,55 @@ def find_signals(cfg: TMICTConfig, store: ict_ob_block.ICTBlockStore, eligibilit
                 far, _near = frozen
                 sl = far - cfg.trail_sl_buffer if zone.direction_int == 1 else far + cfg.trail_sl_buffer
                 signals.append(TMICTSignal(zone.direction_int, zone.zone_id, "3F", sl, zone.top, zone.btm,
-                                           zone.formed_time))
+                                           zone.formed_time, market_price))
 
         if (st_fresh is not None and st_fresh.trend == zone.direction_int
                 and st_fresh.event_time > zone.formed_time):
             sl = st_fresh.supertrend - cfg.trail_sl_buffer if zone.direction_int == 1 else \
                 st_fresh.supertrend + cfg.trail_sl_buffer
             signals.append(TMICTSignal(zone.direction_int, zone.zone_id, "ST3F", sl, zone.top, zone.btm,
-                                       zone.formed_time))
+                                       zone.formed_time, market_price))
 
     signals.sort(key=lambda s: -s.formed_time)
     return signals
 
 
-def _open_position(cfg: TMICTConfig, direction: int, sl: float, tag: str, ref_desc: str) -> bool:
-    """No ICT Guard check here -- see module docstring. Returns True if
-    the entry actually went through (or enable_trading is False, decision
-    only) -- False only on a genuine order rejection, same "don't consume
-    eligibility on a failed order" contract as every other component."""
+def _ict_guard_check(cfg: TMICTConfig, direction: int, entry_price: float) -> Optional[str]:
+    """NLB/NSB Block proximity check (main.py/reversal_main.py's own
+    _ict_guard_check(), reused verbatim here) -- see module docstring's
+    own ICT GUARD section for why this genuinely applies to TM-ICT too,
+    unlike RM-ICT's exemption. A LONG checks every NLB (bearish OB)
+    zone's own BOTTOM edge; a SHORT checks every NSB (bullish OB) zone's
+    own TOP edge, against entry_price -- the signal's own "qualifying
+    entry level" (see TMICTSignal.entry_price), not a fresh live read."""
+    target_role = "no_long_buffer" if direction == 1 else "no_short_buffer"
+    store = nlb_nsb_block.BlockStore(cfg.nlb_nsb_block_state_file)
+    for zone in store.zones():
+        if zone.role != target_role:
+            continue
+        edge = zone.btm if target_role == "no_long_buffer" else zone.top
+        gap = abs(entry_price - edge)
+        if gap < cfg.ict_guard_buffer_points:
+            return (f"{zone.timeframe_name} {zone.role} [{zone.btm:.3f}-{zone.top:.3f}] "
+                   f"edge@{edge:.3f} is only {gap:.3f}pts away")
+    return None
+
+
+def _open_position(cfg: TMICTConfig, direction: int, sl: float, tag: str, ref_desc: str,
+                   entry_price: float) -> bool:
+    """Returns True if the entry actually went through (or enable_trading
+    is False, decision only) -- False on a genuine order rejection OR an
+    ICT Guard block, same "don't consume eligibility on a failed/blocked
+    entry" contract as every other component."""
+    block_reason = _ict_guard_check(cfg, direction, entry_price)
+    if block_reason is not None:
+        label = "ICT Long Blocked" if direction == 1 else "ICT Short Blocked"
+        msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({tag}) skipped"
+        print(f"[V5S-TM-ICT-ENTRY] {msg}")
+        decision_log.log(cfg.decision_log_file, "ict_guard_blocked", direction=_DIR_LABEL[direction],
+                         tag=tag, reason=block_reason, entry_price=entry_price)
+        return False
+
     print(f"[V5S-TM-ICT-ENTRY] {_DIR_LABEL[direction]} ({tag}) {ref_desc} sl={sl:.3f}")
     if not cfg.enable_trading:
         print("[V5S-TM-ICT-ENTRY] enable_trading is false -- decision only, no order sent")
@@ -247,7 +297,7 @@ def _process_signal(cfg: TMICTConfig, sig: TMICTSignal, eligibility: ICTEligibil
     position = positions[0] if positions else None
 
     if position is None:
-        if _open_position(cfg, sig.direction, sig.sl, tag, ref_desc):
+        if _open_position(cfg, sig.direction, sig.sl, tag, ref_desc, sig.entry_price):
             eligibility.mark_traded(sig.zone_id)
         return
 
@@ -255,7 +305,7 @@ def _process_signal(cfg: TMICTConfig, sig: TMICTSignal, eligibility: ICTEligibil
 
     if sig.direction != pos_direction:
         if (_close_position(cfg, position, "SQOFF", tag, "SQ")
-                and _open_position(cfg, sig.direction, sig.sl, tag, ref_desc)):
+                and _open_position(cfg, sig.direction, sig.sl, tag, ref_desc, sig.entry_price)):
             eligibility.mark_traded(sig.zone_id)
     else:
         # SAME direction, whether still full-size or already partially

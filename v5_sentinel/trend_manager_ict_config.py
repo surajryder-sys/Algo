@@ -51,6 +51,15 @@ class TMICTConfig:
     partial2_trigger_points: float
     partial2_fraction: float
 
+    # ICT Guard -- SAME NLB/NSB Block every other component reads
+    # (read-only, owned/written by the separate nlb_nsb_watcher.py
+    # process), applied to TM-ICT's own entries too, 2026-09-14: "kindly
+    # use NLB and NSB for this as well / the 5 points rule from
+    # qualifying entry level" -- see trend_manager_ict.py's own docstring
+    # for why this isn't circular the way RM-ICT's own exemption is.
+    nlb_nsb_block_state_file: str
+    ict_guard_buffer_points: float
+
     tv_zone_state_file: str    # same tv_scraper store every other component reads, read-only here
     block_state_file: str
     eligibility_state_file: str
@@ -82,6 +91,8 @@ def load_config() -> TMICTConfig:
         partial1_fraction=float(os.getenv("V5S_PARTIAL1_FRACTION", "0.70")),
         partial2_trigger_points=float(os.getenv("V5S_PARTIAL2_TRIGGER_POINTS", "15")),
         partial2_fraction=float(os.getenv("V5S_PARTIAL2_FRACTION", "0.15")),
+        nlb_nsb_block_state_file=os.getenv("V5S_NLB_NSB_BLOCK_STATE_FILE", "v5s_nlb_nsb_block.json"),
+        ict_guard_buffer_points=float(os.getenv("V5S_ICT_GUARD_BUFFER_POINTS", "5.0")),
         tv_zone_state_file=os.getenv("V5S_TV_SCRAPER_ZONE_STATE_FILE", "v5s_tv_scraper_zones.json"),
         block_state_file=os.getenv("V5S_TM_ICT_BLOCK_STATE_FILE", "v5s_tm_ict_block.json"),
         eligibility_state_file=os.getenv("V5S_TM_ICT_ELIGIBILITY_STATE_FILE", "v5s_tm_ict_eligibility.json"),
