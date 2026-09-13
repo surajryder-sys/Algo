@@ -37,6 +37,12 @@ class Config:
     subscribers_file: str
     heartbeat_file: str
 
+    # NLB/NSB OB-zone touch alerts (2026-09-14) -- reads the SAME Block
+    # every other component reads (read-only, owned/written exclusively
+    # by nlb_nsb_watcher.py), own dedup state file.
+    nlb_nsb_block_state_file: str
+    ob_zone_alert_state_file: str
+
 
 def load_config() -> Config:
     login_raw = os.getenv("MT5_LOGIN", "").strip()
@@ -52,4 +58,7 @@ def load_config() -> Config:
         state_file=os.getenv("V5S_CRITICAL_ALERTS_STATE_FILE", "v5_sentinel_critical_alerts_state.json"),
         subscribers_file=os.getenv("V5S_CRITICAL_ALERTS_SUBSCRIBERS_FILE", "v5_sentinel_critical_alerts_subscribers.json"),
         heartbeat_file=os.getenv("V5S_CRITICAL_ALERTS_HEARTBEAT_FILE", "v5s_critical_alerts_heartbeat.json"),
+        nlb_nsb_block_state_file=os.getenv("V5S_NLB_NSB_BLOCK_STATE_FILE", "v5s_nlb_nsb_block.json"),
+        ob_zone_alert_state_file=os.getenv("V5S_CRITICAL_ALERTS_OB_ZONE_STATE_FILE",
+                                           "v5s_critical_alerts_ob_zone_state.json"),
     )

@@ -66,3 +66,42 @@ class CriticalAlertState:
     def mark_alerted(self, tf_minutes: int, line_no: int, bar_time: int) -> None:
         self._alerted[self._key(tf_minutes, line_no)] = bar_time
         self._save()
+
+
+class OBZoneAlertState:
+    """Persisted per-zone alert dedup for the critical-alerts bot's NLB/
+    NSB OB-zone-touch alerts (2026-09-14, "price when touches the
+    untested ob zones with their details"). Deliberately a PERMANENT
+    one-shot dedup by the zone's own stable id, unlike CriticalAlertState
+    above's per-bar dedup -- a zone's own retested flag can only ever go
+    False -> True ONCE in its life (nlb_nsb_block.py's own BlockStore
+    never reverts it), so there is no equivalent "new value, alert
+    again" case here the way an HTF trail line's value can change on
+    every bar close. A zone_id is also never reused (it's keyed off the
+    zone's own real formation bar, see nlb_nsb_block._zone_id), so a
+    permanent set carries no risk of misfiring against a genuinely new,
+    unrelated zone later."""
+
+    def __init__(self, path: str):
+        self._path = Path(path)
+        self._alerted: set = set()
+        self._load()
+
+    def _load(self) -> None:
+        if not self._path.exists():
+            return
+        try:
+            self._alerted = set(json.loads(self._path.read_text()))
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            self._alerted = set()
+
+    def _save(self) -> None:
+        self._path.write_text(json.dumps(sorted(self._alerted)))
+
+    def already_alerted(self, zone_id: str) -> bool:
+        return zone_id in self._alerted
+
+    def mark_alerted(self, zone_id: str) -> None:
+        if zone_id not in self._alerted:
+            self._alerted.add(zone_id)
+            self._save()
