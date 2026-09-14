@@ -419,7 +419,8 @@ def run_once(cfg: RMConfig, sl_mgr_str: sl_manager.SLManager, tm_mgr_str: trade_
     for sig in ict_signals:
         _process_signal(cfg, sticky, "ICT", cfg.ict_magic_number, sig.direction, sig.sl, _ict_tag(sig),
                         f"zone=[{sig.zone_btm:.3f}-{sig.zone_top:.3f}]",
-                        lambda zid=sig.zone_id: ict_eligibility.mark_traded(zid))
+                        lambda zid=sig.zone_id, top=sig.zone_top, btm=sig.zone_btm:
+                            ict_eligibility.mark_traded(zid, top, btm))
 
     str_positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     str_position = str_positions[0] if str_positions else None

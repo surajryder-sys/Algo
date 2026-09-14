@@ -58,6 +58,16 @@ own; it's either still a valid, live level, or it's been invalidated and
 the Block has already deleted it outright, which excludes it from
 scanning automatically with nothing extra to track.
 
+Exact zone_id matching alone isn't enough, though (2026-09-15, found
+live): the SAME real M15 price level fired an entry twice in one day,
+~16 hours apart, because tv_scraper's own detection had churned the
+real zone out of its own visible list and back in between the two
+firings, minting it a brand-new start_time/identity the second time --
+never the same zone_id as the one already traded, so is_traded() alone
+never caught it. ICTEligibilityStore.overlaps_traded() is the geometric
+backstop: a new zone is also rejected if its own range substantially
+overlaps one already traded today, regardless of identity.
+
 Position lifecycle: identical to STR's own (reversal_main.py's
 _process_signal, generalized to accept either component). No position
 -> open fresh. Opposite direction -> square off + reopen. SAME
@@ -101,31 +111,79 @@ class ICTSignal:
 class ICTEligibilityStore:
     """Persists which OB zones (by their own stable Block zone_id) this
     component has already traded -- see module docstring for why this
-    is a SEPARATE file from the Block's own, not written back into it."""
+    is a SEPARATE file from the Block's own, not written back into it.
+
+    ALSO persists each traded zone's own (top, btm) range (2026-09-15,
+    found live: the exact same real M15 price level [4292.110-4327.490]
+    fired an RM-ICT trade TWICE in one day, ~16 hours apart -- not a
+    dedup failure by zone_id, the two firings genuinely had different
+    zone_ids, because tv_scraper's own detection had churned the real
+    zone out of its own visible list and back in between the two,
+    minting it a brand-new start_time/identity the second time -- same
+    debounce-churn mechanism as the fabricated-zone incidents, just
+    reproducing a REAL level's identity instead of inventing one).
+    is_traded() alone can't catch this -- it only ever compares exact
+    zone_ids. overlaps_traded() below is the geometric backstop: reject
+    a new zone outright if its own range substantially overlaps a zone
+    already traded today, regardless of whether the two share an
+    identity. Zones persisted before this field existed carry None for
+    their own range (no historical top/btm was ever recorded for them)
+    -- they simply never gain overlap protection retroactively, which is
+    fine; this store isn't pruned at all, so old entries stay forever
+    either way."""
 
     def __init__(self, path: str):
         self._path = Path(path)
-        self._traded: set[str] = set()
+        self._traded: dict[str, Optional[tuple]] = {}
         self._load()
 
     def _load(self) -> None:
         if not self._path.exists():
             return
         try:
-            self._traded = set(json.loads(self._path.read_text()))
+            raw = json.loads(self._path.read_text())
+            if isinstance(raw, list):
+                # Pre-2026-09-15 format: a bare list of zone_id strings,
+                # no range ever recorded.
+                self._traded = {zid: None for zid in raw}
+            else:
+                self._traded = {zid: (tuple(v) if v is not None else None) for zid, v in raw.items()}
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
-            self._traded = set()
+            self._traded = {}
 
     def _save(self) -> None:
-        self._path.write_text(json.dumps(sorted(self._traded)))
+        payload = {zid: (list(rng) if rng is not None else None) for zid, rng in self._traded.items()}
+        self._path.write_text(json.dumps(payload))
 
     def is_traded(self, zone_id: str) -> bool:
         return zone_id in self._traded
 
-    def mark_traded(self, zone_id: str) -> None:
+    def mark_traded(self, zone_id: str, top: Optional[float] = None, btm: Optional[float] = None) -> None:
         if zone_id not in self._traded:
-            self._traded.add(zone_id)
+            self._traded[zone_id] = (top, btm) if top is not None and btm is not None else None
             self._save()
+
+    def overlaps_traded(self, top: float, btm: float, min_overlap_fraction: float = 0.6) -> Optional[str]:
+        """Returns the zone_id of an already-traded zone whose own range
+        overlaps [btm, top] by at least min_overlap_fraction of the
+        SMALLER of the two ranges, or None if nothing overlaps that
+        much. Fractional (not exact-match) deliberately -- a re-detected
+        copy of the same real level isn't guaranteed to read pixel-
+        identical top/btm on rediscovery, just substantially the same
+        range."""
+        for zone_id, rng in self._traded.items():
+            if rng is None:
+                continue
+            traded_top, traded_btm = rng
+            overlap = min(top, traded_top) - max(btm, traded_btm)
+            if overlap <= 0:
+                continue
+            smaller_range = min(top - btm, traded_top - traded_btm)
+            if smaller_range <= 0:
+                continue
+            if overlap / smaller_range >= min_overlap_fraction:
+                return zone_id
+        return None
 
 
 def _scan_matching_zones(store: BlockStore, eligibility: ICTEligibilityStore, direction: int, trigger: str,
@@ -140,6 +198,11 @@ def _scan_matching_zones(store: BlockStore, eligibility: ICTEligibilityStore, di
         if zone.role != target_role or not zone.retested:
             continue
         if eligibility.is_traded(zone.zone_id):
+            continue
+        dup = eligibility.overlaps_traded(zone.top, zone.btm)
+        if dup is not None:
+            print(f"[V5S-ICT] zone {zone.zone_id} [{zone.btm:.3f}-{zone.top:.3f}] skipped -- "
+                  f"substantially overlaps already-traded zone {dup}")
             continue
         signals.append(ICTSignal(
             direction=direction, zone_id=zone.zone_id, timeframe_name=zone.timeframe_name,

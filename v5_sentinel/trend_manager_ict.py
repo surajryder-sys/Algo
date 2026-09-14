@@ -247,6 +247,11 @@ def find_signals(cfg: TMICTConfig, store: ict_ob_block.ICTBlockStore, eligibilit
     for zone in store.zones():
         if eligibility.is_traded(zone.zone_id):
             continue
+        dup = eligibility.overlaps_traded(zone.top, zone.btm)
+        if dup is not None:
+            print(f"[V5S-TM-ICT] zone {zone.zone_id} [{zone.btm:.3f}-{zone.top:.3f}] skipped -- "
+                  f"substantially overlaps already-traded zone {dup}")
+            continue
         if _zone_blocked(zone.direction_int, fs_m3, zone.formed_time):
             continue
 
@@ -356,7 +361,7 @@ def _process_signal(cfg: TMICTConfig, sticky: ict_guard.ICTGuardStickyStore, sig
 
     if position is None:
         if _open_position(cfg, sticky, sig.direction, sig.sl, tag, ref_desc, sig.entry_price):
-            eligibility.mark_traded(sig.zone_id)
+            eligibility.mark_traded(sig.zone_id, sig.zone_top, sig.zone_btm)
         return
 
     pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
@@ -364,7 +369,7 @@ def _process_signal(cfg: TMICTConfig, sticky: ict_guard.ICTGuardStickyStore, sig
     if sig.direction != pos_direction:
         if (_close_position(cfg, position, "SQOFF", tag, "SQ")
                 and _open_position(cfg, sticky, sig.direction, sig.sl, tag, ref_desc, sig.entry_price)):
-            eligibility.mark_traded(sig.zone_id)
+            eligibility.mark_traded(sig.zone_id, sig.zone_top, sig.zone_btm)
     else:
         # SAME direction, whether still full-size or already partially
         # cut -- NO-OP, same "no closing leftover and entering fresh
