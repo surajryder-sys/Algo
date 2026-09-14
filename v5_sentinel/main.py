@@ -200,24 +200,34 @@ def _tag(trigger_type: str) -> str:
 
 
 def _extract_tag(comment: str) -> str:
-    """Pulls the tag back out of one of our own past comments
-    (V5S-TM-{tag}-...) -- used to carry an ENTRY's own tag forward onto
-    its later partial-booking comments. Joins everything from parts[2]
-    onward (not just parts[2] alone) so a dash-containing tag survives
-    intact. Falls back to "UNK" if the given comment isn't in our own
-    format (predates this scheme, missing, etc.) -- never raises."""
+    """Pulls the tag back out of one of our own past comments -- used to
+    carry an ENTRY's own tag forward onto its later partial-booking
+    comments. Joins everything after the fixed prefix (not just one
+    part) so a dash-containing tag survives intact. Accepts the CURRENT
+    "V5S-TM-STR-{tag}-..." shape (STR added 2026-09-15, user's own
+    words: "V5S-TM-M5/3Q, but STR is missing" -- main.py is TM-STR, but
+    its comment never said so, unlike every other component which
+    already carries its own component name) AND the OLDER, pre-2026-09-15
+    "V5S-TM-{tag}-..." shape for backward compatibility -- a position's
+    entry comment is frozen on the broker side and can never be
+    rewritten, so a trade opened before this change still needs its
+    later P1/P2 comments to resolve the right tag. Falls back to "UNK"
+    if the given comment isn't in either format (predates this scheme
+    entirely, missing, etc.) -- never raises."""
     parts = comment.split("-") if comment else []
+    if len(parts) >= 4 and parts[0] == "V5S" and parts[1] == "TM" and parts[2] == "STR":
+        return "-".join(parts[3:])
     if len(parts) >= 3 and parts[0] == "V5S" and parts[1] == "TM":
         return "-".join(parts[2:])
     return "UNK"
 
 
 def _comment_for_tag(tag: str) -> str:
-    return f"V5S-TM-{tag}"
+    return f"V5S-TM-STR-{tag}"
 
 
 def _action_comment(tag: str, action_code: str) -> str:
-    return f"V5S-TM-{tag}-{action_code}"
+    return f"V5S-TM-STR-{tag}-{action_code}"
 
 
 def _open_position(cfg: Config, sticky: ict_guard.ICTGuardStickyStore, direction: int, sl: float, comment: str,
