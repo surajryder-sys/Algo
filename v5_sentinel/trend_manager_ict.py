@@ -94,8 +94,13 @@ _open_position()'s own entry_price parameter, not a separate live price
 read at send time.
 
 COMMENT SCHEME (given verbatim by the user, 2026-09-14, deliberately
-WITHOUT the "V5S-" prefix seen elsewhere in this project):
+WITHOUT the "V5S-" prefix seen elsewhere in this project, and CORRECTED
+the same day once source-mixing was found live -- the original scheme
+hardcoded "MT5-M3" for every trade regardless of which source the zone
+actually came from, so a genuinely TV-sourced zone's own trade still
+read "MT5-M3" in its comment. Now source-aware):
   TM-ICT/MT5-M3/ST3F, TM-ICT/MT5-M3/3F, TM-ICT/MT5-M3/MO, TM-ICT/MT5-M3/PB
+  TM-ICT/TV-M3/ST3F,   TM-ICT/TV-M3/3F,   TM-ICT/TV-M3/MO,   TM-ICT/TV-M3/PB
 "-P1"/"-P2"/"-SQ" appended the same way as every other component's own
 partial-booking/square-off comments.
 
@@ -135,10 +140,20 @@ class TMICTSignal:
     zone_btm: float
     formed_time: int
     entry_price: float   # the "qualifying entry level" the ICT Guard checks -- see module docstring
+    source: str            # "tv" | "mt5" -- the zone's own source, see ict_ob_block.ICTZone.source
 
 
-def _tag(trigger: str) -> str:
-    return f"TM-ICT/MT5-{_TF_LABEL}/{trigger}"
+_SOURCE_LABEL = {"tv": "TV", "mt5": "MT5"}
+
+
+def _tag(source: str, trigger: str) -> str:
+    """2026-09-14, corrected per the user's own direction -- the comment
+    now carries which source the underlying zone actually came from
+    (found live: a trade's comment read "MT5-M3" for a zone that was
+    actually TV-sourced, since the original scheme was a fixed label,
+    not source-aware -- see this module's own COMMENT SCHEME docs)."""
+    label = _SOURCE_LABEL.get(source, source.upper())
+    return f"TM-ICT/{label}-{_TF_LABEL}/{trigger}"
 
 
 def _action_comment(tag: str, action_code: str) -> str:
@@ -182,7 +197,7 @@ def find_signals(cfg: TMICTConfig, store: ict_ob_block.ICTBlockStore, eligibilit
         if zone.entry_mode == "MARKET":
             sl = ict_ob_block.initial_sl(zone, cfg.ict_sl_buffer)
             signals.append(TMICTSignal(zone.direction_int, zone.zone_id, "MO", sl, zone.top, zone.btm,
-                                       zone.formed_time, market_price))
+                                       zone.formed_time, market_price, zone.source))
         elif zone.entry_mode == "PENDING" and zone.entry_target is not None:
             reached = (market_price <= zone.entry_target) if zone.direction_int == 1 else \
                 (market_price >= zone.entry_target)
@@ -193,7 +208,7 @@ def find_signals(cfg: TMICTConfig, store: ict_ob_block.ICTBlockStore, eligibilit
                 # target itself, not whatever live price happens to be
                 # at the exact instant it's reached.
                 signals.append(TMICTSignal(zone.direction_int, zone.zone_id, "PB", sl, zone.top, zone.btm,
-                                           zone.formed_time, zone.entry_target))
+                                           zone.formed_time, zone.entry_target, zone.source))
 
         if (fresh_atr_flip and fs_m3.last_event.confirmed.value == zone.direction_int
                 and fs_m3.last_event.bar_time > zone.formed_time):
@@ -202,14 +217,14 @@ def find_signals(cfg: TMICTConfig, store: ict_ob_block.ICTBlockStore, eligibilit
                 far, _near = frozen
                 sl = far - cfg.trail_sl_buffer if zone.direction_int == 1 else far + cfg.trail_sl_buffer
                 signals.append(TMICTSignal(zone.direction_int, zone.zone_id, "3F", sl, zone.top, zone.btm,
-                                           zone.formed_time, market_price))
+                                           zone.formed_time, market_price, zone.source))
 
         if (st_fresh is not None and st_fresh.trend == zone.direction_int
                 and st_fresh.event_time > zone.formed_time):
             sl = st_fresh.supertrend - cfg.trail_sl_buffer if zone.direction_int == 1 else \
                 st_fresh.supertrend + cfg.trail_sl_buffer
             signals.append(TMICTSignal(zone.direction_int, zone.zone_id, "ST3F", sl, zone.top, zone.btm,
-                                       zone.formed_time, market_price))
+                                       zone.formed_time, market_price, zone.source))
 
     signals.sort(key=lambda s: -s.formed_time)
     return signals
@@ -291,7 +306,7 @@ def _process_signal(cfg: TMICTConfig, sig: TMICTSignal, eligibility: ICTEligibil
     right now (re-queried, so an earlier signal's own action this same
     cycle is visible here) -- same shape as reversal_main.py's own
     _process_signal(), scoped to TM-ICT's own magic number."""
-    tag = _tag(sig.trigger)
+    tag = _tag(sig.source, sig.trigger)
     ref_desc = f"zone=[{sig.zone_btm:.3f}-{sig.zone_top:.3f}]"
     positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     position = positions[0] if positions else None
@@ -370,7 +385,7 @@ def _run_trade_manager(cfg: TMICTConfig, mgr: trade_manager.TradeManager, positi
         return
     volume, label = outcome
     action_code = "P1" if label == "partial1" else "P2"
-    tag = mgr.get_entry_comment(position.ticket) or _tag("UNK")
+    tag = mgr.get_entry_comment(position.ticket) or f"TM-ICT/UNK-{_TF_LABEL}/UNK"
 
     print(f"[V5S-TM-ICT-TM] #{position.ticket} booking {label}: {volume} lots")
     if not cfg.enable_trading:
