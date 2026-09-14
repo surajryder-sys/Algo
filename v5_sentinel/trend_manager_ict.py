@@ -38,6 +38,28 @@ where the user explicitly said to change it):
   algo_v2, TM-ICT never places a real broker-side pending order for
   this.
 
+  Rule 1/2 own M3-BIAS GATE (_m3_bias_agrees(), added 2026-09-15, user's
+  own words: "if a bearish ob qualifies sell setup, recent bias from the
+  same m3 timeframe should be either weak or bearish supertrend...
+  similarly for bullish trade as well" -- corrected the same day once
+  the user caught that a naive "either signal currently agrees" check is
+  wrong: "recency matters... lets ATR Dual Trail formed strong at 17:00,
+  but super trend is bearish since 13:00, dont qualify sell" [bearish OB
+  at 17:30] -- Supertrend's own bearish reading is stale/irrelevant once
+  ATR-dual's own MORE RECENT event already turned things bullish; a
+  plain OR of "is either currently bearish" would have wrongly let the
+  stale Supertrend reading qualify that sell). So: neither MO nor PB
+  fires at all unless structure.compute_structure_signal() for M3 --
+  the SAME recency-arbitrated "whichever of Supertrend or ATR-dual
+  produced the MOST RECENT clear event wins" model TM-STR's own M5/M3
+  bias already runs on, not a separate OR check -- currently agrees
+  with the entry's own direction. Unavailable (either bridge stale)
+  blocks the entry (a stated requirement, not an exceptional-harm check
+  -- can't confirm it, don't fire unconfirmed). Deliberately NOT applied
+  to Rule 3 (3F/ST3F) -- both already require a FRESH matching flip on
+  the more decisive side, which this recency arbitration would trivially
+  agree with anyway.
+
   Rule 3 ("3F" / "ST3F") -- a fresh M3 structure-flip event whose own
   bar_time/event_time is AFTER the zone's own formation, matching the
   zone's own direction -- independent of Rule 1/2, can fire on a zone
@@ -120,7 +142,7 @@ from typing import Optional
 import MetaTrader5 as mt5
 
 from v5_sentinel import (
-    bridge_flip, broker, decision_log, heartbeat, ict_guard, ict_ob_block, ict_sl_manager, st_bridge,
+    bridge_flip, broker, decision_log, heartbeat, ict_guard, ict_ob_block, ict_sl_manager, st_bridge, structure,
     trade_manager,
 )
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
@@ -174,6 +196,38 @@ def _zone_blocked(zone_direction: int, fs: Optional[FlipStateResult], zone_forme
     return fs.confirmed.value != zone_direction and fs.confirmed_since_time > zone_formed_time
 
 
+def _m3_bias_agrees(direction: int, m3_structure: Optional["structure.StructureSignal"]) -> bool:
+    """Rule 1/2 (MO/PB) ONLY -- 2026-09-15, user's own words: "if a
+    bearish ob qualifies sell setup, recent bias from the same m3
+    timeframe should be either weak or bearish supertrend... similarly
+    for bullish trade as well" -- CORRECTED the same day once the user
+    caught that a naive "either signal currently agrees" OR-check is
+    wrong: "recency matters... lets ATR Dual Trail formed strong at
+    17:00, but super trend is bearish since 13:00, dont qualify sell"
+    (bearish OB at 17:30) -- Supertrend being bearish is stale/irrelevant
+    once ATR-dual's OWN more recent event (17:00, after Supertrend's
+    13:00) already turned things bullish; a plain OR would have wrongly
+    let Supertrend's older reading qualify the sell.
+
+    So this reuses structure.compute_structure_signal() UNCHANGED --
+    the exact same recency-arbitrated "whichever of Supertrend or
+    ATR-dual produced the MOST RECENT clear event wins, full stop"
+    model TM-STR's own M5/M3 bias already runs on (see structure.py's
+    own docstring) -- rather than a separate OR of the two signals'
+    current states. "Weak"/"strong" is this project's own established
+    vocabulary (flip_state.label(): STRONG=confirmed bullish,
+    WEAK=confirmed bearish), which is exactly what compute_structure_
+    signal's own ATR_STRUCTURE branch already resolves to.
+
+    Deliberately NOT applied to Rule 3 (3F/ST3F): both already require a
+    FRESH matching flip on the more decisive side, which the recency
+    arbitration here would trivially agree with anyway. None (bridge
+    data unavailable) blocks the entry -- a stated REQUIREMENT for
+    MO/PB to fire at all, not an exceptional-harm check, so "can't
+    confirm it" doesn't default to "allow it"."""
+    return m3_structure is not None and m3_structure.direction == direction
+
+
 def find_signals(cfg: TMICTConfig, store: ict_ob_block.ICTBlockStore, eligibility: ICTEligibilityStore,
                  tracker: BridgeBarFlipTracker, bid: float, ask: float) -> list[TMICTSignal]:
     """Every currently-valid, unblocked, untraded zone that qualifies
@@ -186,6 +240,7 @@ def find_signals(cfg: TMICTConfig, store: ict_ob_block.ICTBlockStore, eligibilit
 
     fs_m3 = tracker.update(cfg.symbol, _M3_MINUTES)
     st_fresh = st_bridge.fresh_flip(cfg.symbol, _M3_MINUTES)
+    m3_structure = structure.compute_structure_signal(tracker, cfg.symbol, _M3_MINUTES)
     fresh_atr_flip = (fs_m3 is not None and fs_m3.event_just_happened() and fs_m3.last_event is not None
                       and fs_m3.last_event.event_type == EventType.FLIP)
 
@@ -197,11 +252,12 @@ def find_signals(cfg: TMICTConfig, store: ict_ob_block.ICTBlockStore, eligibilit
 
         market_price = ask if zone.direction_int == 1 else bid
 
-        if zone.entry_mode == "MARKET":
+        if zone.entry_mode == "MARKET" and _m3_bias_agrees(zone.direction_int, m3_structure):
             sl = ict_ob_block.initial_sl(zone, cfg.ict_sl_buffer)
             signals.append(TMICTSignal(zone.direction_int, zone.zone_id, "MO", sl, zone.top, zone.btm,
                                        zone.formed_time, market_price, zone.source))
-        elif zone.entry_mode == "PENDING" and zone.entry_target is not None:
+        elif (zone.entry_mode == "PENDING" and zone.entry_target is not None
+              and _m3_bias_agrees(zone.direction_int, m3_structure)):
             reached = (market_price <= zone.entry_target) if zone.direction_int == 1 else \
                 (market_price >= zone.entry_target)
             if reached:
