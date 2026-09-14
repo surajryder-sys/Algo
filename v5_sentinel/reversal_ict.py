@@ -1,47 +1,62 @@
 """RM-ICT -- Reversal Manager's SECOND component. Confirmed with the
 user 2026-09-09: two entry methods planned in total; this module builds
-the FIRST only ("ATR flip", extended 2026-09-12 to also include the
-M1-Supertrend trigger, see below) -- a candle-identification-based
-second method is explicitly deferred to later, per the user's own words
-("first one is via atr flip, second one is via candle identification
-strategy (we will build later)").
+the FIRST only -- a candle-identification-based second method is
+explicitly deferred to later, per the user's own words ("first one is
+via atr flip, second one is via candle identification strategy (we will
+build later)").
 
-ENTRY RULE (user's own words, 2026-09-09, extended 2026-09-12): "whenever
-price enters into zone, either bullish or bearish ob zone, we need a
-flip from 3f opposite side... if a price enters bullish ob, from the
-time price enter into zone, we keep a watch and we have a flip on m3
-bullish flip we enter" -- and 2026-09-12: "a flip on m1 by supertrend,
-or a flip on m3 which crosses both lines will make eligible to enter
-into the trade... any one condition satisfying will take an entry."
-So, TWO independent triggers now, either sufficient alone:
+ENTRY RULE -- REDESIGNED 2026-09-15 around the SAME M15 PRIMARY
+STRUCTURE bias reversal_entry.py's own STR component now runs on (see
+that module's own docstring for the full design -- this is the
+identical model, just applied to OB zones instead of HTF levels):
 
-  - "price enters the zone" is exactly the NLB/NSB Block's own live
-    RETEST signal (nlb_nsb_block.py) -- a bullish OB (NSB) retested
-    arms a watch for a matching-direction flip; a bearish OB (NLB)
-    retested arms a watch for the opposite. No separate touch-tracking
-    needed here at all -- the Block already IS that live tick-driven
-    watch, built for exactly this purpose.
-  - "3F" -- M3's own ATR dual-trail FLIP (crosses BOTH lines), bar-close-
-    gated via the SAME BridgeBarFlipTracker Trend Manager and RM's own
-    STR component already run on M3. Only a genuine FLIP counts, never
-    TRAP_RESOLVED -- same scope as the sibling STR component's own "3F".
-  - "ST1F" -- M1's own Supertrend flip (st_bridge.fresh_flip()), bar-
-    close-gated the same way on the MQL5 side already (see st_bridge.py).
-    Labeled "ST1F" (not bare "1F"), 2026-09-12: "1F Supertrend flip
-    comment should be, ST1F" -- and M1 is scoped to Reversal Manager
-    only, "no where m1 plays any role apart from reversal managers"
-    (Trend Manager's own structure signals never touch M1).
-  Whichever fires first (or both, on the rare cycle they coincide)
-  produces a signal for any retested zone matching its direction.
+  A zone is a CANDIDATE the moment it EXISTS in the Block (any NLB/NSB
+  zone matching the desired direction's role) and hasn't been traded
+  (or substantially overlapped one already traded, see
+  ICTEligibilityStore.overlaps_traded()) -- NO retest requirement any
+  more (2026-09-15, corrected from the original "price must have
+  entered the zone first" design): "we need to trade only on virgin
+  (untested) zones... disqualifies if the zone gets invalidated." A
+  zone's own retested/virgin status genuinely doesn't matter to
+  eligibility at all now -- being touched doesn't disqualify it, only
+  the Block's own live INVALIDATION does (price trading beyond the
+  zone's far edge deletes it outright, which naturally removes it from
+  every future scan -- nothing extra to track here for that).
 
-SL: "3F" -> "sl as per m3 far line with buffer as it is" -- M3's own far
-trail line +/- cfg.sl_buffer, FROZEN at the exact bar that produced the
-flip (BridgeBarFlipTracker.event_far_near()), not a live re-read.
-"ST1F" -> M1's own Supertrend line value +/- cfg.sl_buffer, read
-directly off that fresh-flip bar (the MQL5 side already only updates it
-once per closed bar, so no separate freezing mechanism is needed).
-Reuses the very same sl_buffer value STR uses -- "as it is" means no
-new/different buffer for this component.
+  PRIMARY STRUCTURE (M15) -- structure.compute_structure_signal(tracker,
+  symbol, 15), the exact same recency-arbitrated engine reversal_entry.py
+  and TM-STR's own M5 parent bias already run on.
+
+  For a candidate zone wanting direction D (its own role):
+    - If Primary Structure's CURRENT direction == D ("M15 agrees") ->
+      the trigger is EITHER M1's own fresh Supertrend flip to D
+      ("ST1F") or M3's own fresh ATR-dual FLIP to D ("M3F") -- either
+      alone sufficient (corrected 2026-09-15, same day: "if primary
+      structure agrees then it can enter on ST1F, or M3 Dual atr flip").
+    - If Primary Structure's CURRENT direction != D, or is unavailable
+      -> neither ST1F nor M3F fire; instead wait for EITHER M3's own
+      fresh Supertrend flip to D ("ST3F") or M5's own fresh ATR-dual
+      FLIP to D ("M5F") -- whichever happens first ("the special
+      condition was only when primary structure doesn't agree" -- the
+      race is specific to this tier, ST1F/M3F above are each
+      independently sufficient, not racing each other). All four
+      bar-close-gated, privileged triggers, same mechanism as
+      reversal_entry.py's own.
+
+  Bare "3F" (M3's own ATR dual-trail flip, unconditional, no M15 gate at
+  all) is RETIRED as of this redesign -- user's own words: "removing 3F
+  dual atr flip, as it might create a lot of noise" -- but survives
+  scoped down to "M3F" above, firing only when M15 already agrees, which
+  is also what addresses the original noise concern.
+
+SL: "ST1F" -> M1's own Supertrend line value +/- cfg.sl_buffer, read
+directly off the fresh-flip bar. "ST3F" -> M3's own Supertrend line
+value +/- cfg.sl_buffer, same mechanism one timeframe up. "M3F"/"M5F" ->
+that timeframe's own far ATR trail line, FROZEN at the exact bar that
+produced the flip (BridgeBarFlipTracker.event_far_near()) +/-
+cfg.sl_buffer -- same freezing idiom the original unconditional "3F"
+used. Reuses the very same sl_buffer value STR uses -- "as it is" means
+no new/different buffer for this component.
 
 ELIGIBILITY ("traded" tracking): kept in THIS module's OWN separate
 state file (ICTEligibilityStore below), never written back into the
@@ -88,13 +103,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from v5_sentinel import st_bridge
+from v5_sentinel import st_bridge, structure
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.flip_state import EventType
 from v5_sentinel.nlb_nsb_block import BlockStore
 
 _M1_MINUTES = 1
 _M3_MINUTES = 3
+_M5_MINUTES = 5
+_M15_MINUTES = 15
 
 
 @dataclass(frozen=True)
@@ -104,7 +121,7 @@ class ICTSignal:
     timeframe_name: str          # "H1"
     zone_top: float
     zone_btm: float
-    trigger: str                  # "3F" or "ST1F" -- same labels STR's own triggers use (2026-09-09, user's own direction: "dont use ATR flip on comment, You can use 3F"); the "V5S-RM-{STR|ICT}-" component prefix already tells the two components apart, so reusing STR's labels here isn't ambiguous.
+    trigger: str                  # "ST1F" | "ST3F" | "M5F" -- same labels STR's own triggers use (2026-09-09, user's own direction: "dont use ATR flip on comment, You can use 3F"; 2026-09-15 the trigger SET itself changed but the shared-labels reasoning still holds); the "V5S-RM-{STR|ICT}-" component prefix already tells the two components apart, so reusing STR's labels here isn't ambiguous.
     sl: float
 
 
@@ -188,14 +205,17 @@ class ICTEligibilityStore:
 
 def _scan_matching_zones(store: BlockStore, eligibility: ICTEligibilityStore, direction: int, trigger: str,
                          sl: float) -> list[ICTSignal]:
-    """Every currently-retested, untraded OB zone whose implied direction
+    """Every currently-EXISTING (not invalidated -- an invalidated zone
+    is already deleted from the Block outright, so nothing extra to
+    filter for that here), untraded OB zone whose implied direction
     matches `direction`, tagged with whichever trigger just qualified
-    it. Bullish OB (NSB) retested -> matches a BUY; bearish OB (NLB)
-    retested -> matches a SELL."""
+    it. Bullish OB (NSB) -> matches a BUY; bearish OB (NLB) -> matches a
+    SELL. Deliberately NO retested/virgin check (2026-09-15, see module
+    docstring) -- a zone being touched doesn't disqualify it."""
     target_role = "no_short_buffer" if direction == 1 else "no_long_buffer"
     signals: list[ICTSignal] = []
     for zone in store.zones():
-        if zone.role != target_role or not zone.retested:
+        if zone.role != target_role:
             continue
         if eligibility.is_traded(zone.zone_id):
             continue
@@ -218,28 +238,50 @@ def find_ict_signals(
     tracker: BridgeBarFlipTracker,
     sl_buffer: float,
 ) -> list[ICTSignal]:
-    """Every currently-retested, untraded OB zone whose implied direction
-    matches EITHER M3's own fresh, bar-close-confirmed ATR flip ("3F") or
-    M1's own fresh Supertrend flip ("ST1F") -- either alone is sufficient
-    (2026-09-12). Reads the Block fresh (read-only -- this component
-    never writes to it) every call, same pattern main.py's own ICT Guard
+    """Every currently-valid (not invalidated), untraded OB zone whose
+    implied direction matches one of the four M15-Primary-Structure-
+    gated triggers this cycle -- see module docstring for the full
+    ST1F/M3F/ST3F/M5F design, identical to reversal_entry.py's own STR
+    component. Reads the Block fresh (read-only -- this component never
+    writes to it) every call, same pattern main.py's own ICT Guard
     already uses."""
     store = BlockStore(block_state_file)
     signals: list[ICTSignal] = []
 
-    fs_m3 = tracker.update(symbol, _M3_MINUTES)
-    if (fs_m3 is not None and fs_m3.event_just_happened() and fs_m3.last_event is not None
-            and fs_m3.last_event.event_type == EventType.FLIP):
-        m3_flip_dir = fs_m3.last_event.confirmed.value
-        frozen = tracker.event_far_near(_M3_MINUTES)
-        if frozen is not None:  # shouldn't be None once a FLIP has fired, but no basis to guess from
-            far, _near = frozen
-            sl = far - sl_buffer if m3_flip_dir == 1 else far + sl_buffer
-            signals.extend(_scan_matching_zones(store, eligibility, m3_flip_dir, "3F", sl))
+    primary = structure.compute_structure_signal(tracker, symbol, _M15_MINUTES)
+    if primary is None:
+        return signals
 
     m1 = st_bridge.fresh_flip(symbol, _M1_MINUTES)
-    if m1 is not None:
+    if m1 is not None and primary.direction == m1.trend:
         sl = m1.supertrend - sl_buffer if m1.trend == 1 else m1.supertrend + sl_buffer
         signals.extend(_scan_matching_zones(store, eligibility, m1.trend, "ST1F", sl))
+
+    fs_m3_atr = tracker.update(symbol, _M3_MINUTES)
+    if (fs_m3_atr is not None and fs_m3_atr.event_just_happened() and fs_m3_atr.last_event is not None
+            and fs_m3_atr.last_event.event_type == EventType.FLIP):
+        m3_atr_flip_dir = fs_m3_atr.last_event.confirmed.value
+        if primary.direction == m3_atr_flip_dir:
+            frozen_m3 = tracker.event_far_near(_M3_MINUTES)
+            if frozen_m3 is not None:  # shouldn't be None once a FLIP has fired, but no basis to guess from
+                far_m3, _near_m3 = frozen_m3
+                sl = far_m3 - sl_buffer if m3_atr_flip_dir == 1 else far_m3 + sl_buffer
+                signals.extend(_scan_matching_zones(store, eligibility, m3_atr_flip_dir, "M3F", sl))
+
+    m3 = st_bridge.fresh_flip(symbol, _M3_MINUTES)
+    if m3 is not None and primary.direction != m3.trend:
+        sl = m3.supertrend - sl_buffer if m3.trend == 1 else m3.supertrend + sl_buffer
+        signals.extend(_scan_matching_zones(store, eligibility, m3.trend, "ST3F", sl))
+
+    fs_m5 = tracker.update(symbol, _M5_MINUTES)
+    if (fs_m5 is not None and fs_m5.event_just_happened() and fs_m5.last_event is not None
+            and fs_m5.last_event.event_type == EventType.FLIP):
+        m5_flip_dir = fs_m5.last_event.confirmed.value
+        if primary.direction != m5_flip_dir:
+            frozen = tracker.event_far_near(_M5_MINUTES)
+            if frozen is not None:  # shouldn't be None once a FLIP has fired, but no basis to guess from
+                far, _near = frozen
+                sl = far - sl_buffer if m5_flip_dir == 1 else far + sl_buffer
+                signals.extend(_scan_matching_zones(store, eligibility, m5_flip_dir, "M5F", sl))
 
     return signals
