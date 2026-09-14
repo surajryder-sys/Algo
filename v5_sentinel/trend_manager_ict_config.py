@@ -59,6 +59,9 @@ class TMICTConfig:
     # for why this isn't circular the way RM-ICT's own exemption is.
     nlb_nsb_block_state_file: str
     ict_guard_buffer_points: float
+    # Sticky-block memory (2026-09-14 -- see main.py's own Config field
+    # of the same purpose and ict_guard.py's own docstring).
+    ict_guard_sticky_state_file: str
 
     tv_zone_state_file: str    # same tv_scraper store every other component reads, read-only here
     block_state_file: str
@@ -93,6 +96,8 @@ def load_config() -> TMICTConfig:
         partial2_fraction=float(os.getenv("V5S_PARTIAL2_FRACTION", "0.15")),
         nlb_nsb_block_state_file=os.getenv("V5S_NLB_NSB_BLOCK_STATE_FILE", "v5s_nlb_nsb_block.json"),
         ict_guard_buffer_points=float(os.getenv("V5S_ICT_GUARD_BUFFER_POINTS", "5.0")),
+        ict_guard_sticky_state_file=os.getenv("V5S_TM_ICT_GUARD_STICKY_STATE_FILE",
+                                              "v5s_tm_ict_guard_sticky.json"),
         tv_zone_state_file=os.getenv("V5S_TV_SCRAPER_ZONE_STATE_FILE", "v5s_tv_scraper_zones.json"),
         block_state_file=os.getenv("V5S_TM_ICT_BLOCK_STATE_FILE", "v5s_tm_ict_block.json"),
         eligibility_state_file=os.getenv("V5S_TM_ICT_ELIGIBILITY_STATE_FILE", "v5s_tm_ict_eligibility.json"),

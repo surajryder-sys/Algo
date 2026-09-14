@@ -64,8 +64,8 @@ This module does NOT do structure-based eligibility blocking (see
 trend_manager_ict.py's own _zone_blocked()) -- that needs the live M3
 BridgeBarFlipTracker state, which this module has no reason to depend
 on; it stays pure OB-zone data + tracking, same separation of concerns
-as nlb_nsb_block.py (data layer) vs. main.py's _ict_guard_check (the
-consumer that applies a structure-aware rule on top).
+as nlb_nsb_block.py (data layer) vs. ict_guard.py (the consumer that
+applies a structure-aware rule on top).
 """
 from __future__ import annotations
 

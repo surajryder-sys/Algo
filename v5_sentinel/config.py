@@ -59,6 +59,11 @@ class Config:
     # Replaces the earlier ATR trail-based safeguard, removed 2026-09-09.
     ict_guard_buffer_points: float
     nlb_nsb_block_state_file: str
+    # Sticky-block memory (2026-09-14) -- once a zone has blocked an
+    # entry attempt at least once, it stays blocked for this component
+    # until the zone itself is invalidated, regardless of live price
+    # later drifting back outside the buffer -- see ict_guard.py.
+    ict_guard_sticky_state_file: str
     decision_log_file: str
 
     state_file: str
@@ -91,6 +96,8 @@ def load_config() -> Config:
         partial2_fraction=float(os.getenv("V5S_PARTIAL2_FRACTION", "0.15")),
         ict_guard_buffer_points=float(os.getenv("V5S_ICT_GUARD_BUFFER_POINTS", "5.0")),
         nlb_nsb_block_state_file=os.getenv("V5S_NLB_NSB_BLOCK_STATE_FILE", "v5s_nlb_nsb_block.json"),
+        ict_guard_sticky_state_file=os.getenv("V5S_ICT_GUARD_STICKY_STATE_FILE",
+                                              "v5s_trend_manager_ict_guard_sticky.json"),
         decision_log_file=os.getenv("V5S_DECISION_LOG_FILE", "v5s_trend_manager_decision_log.jsonl"),
         state_file=os.getenv("V5S_STATE_FILE", "v5s_trend_manager_state.json"),
         sl_state_file=os.getenv("V5S_SL_STATE_FILE", "v5s_trend_manager_sl_state.json"),

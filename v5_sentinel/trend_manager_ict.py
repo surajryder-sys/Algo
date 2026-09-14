@@ -79,12 +79,15 @@ partial-booked breakeven-floored far-line).
 
 ICT GUARD: APPLIED to TM-ICT's own entries (corrected 2026-09-14, user's
 own words: "kindly use NLB and NSB for this as well / the 5 points rule
-from qualifying entry level") -- same NLB/NSB Block proximity check
-main.py/reversal_main.py's own _ict_guard_check() already runs (5pt
-default buffer, cfg.ict_guard_buffer_points), reused verbatim here. NOT
-circular the way RM-ICT's own exemption is: RM-ICT trades directly off
-the NLB/NSB Block's OWN zones, so gating it against the very level it's
-entering from would make no sense -- TM-ICT's own zones are a completely
+from qualifying entry level") -- shared ict_guard.py, same module
+main.py/reversal_main.py's own STR entries use (5pt default buffer,
+cfg.ict_guard_buffer_points), including its STICKY blocking (see that
+module's own docstring -- once a zone has blocked an entry once, it
+stays blocked for this component until the zone itself is invalidated,
+not merely until price drifts a few points away). NOT circular the way
+RM-ICT's own exemption is: RM-ICT trades directly off the NLB/NSB
+Block's OWN zones, so gating it against the very level it's entering
+from would make no sense -- TM-ICT's own zones are a completely
 DIFFERENT set (M3 TV+MT5 zones, not the Block's HTF D1-M5 ones), so this
 is a genuine independent cross-check, same as TM-STR/RM-STR's own. "from
 qualifying entry level" -- checked against whatever price THIS entry is
@@ -117,7 +120,7 @@ from typing import Optional
 import MetaTrader5 as mt5
 
 from v5_sentinel import (
-    bridge_flip, broker, decision_log, heartbeat, ict_ob_block, ict_sl_manager, nlb_nsb_block, st_bridge,
+    bridge_flip, broker, decision_log, heartbeat, ict_guard, ict_ob_block, ict_sl_manager, st_bridge,
     trade_manager,
 )
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
@@ -230,34 +233,17 @@ def find_signals(cfg: TMICTConfig, store: ict_ob_block.ICTBlockStore, eligibilit
     return signals
 
 
-def _ict_guard_check(cfg: TMICTConfig, direction: int, entry_price: float) -> Optional[str]:
-    """NLB/NSB Block proximity check (main.py/reversal_main.py's own
-    _ict_guard_check(), reused verbatim here) -- see module docstring's
-    own ICT GUARD section for why this genuinely applies to TM-ICT too,
-    unlike RM-ICT's exemption. A LONG checks every NLB (bearish OB)
-    zone's own BOTTOM edge; a SHORT checks every NSB (bullish OB) zone's
-    own TOP edge, against entry_price -- the signal's own "qualifying
-    entry level" (see TMICTSignal.entry_price), not a fresh live read."""
-    target_role = "no_long_buffer" if direction == 1 else "no_short_buffer"
-    store = nlb_nsb_block.BlockStore(cfg.nlb_nsb_block_state_file)
-    for zone in store.zones():
-        if zone.role != target_role:
-            continue
-        edge = zone.btm if target_role == "no_long_buffer" else zone.top
-        gap = abs(entry_price - edge)
-        if gap < cfg.ict_guard_buffer_points:
-            return (f"{zone.timeframe_name} {zone.role} [{zone.btm:.3f}-{zone.top:.3f}] "
-                   f"edge@{edge:.3f} is only {gap:.3f}pts away")
-    return None
-
-
-def _open_position(cfg: TMICTConfig, direction: int, sl: float, tag: str, ref_desc: str,
-                   entry_price: float) -> bool:
+def _open_position(cfg: TMICTConfig, sticky: ict_guard.ICTGuardStickyStore, direction: int, sl: float, tag: str,
+                   ref_desc: str, entry_price: float) -> bool:
     """Returns True if the entry actually went through (or enable_trading
     is False, decision only) -- False on a genuine order rejection OR an
     ICT Guard block, same "don't consume eligibility on a failed/blocked
-    entry" contract as every other component."""
-    block_reason = _ict_guard_check(cfg, direction, entry_price)
+    entry" contract as every other component. See ict_guard.py's own
+    docstring for why this genuinely applies to TM-ICT too, unlike
+    RM-ICT's exemption. entry_price is the signal's own "qualifying
+    entry level" (see TMICTSignal.entry_price), not a fresh live read."""
+    block_reason = ict_guard.check(cfg.nlb_nsb_block_state_file, sticky, direction, entry_price,
+                                   cfg.ict_guard_buffer_points)
     if block_reason is not None:
         label = "ICT Long Blocked" if direction == 1 else "ICT Short Blocked"
         msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({tag}) skipped"
@@ -301,7 +287,8 @@ def _close_position(cfg: TMICTConfig, position, action_label: str, tag: str, act
     return True
 
 
-def _process_signal(cfg: TMICTConfig, sig: TMICTSignal, eligibility: ICTEligibilityStore) -> None:
+def _process_signal(cfg: TMICTConfig, sticky: ict_guard.ICTGuardStickyStore, sig: TMICTSignal,
+                    eligibility: ICTEligibilityStore) -> None:
     """Acts on ONE signal against whatever position is ACTUALLY open
     right now (re-queried, so an earlier signal's own action this same
     cycle is visible here) -- same shape as reversal_main.py's own
@@ -312,7 +299,7 @@ def _process_signal(cfg: TMICTConfig, sig: TMICTSignal, eligibility: ICTEligibil
     position = positions[0] if positions else None
 
     if position is None:
-        if _open_position(cfg, sig.direction, sig.sl, tag, ref_desc, sig.entry_price):
+        if _open_position(cfg, sticky, sig.direction, sig.sl, tag, ref_desc, sig.entry_price):
             eligibility.mark_traded(sig.zone_id)
         return
 
@@ -320,7 +307,7 @@ def _process_signal(cfg: TMICTConfig, sig: TMICTSignal, eligibility: ICTEligibil
 
     if sig.direction != pos_direction:
         if (_close_position(cfg, position, "SQOFF", tag, "SQ")
-                and _open_position(cfg, sig.direction, sig.sl, tag, ref_desc, sig.entry_price)):
+                and _open_position(cfg, sticky, sig.direction, sig.sl, tag, ref_desc, sig.entry_price)):
             eligibility.mark_traded(sig.zone_id)
     else:
         # SAME direction, whether still full-size or already partially
@@ -399,7 +386,7 @@ def _run_trade_manager(cfg: TMICTConfig, mgr: trade_manager.TradeManager, positi
 
 def run_once(cfg: TMICTConfig, sl_mgr: ict_sl_manager.ICTSLManager, tm_mgr: trade_manager.TradeManager,
             store: ict_ob_block.ICTBlockStore, eligibility: ICTEligibilityStore,
-            tracker: BridgeBarFlipTracker) -> None:
+            tracker: BridgeBarFlipTracker, sticky: ict_guard.ICTGuardStickyStore) -> None:
     bid, ask = broker.get_tick_price(cfg.symbol)
     store.sync(cfg.tv_zone_state_file, cfg.symbol, _M3_MINUTES, bid, ask)
     store.update_live(bid, ask)
@@ -416,7 +403,7 @@ def run_once(cfg: TMICTConfig, sl_mgr: ict_sl_manager.ICTSLManager, tm_mgr: trad
     tm_mgr.prune({p.ticket for p in positions})
 
     for sig in signals:
-        _process_signal(cfg, sig, eligibility)
+        _process_signal(cfg, sticky, sig, eligibility)
 
     positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     position = positions[0] if positions else None
@@ -437,11 +424,12 @@ def main() -> None:
     store = ict_ob_block.ICTBlockStore(cfg.block_state_file)
     eligibility = ICTEligibilityStore(cfg.eligibility_state_file)
     tracker = BridgeBarFlipTracker(cfg.bridge_bar_flip_state_file)
+    sticky = ict_guard.ICTGuardStickyStore(cfg.ict_guard_sticky_state_file)
 
     try:
         while True:
             try:
-                run_once(cfg, sl_mgr, tm_mgr, store, eligibility, tracker)
+                run_once(cfg, sl_mgr, tm_mgr, store, eligibility, tracker, sticky)
             except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
                 print(f"[V5S-TM-ICT] cycle error: {exc!r}")
             heartbeat.write(cfg.heartbeat_file)

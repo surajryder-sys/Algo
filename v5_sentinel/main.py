@@ -91,7 +91,7 @@ from typing import Optional
 import MetaTrader5 as mt5
 
 from v5_sentinel import (
-    bridge, broker, critical_alerts_subscribers, decision_log, heartbeat, nlb_nsb_block, sl_manager, structure,
+    bridge, broker, critical_alerts_subscribers, decision_log, heartbeat, ict_guard, sl_manager, structure,
     trade_manager,
 )
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
@@ -220,36 +220,8 @@ def _action_comment(tag: str, action_code: str) -> str:
     return f"V5S-TM-{tag}-{action_code}"
 
 
-def _ict_guard_check(cfg: Config, direction: int, entry_price: float) -> Optional[str]:
-    """ICT Guard -- checks the NLB/NSB Block. User's own rule: "ob edge of
-    bullish ob should be minimum 5 points away for short, ob edge of
-    bearish ob should be minimum 5 points away for long" -- "when i say
-    edge, bullish ob edge is top, bearish ob edge is bottom." A LONG
-    checks every NLB (bearish OB) zone's own BOTTOM edge; a SHORT checks
-    every NSB (bullish OB) zone's own TOP edge. Scoped to whatever's
-    currently in the block -- nlb_nsb_block.py only ever seeds/tracks
-    D1/H4/H1/M30/M15/M5, so M3/M1 are already out of scope by
-    construction.
-
-    Reads the block fresh every call (cheap JSON file) rather than
-    caching it in memory -- the block is written by a SEPARATE process
-    (nlb_nsb_watcher.py), so a cached copy here would silently drift.
-
-    Returns a human-readable block reason if blocked, else None."""
-    target_role = "no_long_buffer" if direction == 1 else "no_short_buffer"
-    store = nlb_nsb_block.BlockStore(cfg.nlb_nsb_block_state_file)
-    for zone in store.zones():
-        if zone.role != target_role:
-            continue
-        edge = zone.btm if target_role == "no_long_buffer" else zone.top
-        gap = abs(entry_price - edge)
-        if gap < cfg.ict_guard_buffer_points:
-            return (f"{zone.timeframe_name} {zone.role} [{zone.btm:.3f}-{zone.top:.3f}] "
-                   f"edge@{edge:.3f} is only {gap:.3f}pts away")
-    return None
-
-
-def _open_position(cfg: Config, direction: int, sl: float, comment: str, ref_desc: str) -> bool:
+def _open_position(cfg: Config, sticky: ict_guard.ICTGuardStickyStore, direction: int, sl: float, comment: str,
+                   ref_desc: str) -> bool:
     """Returns True if the entry actually went through (filled, or
     enable_trading is False so it's decision-only and conceptually
     "accepted") -- False only on a genuine order rejection or an ICT
@@ -259,7 +231,8 @@ def _open_position(cfg: Config, direction: int, sl: float, comment: str, ref_des
     hard way more than once (see RM's own _open_position docstrings)."""
     bid, ask = broker.get_tick_price(cfg.symbol)
     entry_price = ask if direction == 1 else bid
-    block_reason = _ict_guard_check(cfg, direction, entry_price)
+    block_reason = ict_guard.check(cfg.nlb_nsb_block_state_file, sticky, direction, entry_price,
+                                   cfg.ict_guard_buffer_points)
     if block_reason is not None:
         label = "ICT Long Blocked" if direction == 1 else "ICT Short Blocked"
         msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({comment}) skipped"
@@ -419,7 +392,8 @@ def _check_stale(cfg: Config, stale_tracker: StaleAlertTracker) -> None:
 
 
 def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager,
-            eligibility: M5FlipEligibility, tracker: BridgeBarFlipTracker, stale_tracker: StaleAlertTracker) -> None:
+            eligibility: M5FlipEligibility, tracker: BridgeBarFlipTracker, stale_tracker: StaleAlertTracker,
+            sticky: ict_guard.ICTGuardStickyStore) -> None:
     _check_stale(cfg, stale_tracker)
 
     parent = structure.compute_structure_signal(tracker, cfg.symbol, _M5_MINUTES)
@@ -448,13 +422,13 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
                              parent_event_time=parent.event_time, sl=sl, ref=ref_desc)
 
             if position is None:
-                if _open_position(cfg, parent.direction, sl, comment, ref_desc):
+                if _open_position(cfg, sticky, parent.direction, sl, comment, ref_desc):
                     eligibility.mark_traded(parent.event_time)
             else:
                 pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
                 if parent.direction != pos_direction:
                     if (_close_position(cfg, position, "SQOFF", tag, "SQ")
-                            and _open_position(cfg, parent.direction, sl, comment, ref_desc)):
+                            and _open_position(cfg, sticky, parent.direction, sl, comment, ref_desc)):
                         eligibility.mark_traded(parent.event_time)
                 else:
                     # SAME direction, whether still full-size or already
@@ -490,11 +464,12 @@ def main() -> None:
     eligibility = M5FlipEligibility(cfg.runtime_state_file)
     tracker = BridgeBarFlipTracker(cfg.bridge_bar_flip_state_file)
     stale_tracker = StaleAlertTracker()
+    sticky = ict_guard.ICTGuardStickyStore(cfg.ict_guard_sticky_state_file)
 
     try:
         while True:
             try:
-                run_once(cfg, sl_mgr, tm_mgr, eligibility, tracker, stale_tracker)
+                run_once(cfg, sl_mgr, tm_mgr, eligibility, tracker, stale_tracker, sticky)
             except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
                 print(f"[V5S] cycle error: {exc!r}")
             # Written every iteration regardless of whether run_once

@@ -110,7 +110,7 @@ import time
 
 import MetaTrader5 as mt5
 
-from v5_sentinel import bridge, broker, decision_log, heartbeat, htf_levels, nlb_nsb_block, reversal_entry, reversal_ict, sl_manager, trade_manager
+from v5_sentinel import bridge, broker, decision_log, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sl_manager, trade_manager
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.bridge_flip import StaleAlertTracker, m3_far_line
 from v5_sentinel.critical_alerts_telegram import send_message as _telegram_send
@@ -170,36 +170,12 @@ def _send_alert(text: str) -> None:
 
 
 
-def _ict_guard_check(cfg: RMConfig, direction: int, entry_price: float) -> Optional[str]:
-    """ICT Guard -- same NLB/NSB Block proximity check main.py's own ICT
-    Guard runs, now ALSO applied to RM-STR's own entries (2026-09-12,
-    user's own words: "RM-STR component should also follow ICT
-    safegaurd"). A LONG checks every NLB (bearish OB) zone's own BOTTOM
-    edge; a SHORT checks every NSB (bullish OB) zone's own TOP edge.
-    Deliberately NOT applied to RM-ICT's own entries -- "only ICT based
-    component will trade individually" -- RM-ICT's entries are already
-    sourced FROM these exact zones (see reversal_ict.py), so gating it
-    against the very level it's trading off of would make no sense; only
-    _process_signal's STR call site checks this."""
-    target_role = "no_long_buffer" if direction == 1 else "no_short_buffer"
-    store = nlb_nsb_block.BlockStore(cfg.nlb_nsb_block_state_file)
-    for zone in store.zones():
-        if zone.role != target_role:
-            continue
-        edge = zone.btm if target_role == "no_long_buffer" else zone.top
-        gap = abs(entry_price - edge)
-        if gap < cfg.ict_guard_buffer_points:
-            return (f"{zone.timeframe_name} {zone.role} [{zone.btm:.3f}-{zone.top:.3f}] "
-                   f"edge@{edge:.3f} is only {gap:.3f}pts away")
-    return None
-
-
-def _open_position(cfg: RMConfig, component: str, magic_number: int, direction: int, sl: float, tag: str,
-                   ref_desc: str) -> bool:
+def _open_position(cfg: RMConfig, sticky: ict_guard.ICTGuardStickyStore, component: str, magic_number: int,
+                   direction: int, sl: float, tag: str, ref_desc: str) -> bool:
     """Returns True if the entry actually went through (filled, or
     enable_trading is False so it's decision-only and conceptually
     "accepted") -- False only on a genuine order rejection while live, or
-    an ICT Guard block (STR only, see _ict_guard_check's own docstring).
+    an ICT Guard block (STR only, see ict_guard.py's own docstring).
     2026-09-07 (found live, see htf_levels.py's own bugfix note): the
     caller must NOT mark eligibility consumed on a False return -- a
     failed order (e.g. retcode 10044 "session closed" right at market
@@ -211,11 +187,16 @@ def _open_position(cfg: RMConfig, component: str, magic_number: int, direction: 
     see module docstring), ref_desc is just a human-readable description
     of whatever triggered this (an HTF level's value for STR, a zone's
     own range for ICT) since the two components have no other field in
-    common to print."""
+    common to print. Deliberately NOT applied to RM-ICT's own entries --
+    "only ICT based component will trade individually" -- RM-ICT's
+    entries are already sourced FROM these exact zones (see
+    reversal_ict.py), so gating it against the very level it's trading
+    off of would make no sense; only the STR branch below checks this."""
     if component == "STR":
         bid, ask = broker.get_tick_price(cfg.symbol)
         entry_price = ask if direction == 1 else bid
-        block_reason = _ict_guard_check(cfg, direction, entry_price)
+        block_reason = ict_guard.check(cfg.nlb_nsb_block_state_file, sticky, direction, entry_price,
+                                       cfg.ict_guard_buffer_points)
         if block_reason is not None:
             label = "ICT Long Blocked" if direction == 1 else "ICT Short Blocked"
             msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({tag}) skipped"
@@ -322,8 +303,8 @@ def _run_trade_manager(cfg: RMConfig, component: str, mgr: trade_manager.TradeMa
         print(f"[V5S-{component}-TM] partial close failed: retcode={result.retcode} comment={result.comment}")
 
 
-def _process_signal(cfg: RMConfig, component: str, magic_number: int, direction: int, sl: float, tag: str,
-                    ref_desc: str, mark_traded) -> None:
+def _process_signal(cfg: RMConfig, sticky: ict_guard.ICTGuardStickyStore, component: str, magic_number: int,
+                    direction: int, sl: float, tag: str, ref_desc: str, mark_traded) -> None:
     """Acts on ONE signal against whatever position is ACTUALLY open right
     now on THIS component's own magic number (re-queried, so an earlier
     signal's own action this same cycle is visible here). Shared CODE
@@ -344,7 +325,7 @@ def _process_signal(cfg: RMConfig, component: str, magic_number: int, direction:
     position = positions[0] if positions else None
 
     if position is None:
-        if _open_position(cfg, component, magic_number, direction, sl, tag, ref_desc):
+        if _open_position(cfg, sticky, component, magic_number, direction, sl, tag, ref_desc):
             mark_traded()
         return
 
@@ -352,7 +333,7 @@ def _process_signal(cfg: RMConfig, component: str, magic_number: int, direction:
 
     if direction != pos_direction:
         if (_close_position(cfg, component, position, "SQOFF", tag, "SQ")
-                and _open_position(cfg, component, magic_number, direction, sl, tag, ref_desc)):
+                and _open_position(cfg, sticky, component, magic_number, direction, sl, tag, ref_desc)):
             mark_traded()
     else:
         # SAME direction, whether still full-size or already partially
@@ -383,7 +364,8 @@ def _check_stale(cfg: RMConfig, stale_tracker: StaleAlertTracker) -> None:
 def run_once(cfg: RMConfig, sl_mgr_str: sl_manager.SLManager, tm_mgr_str: trade_manager.TradeManager,
             sl_mgr_ict: sl_manager.SLManager, tm_mgr_ict: trade_manager.TradeManager,
             store: htf_levels.LevelEligibilityStore, ict_eligibility: reversal_ict.ICTEligibilityStore,
-            tracker: BridgeBarFlipTracker, stale_tracker: StaleAlertTracker) -> None:
+            tracker: BridgeBarFlipTracker, stale_tracker: StaleAlertTracker,
+            sticky: ict_guard.ICTGuardStickyStore) -> None:
     htf_states = htf_levels.compute_all_htf_states(cfg.symbol)
     bid, ask = broker.get_tick_price(cfg.symbol)
     # Touch arming stays LIVE-tick (bid/ask against HTF levels) -- only
@@ -431,11 +413,11 @@ def run_once(cfg: RMConfig, sl_mgr_str: sl_manager.SLManager, tm_mgr_str: trade_
     tm_mgr_ict.prune({p.ticket for p in ict_positions})
 
     for sig in str_signals:
-        _process_signal(cfg, "STR", cfg.magic_number, sig.direction, sig.sl, _tag(sig),
+        _process_signal(cfg, sticky, "STR", cfg.magic_number, sig.direction, sig.sl, _tag(sig),
                         f"level={sig.level_value:.3f}",
                         lambda tf=sig.timeframe_minutes, d=sig.direction: store.mark_traded(tf, d))
     for sig in ict_signals:
-        _process_signal(cfg, "ICT", cfg.ict_magic_number, sig.direction, sig.sl, _ict_tag(sig),
+        _process_signal(cfg, sticky, "ICT", cfg.ict_magic_number, sig.direction, sig.sl, _ict_tag(sig),
                         f"zone=[{sig.zone_btm:.3f}-{sig.zone_top:.3f}]",
                         lambda zid=sig.zone_id: ict_eligibility.mark_traded(zid))
 
@@ -468,12 +450,13 @@ def main() -> None:
     ict_eligibility = reversal_ict.ICTEligibilityStore(cfg.ict_eligibility_state_file)
     tracker = BridgeBarFlipTracker(cfg.bridge_bar_flip_state_file)
     stale_tracker = StaleAlertTracker()
+    sticky = ict_guard.ICTGuardStickyStore(cfg.ict_guard_sticky_state_file)
 
     try:
         while True:
             try:
                 run_once(cfg, sl_mgr_str, tm_mgr_str, sl_mgr_ict, tm_mgr_ict, store, ict_eligibility,
-                        tracker, stale_tracker)
+                        tracker, stale_tracker, sticky)
             except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
                 print(f"[V5S-STR] cycle error: {exc!r}")
             # See heartbeat.py's own docstring -- proves the loop itself
