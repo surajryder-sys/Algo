@@ -8,20 +8,33 @@ build later)").
 ENTRY RULE -- REDESIGNED 2026-09-15 around the SAME M15 PRIMARY
 STRUCTURE bias reversal_entry.py's own STR component now runs on (see
 that module's own docstring for the full design -- this is the
-identical model, just applied to OB zones instead of HTF levels):
+identical model, just applied to OB zones instead of HTF levels), THEN
+CORRECTED LATER THE SAME DAY once the retest requirement below was
+found missing:
 
-  A zone is a CANDIDATE the moment it EXISTS in the Block (any NLB/NSB
-  zone matching the desired direction's role) and hasn't been traded
-  (or substantially overlapped one already traded, see
-  ICTEligibilityStore.overlaps_traded()) -- NO retest requirement any
-  more (2026-09-15, corrected from the original "price must have
-  entered the zone first" design): "we need to trade only on virgin
-  (untested) zones... disqualifies if the zone gets invalidated." A
-  zone's own retested/virgin status genuinely doesn't matter to
-  eligibility at all now -- being touched doesn't disqualify it, only
-  the Block's own live INVALIDATION does (price trading beyond the
-  zone's far edge deletes it outright, which naturally removes it from
-  every future scan -- nothing extra to track here for that).
+  A zone is a CANDIDATE once it EXISTS in the Block (any NLB/NSB zone
+  matching the desired direction's role), has been RETESTED (live price
+  has actually re-entered it -- zone.retested, nlb_nsb_watcher.py's own
+  independently-computed touch flag), and hasn't been traded (or
+  substantially overlapped one already traded, see
+  ICTEligibilityStore.overlaps_traded()). The retest requirement was
+  briefly dropped (2026-09-15, "we need to trade only on virgin
+  (untested) zones... disqualifies if the zone gets invalidated") and
+  reinstated the SAME DAY once it produced a real live trade: a SELL
+  fired off a zone 11+ points from where price actually was, because
+  nothing linked the M1 flip to that specific zone. "Virgin(untested)"
+  turned out to mean "not yet TRADED" (an eligibility concept, still
+  correctly enforced by is_traded/overlaps_traded below), not "price
+  hasn't retested it" -- the retest requirement itself is a SEPARATE,
+  necessary condition: "it's not about the flip at all, its about the
+  retest and followed up with flip... thats how the exact reversal
+  trade works." Mirrors reversal_entry.py's own scan_touches()/
+  is_touched() gate on STR's HTF levels exactly, just keyed off the
+  Block's own retested flag instead of a separate touch-arm store,
+  since nlb_nsb_watcher.py already computes it independently. Only the
+  Block's own live INVALIDATION disqualifies a zone outright (price
+  trading beyond its far edge deletes it from the Block entirely, which
+  naturally removes it from every future scan).
 
   PRIMARY STRUCTURE (M15) -- structure.compute_structure_signal(tracker,
   symbol, 15), the exact same recency-arbitrated engine reversal_entry.py
@@ -207,15 +220,36 @@ def _scan_matching_zones(store: BlockStore, eligibility: ICTEligibilityStore, di
                          sl: float) -> list[ICTSignal]:
     """Every currently-EXISTING (not invalidated -- an invalidated zone
     is already deleted from the Block outright, so nothing extra to
-    filter for that here), untraded OB zone whose implied direction
-    matches `direction`, tagged with whichever trigger just qualified
-    it. Bullish OB (NSB) -> matches a BUY; bearish OB (NLB) -> matches a
-    SELL. Deliberately NO retested/virgin check (2026-09-15, see module
-    docstring) -- a zone being touched doesn't disqualify it."""
+    filter for that here), RETESTED, untraded OB zone whose implied
+    direction matches `direction`, tagged with whichever trigger just
+    qualified it. Bullish OB (NSB) -> matches a BUY; bearish OB (NLB) ->
+    matches a SELL.
+
+    RETEST REQUIREMENT REINSTATED 2026-09-15 (same day it was removed,
+    found live): a real SELL fired off a zone 11+ points away from where
+    price actually was -- ST1F only checks that an M1 Supertrend flip
+    happened and SOME untested zone matching direction exists ANYWHERE
+    in the Block, with no link between the two. User's own words: "it's
+    not about the flip at all, its about the retest and followed up with
+    flip!!!!! thats how the exact reversal trade works." The 2026-09-15
+    redesign that dropped this check conflated two separate things: (1)
+    traded-eligibility (don't re-trade the same zone -- this is what
+    "virgin(untested) zone... disqualifies if the zone gets invalidated"
+    actually meant, and stays fixed below via is_traded/
+    overlaps_traded) and (2) retest gating (price must have actually
+    reached the zone before a flip can trigger off it -- this is
+    identical in spirit to reversal_entry.py's own scan_touches()/
+    is_touched() requirement for STR's HTF levels, and should never have
+    been dropped). zone.retested is nlb_nsb_watcher.py's own
+    independently-computed live-tick touch flag (see nlb_nsb_block.py's
+    own docstring) -- reusing it here rather than tracking a second,
+    redundant touch detector."""
     target_role = "no_short_buffer" if direction == 1 else "no_long_buffer"
     signals: list[ICTSignal] = []
     for zone in store.zones():
         if zone.role != target_role:
+            continue
+        if not zone.retested:
             continue
         if eligibility.is_traded(zone.zone_id):
             continue
