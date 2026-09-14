@@ -118,14 +118,16 @@ actually about to fire at: live ask/bid for Rule 1 (MO) and Rule 3
 _open_position()'s own entry_price parameter, not a separate live price
 read at send time.
 
-COMMENT SCHEME (given verbatim by the user, 2026-09-14, deliberately
-WITHOUT the "V5S-" prefix seen elsewhere in this project, and CORRECTED
-the same day once source-mixing was found live -- the original scheme
+COMMENT SCHEME (given verbatim by the user, 2026-09-14, originally
+WITHOUT the "V5S-" prefix seen elsewhere in this project, CORRECTED the
+same day once source-mixing was found live -- the original scheme
 hardcoded "MT5-M3" for every trade regardless of which source the zone
 actually came from, so a genuinely TV-sourced zone's own trade still
-read "MT5-M3" in its comment. Now source-aware):
-  TM-ICT/MT5-M3/ST3F, TM-ICT/MT5-M3/3F, TM-ICT/MT5-M3/MO, TM-ICT/MT5-M3/PB
-  TM-ICT/TV-M3/ST3F,   TM-ICT/TV-M3/3F,   TM-ICT/TV-M3/MO,   TM-ICT/TV-M3/PB
+read "MT5-M3" in its comment, now source-aware -- and CORRECTED AGAIN
+2026-09-15 to add the "V5S-" prefix after all: "all comments to follow
+V5S prefix / some are not coming"):
+  V5S-TM-ICT/MT5-M3/ST3F, V5S-TM-ICT/MT5-M3/3F, V5S-TM-ICT/MT5-M3/MO, V5S-TM-ICT/MT5-M3/PB
+  V5S-TM-ICT/TV-M3/ST3F,   V5S-TM-ICT/TV-M3/3F,   V5S-TM-ICT/TV-M3/MO,   V5S-TM-ICT/TV-M3/PB
 "-P1"/"-P2"/"-SQ" appended the same way as every other component's own
 partial-booking/square-off comments.
 
@@ -176,9 +178,13 @@ def _tag(source: str, trigger: str) -> str:
     now carries which source the underlying zone actually came from
     (found live: a trade's comment read "MT5-M3" for a zone that was
     actually TV-sourced, since the original scheme was a fixed label,
-    not source-aware -- see this module's own COMMENT SCHEME docs)."""
+    not source-aware -- see this module's own COMMENT SCHEME docs).
+    "V5S-" prefix added 2026-09-15 ("all comments to follow V5S prefix")
+    -- the original 2026-09-14 scheme deliberately omitted it; that's
+    now reversed so every component's own comment is consistently
+    prefixed."""
     label = _SOURCE_LABEL.get(source, source.upper())
-    return f"TM-ICT/{label}-{_TF_LABEL}/{trigger}"
+    return f"V5S-TM-ICT/{label}-{_TF_LABEL}/{trigger}"
 
 
 def _action_comment(tag: str, action_code: str) -> str:
@@ -435,7 +441,7 @@ def _run_trade_manager(cfg: TMICTConfig, mgr: trade_manager.TradeManager, positi
         return
     volume, label = outcome
     action_code = "P1" if label == "partial1" else "P2"
-    tag = mgr.get_entry_comment(position.ticket) or f"TM-ICT/UNK-{_TF_LABEL}/UNK"
+    tag = mgr.get_entry_comment(position.ticket) or f"V5S-TM-ICT/UNK-{_TF_LABEL}/UNK"
 
     print(f"[V5S-TM-ICT-TM] #{position.ticket} booking {label}: {volume} lots")
     if not cfg.enable_trading:

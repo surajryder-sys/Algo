@@ -57,7 +57,8 @@ the name and this project's own original v3 architecture split
 (Trend/Reversal Managers decide entries; Stoploss/Exit is a separate
 execution-side concern). Closing uses each target position's OWN full
 current volume (no partial-close semantics here) via
-broker.close_position(), comment "XM-SQ-{source}" so it's traceable
+broker.close_position(), comment "V5S-XM-SQ-{source}" (V5S- prefix
+added 2026-09-15, "all comments to follow V5S prefix") so it's traceable
 back to which component's own entry caused the close.
 
 Run with: python -m v5_sentinel.exit_manager
@@ -150,7 +151,7 @@ def _close_position(cfg: Config, position, source_name: str) -> bool:
         decision_log.log(cfg.decision_log_file, "close_decision_only", ticket=position.ticket,
                          direction=_DIR_LABEL[direction], magic=position.magic, caused_by=source_name)
         return True
-    result = broker.close_position(cfg.symbol, position, cfg.deviation_points, comment=f"XM-SQ-{source_name}")
+    result = broker.close_position(cfg.symbol, position, cfg.deviation_points, comment=f"V5S-XM-SQ-{source_name}")
     if not result.ok:
         print(f"[V5S-XM] close failed: retcode={result.retcode} comment={result.comment}")
         decision_log.log(cfg.decision_log_file, "close_failed", ticket=position.ticket,
