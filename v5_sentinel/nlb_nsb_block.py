@@ -40,6 +40,17 @@ SEEDING (one-time, per zone, the moment it's first seen -- sync_from_scraper()):
     still show it on-chart, may mark it retested later on a bar close,
     or may remove it on its own delayed mitigation logic -- none of that
     is read again after seeding).
+  - A zone whose own "formed_time_confirmed" reads False is NEVER seeded
+    at all (2026-09-14, found live: a real RM-ICT trade fired off an M5
+    zone with this flag False whose top edge was already above live
+    price the instant it was seeded, auto-qualifying as "retested" with
+    no genuine price action -- confirmed as the same scraper glitch that
+    fed TM-ICT a fabricated M3 zone seconds earlier). tv_scraper sets
+    this False when it couldn't read a real Pine formation-bar hint that
+    poll and fell back to a wall-clock guess for start_time -- a
+    genuinely real zone that started unconfirmed resurfaces here under
+    its own corrected identity once tv_scraper's own 2-poll hint-
+    correction rekeys it.
 
 LIVE RETEST (update_live(), every tick/poll):
   A zone becomes retested the moment live price re-enters its own
@@ -168,6 +179,22 @@ class BlockStore:
             for direction in ("bull", "bear"):
                 key = f"{symbol}|{tf}|{direction}"
                 for z in raw.get(key, {}).values():
+                    if not z.get("formed_time_confirmed", True):
+                        # 2026-09-14, found live: a real RM-ICT trade fired
+                        # off a zone (M5 bull [4266.090-4271.400]) whose
+                        # top edge was already above live price the
+                        # instant it was seeded -- auto-qualifying as
+                        # "retested" with no genuine price action at all,
+                        # confirmed as part of the SAME scraper glitch that
+                        # also fed TM-ICT a fabricated M3 zone seconds
+                        # earlier. Skip seeding entirely when tv_scraper
+                        # itself couldn't confirm a real Pine formation-bar
+                        # hint (see ict_ob_block.py's own matching fix and
+                        # tv_scraper/scraper.py's own formed_hint logic) --
+                        # a genuinely real zone that started unconfirmed
+                        # resurfaces here under its own corrected identity
+                        # once tv_scraper's 2-poll correction rekeys it.
+                        continue
                     start_time = int(z["start_time"])
                     zid = _zone_id(symbol, tf, direction, start_time)
                     if zid in self._zones:

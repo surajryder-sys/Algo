@@ -52,6 +52,17 @@ zone is FIRST seeded, this module freezes:
     a zone exists, and the initial OB-based SL (ob edge +/- buffer) is a
     pure function of those, computed on demand by initial_sl() below
     rather than also stored.
+  - A TV zone whose own "formed_time_confirmed" reads False is NEVER
+    seeded at all (2026-09-14, found live: two real trades fired off
+    zones with this flag False whose own price levels never
+    corresponded to any real price action, confirmed against actual M1
+    bars) -- tv_scraper itself sets this False when it couldn't read a
+    real Pine formation-bar hint that poll and fell back to a wall-clock
+    guess for start_time, which is exactly the class of scrape artifact
+    behind both incidents. A genuinely real zone that started
+    unconfirmed resurfaces here under its own corrected identity once
+    tv_scraper's own 2-poll hint-correction rekeys it -- nothing is
+    permanently lost by skipping it while unconfirmed.
 
 LIVE INVALIDATION (update_live(), every tick/poll): same instant,
 no-candle-close-wait mitigation rule as nlb_nsb_block.py -- a bullish
@@ -199,6 +210,22 @@ class ICTBlockStore:
         for direction in ("bull", "bear"):
             key = f"{symbol}|{tf_minutes}|{direction}"
             for z in raw.get(key, {}).values():
+                if not z.get("formed_time_confirmed", True):
+                    # 2026-09-14, found live: two real trades fired off
+                    # zones whose own price levels never corresponded to
+                    # any real price action (confirmed against actual M1
+                    # bars) -- both had this flag False, meaning
+                    # tv_scraper itself couldn't read a real Pine
+                    # formation-bar hint and fell back to a wall-clock
+                    # guess for start_time (see ict_ob_block.py's own
+                    # module docstring / tv_scraper/scraper.py's own
+                    # formed_hint logic). Skip seeding entirely rather
+                    # than trust it -- if this zone is genuinely real,
+                    # tv_scraper's own 2-poll correction will eventually
+                    # rekey it to a confirmed start_time, at which point
+                    # it resurfaces here as a fresh, legitimately
+                    # identified zone on its own next sync().
+                    continue
                 if self._seed("tv", symbol, tf_minutes, direction, float(z["top"]), float(z["btm"]),
                               int(z["start_time"]), bid, ask):
                     added += 1
