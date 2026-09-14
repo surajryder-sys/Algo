@@ -3,18 +3,24 @@ position. Persisted to disk (keyed by ticket) so a bot restart doesn't
 lose entry price / manual-override state mid-trade.
 
 Rule (confirmed in design discussion, resume behavior refined 2026-09-04;
-breakeven condition REVISED 2026-09-12):
-  - Untouched until PARTIAL BOOKING has actually happened for this ticket
-    (Trade Manager's own partial1/partial2, i.e. TradeManager.is_partially_
-    cut()) -- NOT a standalone points-in-favor threshold any more. User's
-    own words: "we are setting breakeven when it goes 7 points in favour
-    ... breakeven is only when partial booking is done." Since partial1
-    itself triggers at 10 points (above the old 7-point breakeven
-    threshold), this pushes breakeven later and ties it to a REAL booking
-    event actually having fired, not just price having crossed a level.
-    Applies universally -- confirmed with the user this isn't TM-only,
-    RM's STR and ICT components (which reuse this exact class) get the
-    same change immediately, not deferred to "later."
+breakeven condition REVISED 2026-09-12, REVISED AGAIN 2026-09-15):
+  - Breakeven triggers the moment EITHER of two things is true: partial
+    booking has actually happened for this ticket (Trade Manager's own
+    partial1/partial2, i.e. TradeManager.is_partially_cut()), OR the
+    trade is currently `breakeven_trigger_points` (10 by default) in
+    favor, checked directly here as a standalone points threshold.
+    2026-09-12 had removed the standalone threshold entirely ("breakeven
+    is only when partial booking is done") -- 2026-09-15, user's own
+    words, re-added it: "sl manager to set breakeven for trades when
+    trade reaches 10 points in favour." In the ORDINARY case these two
+    conditions fire within about one poll cycle of each other anyway
+    (partial1 itself also triggers at 10 points) -- the standalone check
+    matters specifically when partial-booking is delayed or paused (a
+    manual TP pausing Trade Manager entirely, e.g.) and the position
+    would otherwise sit unprotected past +10pts. Applies universally --
+    confirmed with the user this isn't TM-only, RM's STR and ICT
+    components (which reuse this exact class) get the same change
+    immediately, not deferred to "later."
   - Once partial-booked, SL -> breakeven (entry price), and from that
     exact moment on, SL continuously follows M3's own FAR trail line
     (whichever of its two lines sits farther from price, see
@@ -76,10 +82,10 @@ class PositionSLState:
 class SLManager:
     def __init__(self, path: str, breakeven_trigger_points: float, sl_buffer: float):
         self._path = Path(path)
-        # 2026-09-12: no longer used to GATE breakeven (see compute()'s own
-        # docstring/module docstring for why) -- kept as a constructor param
-        # purely so every existing call site (main.py, reversal_main.py x2)
-        # doesn't need touching for this change; harmless if unused.
+        # 2026-09-15: back to gating breakeven directly (see compute()'s
+        # own docstring/module docstring) -- briefly unused between
+        # 2026-09-12 and today while breakeven was tied to partial-
+        # booking alone.
         self._breakeven_trigger_points = breakeven_trigger_points
         self._sl_buffer = sl_buffer
         self._state: dict[int, PositionSLState] = {}
@@ -114,10 +120,11 @@ class SLManager:
         succeeds, same contract as algo_v2/sl_manager.py.
 
         partial_booked (2026-09-12): the caller's own TradeManager.
-        is_partially_cut(ticket) for this SAME position -- breakeven now
-        gates on this instead of a standalone points-in-favor threshold,
-        see module docstring for why. Passed in rather than computed here
-        since Trade Manager, not SL Manager, owns that bookkeeping."""
+        is_partially_cut(ticket) for this SAME position -- ORs together
+        with this class's own standalone points-in-favor check (2026-09-15)
+        to decide whether breakeven is active, see module docstring for
+        why both. Passed in rather than computed here since Trade
+        Manager, not SL Manager, owns that bookkeeping."""
         state = self._state.get(ticket)
 
         if state is None:
@@ -149,12 +156,15 @@ class SLManager:
             self._save()
             return None
 
-        if not partial_booked:
+        favor = (current_price - entry_price) if direction == 1 else (entry_price - current_price)
+        breakeven_active = partial_booked or favor >= self._breakeven_trigger_points
+
+        if not breakeven_active:
             if current_broker_sl is None:
                 # Just resumed from a clear, still pre-breakeven -- the
                 # position currently has ZERO protection. Re-establish the
                 # same initial-SL formula fresh off the current far line
-                # rather than leaving it bare until partial booking fires.
+                # rather than leaving it bare until breakeven activates.
                 proposed = far_line - self._sl_buffer if direction == 1 else far_line + self._sl_buffer
                 self._save()
                 return proposed

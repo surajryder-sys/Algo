@@ -45,6 +45,11 @@ class TMICTConfig:
     # value/spirit as every other component's sl_buffer, own field so
     # it's independently tunable.
     trail_sl_buffer: float
+    # Stage 3's own standalone points-in-favor breakeven trigger
+    # (2026-09-15), ORed with partial-booking -- see ict_sl_manager.py's
+    # own docstring. Reuses the SAME env var every other component's own
+    # breakeven_trigger_points already reads.
+    breakeven_trigger_points: float
 
     partial1_trigger_points: float
     partial1_fraction: float
@@ -90,6 +95,7 @@ def load_config() -> TMICTConfig:
         enable_trading=_env_bool("V5S_TM_ICT_ENABLE_TRADING", False),
         ict_sl_buffer=float(os.getenv("V5S_TM_ICT_SL_BUFFER", "2.0")),
         trail_sl_buffer=float(os.getenv("V5S_TM_ICT_TRAIL_SL_BUFFER", "2.0")),
+        breakeven_trigger_points=float(os.getenv("V5S_BREAKEVEN_TRIGGER_POINTS", "10")),
         partial1_trigger_points=float(os.getenv("V5S_PARTIAL1_TRIGGER_POINTS", "10")),
         partial1_fraction=float(os.getenv("V5S_PARTIAL1_FRACTION", "0.70")),
         partial2_trigger_points=float(os.getenv("V5S_PARTIAL2_TRIGGER_POINTS", "15")),

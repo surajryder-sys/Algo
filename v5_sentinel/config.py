@@ -38,10 +38,9 @@ class Config:
     # trailing SL both use it) -- XAUUSD points.
     sl_buffer: float
 
-    # SL Manager breakeven trigger -- kept as a constructor param
-    # SLManager itself no longer uses for gating (breakeven now gates on
-    # Trade Manager's own partial-booking progress, see sl_manager.py's
-    # own docstring, 2026-09-12).
+    # SL Manager breakeven trigger -- gates breakeven directly again as
+    # of 2026-09-15 (ORed with Trade Manager's own partial-booking
+    # progress, see sl_manager.py's own docstring for the full history).
     breakeven_trigger_points: float
 
     # Trade Manager partial-booking thresholds (points in favor) and the
@@ -89,7 +88,7 @@ def load_config() -> Config:
         poll_seconds=float(os.getenv("V5S_POLL_SECONDS", "1")),
         enable_trading=_env_bool("V5S_ENABLE_TRADING", False),
         sl_buffer=float(os.getenv("V5S_SL_BUFFER", "2.0")),
-        breakeven_trigger_points=float(os.getenv("V5S_BREAKEVEN_TRIGGER_POINTS", "7")),
+        breakeven_trigger_points=float(os.getenv("V5S_BREAKEVEN_TRIGGER_POINTS", "10")),
         partial1_trigger_points=float(os.getenv("V5S_PARTIAL1_TRIGGER_POINTS", "10")),
         partial1_fraction=float(os.getenv("V5S_PARTIAL1_FRACTION", "0.70")),
         partial2_trigger_points=float(os.getenv("V5S_PARTIAL2_TRIGGER_POINTS", "15")),

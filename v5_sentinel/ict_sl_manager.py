@@ -20,15 +20,18 @@ user 2026-09-14 (final round of TM-ICT's own Q&A):
   breakeven (that's a separate, later stage -- the user's own two
   answers were given as two distinct events, not one).
 
-  Stage 3 -- partial-booked, breakeven-floored far-line. "breakeven sl
-  once the partial booking is done, as per other components" -- once
-  Trade Manager's own partial-booking has fired (TradeManager.
-  is_partially_cut()), SL follows the SAME breakeven-then-far-line
-  formula sl_manager.SLManager already uses for every other component
-  (max/min of far-line-based and entry_price, tightening-only). Stage 3
-  can arrive before OR after Stage 2 (partial booking is a points-in-
-  favor trigger, independent of the structure-confirm timing) -- once
-  it has, it always wins over Stage 2's own no-floor behavior.
+  Stage 3 -- breakeven-floored far-line. "breakeven sl once the partial
+  booking is done, as per other components" -- once Trade Manager's own
+  partial-booking has fired (TradeManager.is_partially_cut()) OR the
+  trade is independently `breakeven_trigger_points` (10 by default) in
+  favor (2026-09-15, "sl manager to set breakeven for trades when trade
+  reaches 10 points in favour" -- same standalone-points-OR-partial-
+  booked gate sl_manager.SLManager itself now uses), SL follows the SAME
+  breakeven-then-far-line formula (max/min of far-line-based and
+  entry_price, tightening-only). Stage 3 can arrive before OR after
+  Stage 2 (both its own triggers are independent of the structure-
+  confirm timing) -- once active, it always wins over Stage 2's own
+  no-floor behavior.
 
 Manual-edit pause/resume mechanics (a real broker-side SL change pauses
 auto-trailing until cleared entirely, then resumes fresh off whatever
@@ -62,9 +65,10 @@ class _ICTPositionSLState:
 
 
 class ICTSLManager:
-    def __init__(self, path: str, sl_buffer: float):
+    def __init__(self, path: str, sl_buffer: float, breakeven_trigger_points: float):
         self._path = Path(path)
         self._sl_buffer = sl_buffer
+        self._breakeven_trigger_points = breakeven_trigger_points
         self._state: dict[int, _ICTPositionSLState] = {}
         self._load()
 
@@ -92,9 +96,9 @@ class ICTSLManager:
     def _far_side(self, direction: int, far_line: float) -> float:
         return far_line - self._sl_buffer if direction == 1 else far_line + self._sl_buffer
 
-    def compute(self, ticket: int, direction: int, entry_price: float, current_broker_sl: Optional[float],
-               initial_sl: float, far_line: Optional[float], structure_confirmed: bool,
-               partial_booked: bool) -> Optional[float]:
+    def compute(self, ticket: int, direction: int, entry_price: float, current_price: float,
+               current_broker_sl: Optional[float], initial_sl: float, far_line: Optional[float],
+               structure_confirmed: bool, partial_booked: bool) -> Optional[float]:
         """Returns a new SL to apply this cycle, or None if nothing
         should change. Does NOT assume the caller applied it -- call
         confirm_applied() only after the broker call succeeds, same
@@ -129,10 +133,13 @@ class ICTSLManager:
             self._save()
             return None
 
+        favor = (current_price - entry_price) if direction == 1 else (entry_price - current_price)
+        breakeven_active = partial_booked or favor >= self._breakeven_trigger_points
+
         if current_broker_sl is None:
             # Resume signal -- re-establish whichever stage currently
             # applies fresh, rather than leaving the position bare.
-            if partial_booked and far_line is not None:
+            if breakeven_active and far_line is not None:
                 proposed = max(self._far_side(direction, far_line), entry_price) if direction == 1 else \
                           min(self._far_side(direction, far_line), entry_price)
             elif structure_confirmed and far_line is not None:
@@ -142,7 +149,7 @@ class ICTSLManager:
             self._save()
             return proposed
 
-        if not partial_booked and not structure_confirmed:
+        if not breakeven_active and not structure_confirmed:
             # Stage 1 -- stays exactly where it was set at entry.
             self._save()
             return None
@@ -154,7 +161,7 @@ class ICTSLManager:
             self._save()
             return None
 
-        if partial_booked:
+        if breakeven_active:
             far_side = self._far_side(direction, far_line)
             proposed = max(far_side, entry_price) if direction == 1 else min(far_side, entry_price)
         else:

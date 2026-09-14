@@ -381,6 +381,8 @@ def _process_signal(cfg: TMICTConfig, sticky: ict_guard.ICTGuardStickyStore, sig
 def _run_sl_manager(cfg: TMICTConfig, mgr: ict_sl_manager.ICTSLManager, tm_mgr: trade_manager.TradeManager,
                     tracker: BridgeBarFlipTracker, position) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+    bid, ask = broker.get_tick_price(cfg.symbol)
+    current_price = bid if direction == 1 else ask
     fs_m3 = tracker.update(cfg.symbol, _M3_MINUTES)
     structure_confirmed = fs_m3 is not None and fs_m3.confirmed.value == direction
     far_result = bridge_flip.far_near(cfg.symbol, _M3_MINUTES, direction)
@@ -396,7 +398,7 @@ def _run_sl_manager(cfg: TMICTConfig, mgr: ict_sl_manager.ICTSLManager, tm_mgr: 
     # itself (this call site has no zone reference to recompute that
     # from) -- deliberately not None so a position is never left with
     # literally no protection on that first read.
-    proposed = mgr.compute(position.ticket, direction, position.price_open, current_sl,
+    proposed = mgr.compute(position.ticket, direction, position.price_open, current_price, current_sl,
                           initial_sl=position.price_open, far_line=far_line,
                           structure_confirmed=structure_confirmed, partial_booked=tm_mgr.is_partially_cut(position.ticket))
     if proposed is None:
@@ -474,7 +476,7 @@ def main() -> None:
           f"enable_trading={cfg.enable_trading} poll={cfg.poll_seconds}s")
 
     broker.connect(cfg)
-    sl_mgr = ict_sl_manager.ICTSLManager(cfg.sl_state_file, cfg.trail_sl_buffer)
+    sl_mgr = ict_sl_manager.ICTSLManager(cfg.sl_state_file, cfg.trail_sl_buffer, cfg.breakeven_trigger_points)
     tm_mgr = trade_manager.TradeManager(cfg.state_file, cfg.partial1_trigger_points, cfg.partial1_fraction,
                                         cfg.partial2_trigger_points, cfg.partial2_fraction)
     store = ict_ob_block.ICTBlockStore(cfg.block_state_file)
