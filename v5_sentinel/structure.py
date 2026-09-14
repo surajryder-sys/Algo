@@ -60,7 +60,7 @@ class StructureSignal:
     direction: int                  # 1 bullish/buy, -1 bearish/sell -- ALWAYS decisive, no "neither" state
     source: str                       # "SUPERTREND" or "ATR_STRUCTURE" -- whichever produced this signal
     event_time: int                    # bar_time of whichever event set this signal
-    sl_value: float                     # supertrend line value (SUPERTREND) or the ATR far line (ATR_STRUCTURE) -- WITHOUT buffer, caller applies it. Only meaningful when this signal is being used as a PARENT (M5); M3's own copy of this field is unused.
+    sl_value: float                     # supertrend line value (SUPERTREND) or the ATR far line FROZEN at the event bar (ATR_STRUCTURE, via tracker.event_far_near() -- 2026-09-15, was a live-drifting read before, see compute_structure_signal()'s own comment for the real incident that caught it) -- WITHOUT buffer, caller applies it. Only meaningful when this signal is being used as a PARENT (M5); M3's own copy of this field is unused.
     supertrend: "st_bridge.SupertrendState"
     atr: FlipStateResult              # kept for diagnostics/decision-log visibility (label(), far_line/near_line, etc.)
 
@@ -85,8 +85,26 @@ def compute_structure_signal(tracker: BridgeBarFlipTracker, symbol: str, tf_minu
     if st.event_time >= atr_event_time:
         return StructureSignal(direction=st.trend, source="SUPERTREND", event_time=st.event_time,
                                sl_value=st.supertrend, supertrend=st, atr=fs)
+
+    # 2026-09-15, found live: fs.far_line (FlipStateResult's own field)
+    # is a LIVE re-read of the bridge on every call, not frozen to the
+    # bar that actually produced this ATR_STRUCTURE event -- so a parent
+    # bias sourced here could drift for however long passes between the
+    # flip and the entry actually firing, landing on values from a
+    # totally different bar (confirmed live: a real trade's SL matched
+    # the PRE-FLIP bar's own near/support line, not the post-flip far
+    # line, a ~17pt miss). tracker.event_far_near() is the tracker's own
+    # value FROZEN at the exact bar that produced the event (same
+    # mechanism RM's own "3F" SL basis already uses, reversal_entry.py)
+    # -- use that instead so the M5 parent's own initial-SL basis is
+    # anchored to the deciding bar, not whatever the bridge says at
+    # whatever later moment the caller happens to poll. Falls back to
+    # the live fs.far_line only when no event has EVER fired yet for
+    # this timeframe (a fresh tracker, nothing frozen to fall back on).
+    frozen = tracker.event_far_near(tf_minutes)
+    atr_sl_value = frozen[0] if frozen is not None else fs.far_line
     return StructureSignal(direction=atr_direction, source="ATR_STRUCTURE", event_time=atr_event_time,
-                           sl_value=fs.far_line, supertrend=st, atr=fs)
+                           sl_value=atr_sl_value, supertrend=st, atr=fs)
 
 
 def event_reference(symbol: str, tf_minutes: int, event_time: int, direction: int) -> Optional[tuple[float, float]]:
