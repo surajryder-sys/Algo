@@ -168,6 +168,23 @@ class BlockStore:
     def _save(self) -> None:
         self._path.write_text(json.dumps({zid: asdict(z) for zid, z in self._zones.items()}))
 
+    # Points tolerance for the same-price re-identification guard below --
+    # see sync_from_scraper's own comment. Deliberately tight: every
+    # duplicate found live 2026-09-14 matched to 2-3 decimal places
+    # exactly (XAUUSD's own scale), so this only ever catches a genuine
+    # re-identification of the same real zone, never two legitimately
+    # distinct nearby zones (which sit points apart on this instrument,
+    # not hundredths of a point).
+    _PRICE_DUPLICATE_TOLERANCE = 0.05
+
+    def _has_near_duplicate(self, symbol: str, timeframe: str, direction: str, top: float, btm: float) -> bool:
+        for z in self._zones.values():
+            if z.symbol == symbol and z.timeframe == timeframe and z.direction == direction \
+                    and abs(z.top - top) <= self._PRICE_DUPLICATE_TOLERANCE \
+                    and abs(z.btm - btm) <= self._PRICE_DUPLICATE_TOLERANCE:
+                return True
+        return False
+
     def sync_from_scraper(self, zone_state_file: str, symbol: str = "XAUUSD") -> int:
         """Seeds every zone the scraper currently reports that this block
         has never seen before (by its own stable id) -- never touches a
@@ -199,6 +216,26 @@ class BlockStore:
                     zid = _zone_id(symbol, tf, direction, start_time)
                     if zid in self._zones:
                         continue  # already ours -- our own state governs from here, not the scraper's
+                    top = float(z["top"])
+                    btm = float(z["btm"])
+                    if self._has_near_duplicate(symbol, tf, direction, top, btm):
+                        # Same real zone re-identified under a NEW
+                        # start_time -- confirmed live 2026-09-14 (user's
+                        # own theory: "zone flicker... on mt5 chart"): the
+                        # underlying chart/indicator can re-form the exact
+                        # same box (a Pine recompute/redraw quirk, or the
+                        # OB detector re-picking the same historical bar)
+                        # and hand tv_scraper a genuinely DIFFERENT, even
+                        # formed_time_confirmed=True, start_time for it.
+                        # Without this guard the same real zone re-seeds
+                        # under a fresh zone_id every time it flickers,
+                        # which every zone_id-keyed consumer (critical_
+                        # alerts' permanent per-zone dedup, ICT Guard
+                        # eligibility) then treats as brand new -- found
+                        # live as "same repeated alerts fired 100's of
+                        # times" (16 duplicate-price groups in the block,
+                        # up to 5 reincarnations of the same zone).
+                        continue
                     virgin = bool(z.get("virgin", True))
                     scraper_retested_at = z.get("retested_at")
                     self._zones[zid] = BlockZone(
