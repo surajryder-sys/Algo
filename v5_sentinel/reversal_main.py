@@ -304,7 +304,7 @@ def _run_trade_manager(cfg: RMConfig, component: str, mgr: trade_manager.TradeMa
 
 
 def _process_signal(cfg: RMConfig, sticky: ict_guard.ICTGuardStickyStore, component: str, magic_number: int,
-                    direction: int, sl: float, tag: str, ref_desc: str, mark_traded) -> None:
+                    direction: int, sl: float, tag: str, ref_desc: str, mark_traded, on_redundant) -> None:
     """Acts on ONE signal against whatever position is ACTUALLY open right
     now on THIS component's own magic number (re-queried, so an earlier
     signal's own action this same cycle is visible here). Shared CODE
@@ -320,7 +320,21 @@ def _process_signal(cfg: RMConfig, sticky: ict_guard.ICTGuardStickyStore, compon
     is even attempted there) -- 2026-09-07, found live: a failed
     order_send used to consume eligibility anyway, silently dropping a
     genuinely valid setup that never got a position (see _open_position's
-    own docstring)."""
+    own docstring).
+
+    on_redundant(direction, tag, ref_desc, ticket) is called instead of
+    alerting directly -- 2026-09-15, found live: "I'm getting same alert
+    in telegram many times" traced to a single burst of 78
+    redundant_signal records in ~3 minutes from ONE real trigger event.
+    Root cause: RM-ICT's own 2026-09-15 eligibility redesign made EVERY
+    untested zone across every timeframe a candidate the instant a
+    trigger fires (retest no longer required), so a single ST3F/M5F
+    event can legitimately match dozens of zones at once -- each one
+    used to call _send_alert() on its own. The caller (run_once) now
+    collects these across the whole cycle and sends ONE aggregated
+    Telegram message per component instead of one per matching
+    zone/level; decision_log still gets one line per signal for full
+    audit granularity, only the Telegram side is collapsed."""
     positions = broker.get_positions(cfg.symbol, magic_number)
     position = positions[0] if positions else None
 
@@ -343,12 +357,11 @@ def _process_signal(cfg: RMConfig, sticky: ict_guard.ICTGuardStickyStore, compon
         # leftover + reopen full)" branch is retired -- a same-direction
         # match now behaves identically regardless of partial-cut state.
         mark_traded()
-        msg = (f"[V5S-{component}] {tag} qualifies ({_DIR_LABEL[direction]}) but a {_DIR_LABEL[pos_direction]} "
+        print(f"[V5S-{component}] {tag} qualifies ({_DIR_LABEL[direction]}) but a {_DIR_LABEL[pos_direction]} "
               f"position is already open on #{position.ticket} -- marked traded, no new entry")
-        print(msg)
-        _send_alert(msg)
         decision_log.log(cfg.decision_log_file, "redundant_signal", component=component,
                          direction=_DIR_LABEL[direction], tag=tag, ref=ref_desc, existing_ticket=position.ticket)
+        on_redundant(direction, tag, ref_desc, position.ticket)
 
 
 def _check_stale(cfg: RMConfig, stale_tracker: StaleAlertTracker) -> None:
@@ -412,15 +425,34 @@ def run_once(cfg: RMConfig, sl_mgr_str: sl_manager.SLManager, tm_mgr_str: trade_
     sl_mgr_ict.prune({p.ticket for p in ict_positions})
     tm_mgr_ict.prune({p.ticket for p in ict_positions})
 
+    # redundant_signal alerts collected here instead of sent inline --
+    # see _process_signal's own docstring (2026-09-15 fix for "same alert
+    # in telegram many times", a single trigger event was able to match
+    # dozens of untested ICT zones at once and alert once EACH).
+    redundant: dict[str, list[tuple[int, str, str, int]]] = {}
+
+    def _on_redundant(component: str, direction: int, tag: str, ref_desc: str, ticket: int) -> None:
+        redundant.setdefault(component, []).append((direction, tag, ref_desc, ticket))
+
     for sig in str_signals:
         _process_signal(cfg, sticky, "STR", cfg.magic_number, sig.direction, sig.sl, _tag(sig),
                         f"level={sig.level_value:.3f}",
-                        lambda tf=sig.timeframe_minutes, d=sig.direction: store.mark_traded(tf, d))
+                        lambda tf=sig.timeframe_minutes, d=sig.direction: store.mark_traded(tf, d),
+                        lambda direction, tag, ref_desc, ticket: _on_redundant("STR", direction, tag, ref_desc, ticket))
     for sig in ict_signals:
         _process_signal(cfg, sticky, "ICT", cfg.ict_magic_number, sig.direction, sig.sl, _ict_tag(sig),
                         f"zone=[{sig.zone_btm:.3f}-{sig.zone_top:.3f}]",
                         lambda zid=sig.zone_id, top=sig.zone_top, btm=sig.zone_btm:
-                            ict_eligibility.mark_traded(zid, top, btm))
+                            ict_eligibility.mark_traded(zid, top, btm),
+                        lambda direction, tag, ref_desc, ticket: _on_redundant("ICT", direction, tag, ref_desc, ticket))
+
+    for component, entries in redundant.items():
+        direction, first_tag, _first_ref, ticket = entries[0]
+        extra = f" (+{len(entries) - 1} more matching this cycle)" if len(entries) > 1 else ""
+        msg = (f"[V5S-{component}] {_DIR_LABEL[direction]} qualifies e.g. {first_tag}{extra} but a position "
+              f"is already open on #{ticket} -- marked traded, no new entry")
+        print(msg)
+        _send_alert(msg)
 
     str_positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     str_position = str_positions[0] if str_positions else None
