@@ -62,14 +62,27 @@ found missing:
   scoped down to "M3F" above, firing only when M15 already agrees, which
   is also what addresses the original noise concern.
 
+CISD TRIGGERS -- ADDED 2026-09-15, ALONGSIDE the four above, exactly
+mirroring reversal_entry.py's own addition (see that module's own
+docstring for the full confirmed design): M3 ("M3CD") and M5 ("M5CD")
+only, sourced from cisd_bridge.py's reader of the ported AlgoAlpha CISD
+indicator (mql5/CISD_AlgoAlpha.mq5). Deliberately NO M15 Primary
+Structure gate ("no gate at all for CISD triggers") -- fires whenever a
+fresh CISD confirms on its own timeframe, independent of Primary
+Structure's current bias or even its availability, which is why these
+two live OUTSIDE the `if primary is not None` block the four above sit
+inside (see find_ict_signals() itself).
+
 SL: "ST1F" -> M1's own Supertrend line value +/- cfg.sl_buffer, read
 directly off the fresh-flip bar. "ST3F" -> M3's own Supertrend line
 value +/- cfg.sl_buffer, same mechanism one timeframe up. "M3F"/"M5F" ->
 that timeframe's own far ATR trail line, FROZEN at the exact bar that
 produced the flip (BridgeBarFlipTracker.event_far_near()) +/-
 cfg.sl_buffer -- same freezing idiom the original unconditional "3F"
-used. Reuses the very same sl_buffer value STR uses -- "as it is" means
-no new/different buffer for this component.
+used. "M3CD"/"M5CD" -> that timeframe's own confirmed CISD origin level
+(the reversal candle's own open) +/- cfg.sl_buffer. Reuses the very same
+sl_buffer value STR uses -- "as it is" means no new/different buffer for
+this component.
 
 ELIGIBILITY ("traded" tracking): kept in THIS module's OWN separate
 state file (ICTEligibilityStore below), never written back into the
@@ -116,7 +129,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from v5_sentinel import st_bridge, structure
+from v5_sentinel import cisd_bridge, st_bridge, structure
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.flip_state import EventType
 from v5_sentinel.nlb_nsb_block import BlockStore
@@ -134,7 +147,7 @@ class ICTSignal:
     timeframe_name: str          # "H1"
     zone_top: float
     zone_btm: float
-    trigger: str                  # "ST1F" | "ST3F" | "M5F" -- same labels STR's own triggers use (2026-09-09, user's own direction: "dont use ATR flip on comment, You can use 3F"; 2026-09-15 the trigger SET itself changed but the shared-labels reasoning still holds); the "V5S-RM-{STR|ICT}-" component prefix already tells the two components apart, so reusing STR's labels here isn't ambiguous.
+    trigger: str                  # "ST1F" | "ST3F" | "M5F" | "M3CD" | "M5CD" -- same labels STR's own triggers use (2026-09-09, user's own direction: "dont use ATR flip on comment, You can use 3F"; 2026-09-15 the trigger SET itself changed but the shared-labels reasoning still holds); the "V5S-RM-{STR|ICT}-" component prefix already tells the two components apart, so reusing STR's labels here isn't ambiguous.
     sl: float
 
 
@@ -272,50 +285,67 @@ def find_ict_signals(
     tracker: BridgeBarFlipTracker,
     sl_buffer: float,
 ) -> list[ICTSignal]:
-    """Every currently-valid (not invalidated), untraded OB zone whose
-    implied direction matches one of the four M15-Primary-Structure-
-    gated triggers this cycle -- see module docstring for the full
-    ST1F/M3F/ST3F/M5F design, identical to reversal_entry.py's own STR
-    component. Reads the Block fresh (read-only -- this component never
-    writes to it) every call, same pattern main.py's own ICT Guard
-    already uses."""
+    """Every currently-valid (not invalidated), retested, untraded OB
+    zone whose implied direction matches one of the four M15-Primary-
+    Structure-gated triggers this cycle (ST1F/M3F/ST3F/M5F), PLUS the
+    two ungated CISD triggers (M3CD/M5CD) -- see module docstring for
+    the full design, identical to reversal_entry.py's own STR component.
+    Reads the Block fresh (read-only -- this component never writes to
+    it) every call, same pattern main.py's own ICT Guard already uses."""
     store = BlockStore(block_state_file)
     signals: list[ICTSignal] = []
 
     primary = structure.compute_structure_signal(tracker, symbol, _M15_MINUTES)
-    if primary is None:
-        return signals
+    if primary is not None:
+        m1 = st_bridge.fresh_flip(symbol, _M1_MINUTES)
+        if m1 is not None and primary.direction == m1.trend:
+            sl = m1.supertrend - sl_buffer if m1.trend == 1 else m1.supertrend + sl_buffer
+            signals.extend(_scan_matching_zones(store, eligibility, m1.trend, "ST1F", sl))
 
-    m1 = st_bridge.fresh_flip(symbol, _M1_MINUTES)
-    if m1 is not None and primary.direction == m1.trend:
-        sl = m1.supertrend - sl_buffer if m1.trend == 1 else m1.supertrend + sl_buffer
-        signals.extend(_scan_matching_zones(store, eligibility, m1.trend, "ST1F", sl))
+        fs_m3_atr = tracker.update(symbol, _M3_MINUTES)
+        if (fs_m3_atr is not None and fs_m3_atr.event_just_happened() and fs_m3_atr.last_event is not None
+                and fs_m3_atr.last_event.event_type == EventType.FLIP):
+            m3_atr_flip_dir = fs_m3_atr.last_event.confirmed.value
+            if primary.direction == m3_atr_flip_dir:
+                frozen_m3 = tracker.event_far_near(_M3_MINUTES)
+                if frozen_m3 is not None:  # shouldn't be None once a FLIP has fired, but no basis to guess from
+                    far_m3, _near_m3 = frozen_m3
+                    sl = far_m3 - sl_buffer if m3_atr_flip_dir == 1 else far_m3 + sl_buffer
+                    signals.extend(_scan_matching_zones(store, eligibility, m3_atr_flip_dir, "M3F", sl))
 
-    fs_m3_atr = tracker.update(symbol, _M3_MINUTES)
-    if (fs_m3_atr is not None and fs_m3_atr.event_just_happened() and fs_m3_atr.last_event is not None
-            and fs_m3_atr.last_event.event_type == EventType.FLIP):
-        m3_atr_flip_dir = fs_m3_atr.last_event.confirmed.value
-        if primary.direction == m3_atr_flip_dir:
-            frozen_m3 = tracker.event_far_near(_M3_MINUTES)
-            if frozen_m3 is not None:  # shouldn't be None once a FLIP has fired, but no basis to guess from
-                far_m3, _near_m3 = frozen_m3
-                sl = far_m3 - sl_buffer if m3_atr_flip_dir == 1 else far_m3 + sl_buffer
-                signals.extend(_scan_matching_zones(store, eligibility, m3_atr_flip_dir, "M3F", sl))
+        m3 = st_bridge.fresh_flip(symbol, _M3_MINUTES)
+        if m3 is not None and primary.direction != m3.trend:
+            sl = m3.supertrend - sl_buffer if m3.trend == 1 else m3.supertrend + sl_buffer
+            signals.extend(_scan_matching_zones(store, eligibility, m3.trend, "ST3F", sl))
 
-    m3 = st_bridge.fresh_flip(symbol, _M3_MINUTES)
-    if m3 is not None and primary.direction != m3.trend:
-        sl = m3.supertrend - sl_buffer if m3.trend == 1 else m3.supertrend + sl_buffer
-        signals.extend(_scan_matching_zones(store, eligibility, m3.trend, "ST3F", sl))
+        fs_m5 = tracker.update(symbol, _M5_MINUTES)
+        if (fs_m5 is not None and fs_m5.event_just_happened() and fs_m5.last_event is not None
+                and fs_m5.last_event.event_type == EventType.FLIP):
+            m5_flip_dir = fs_m5.last_event.confirmed.value
+            if primary.direction != m5_flip_dir:
+                frozen = tracker.event_far_near(_M5_MINUTES)
+                if frozen is not None:  # shouldn't be None once a FLIP has fired, but no basis to guess from
+                    far, _near = frozen
+                    sl = far - sl_buffer if m5_flip_dir == 1 else far + sl_buffer
+                    signals.extend(_scan_matching_zones(store, eligibility, m5_flip_dir, "M5F", sl))
 
-    fs_m5 = tracker.update(symbol, _M5_MINUTES)
-    if (fs_m5 is not None and fs_m5.event_just_happened() and fs_m5.last_event is not None
-            and fs_m5.last_event.event_type == EventType.FLIP):
-        m5_flip_dir = fs_m5.last_event.confirmed.value
-        if primary.direction != m5_flip_dir:
-            frozen = tracker.event_far_near(_M5_MINUTES)
-            if frozen is not None:  # shouldn't be None once a FLIP has fired, but no basis to guess from
-                far, _near = frozen
-                sl = far - sl_buffer if m5_flip_dir == 1 else far + sl_buffer
-                signals.extend(_scan_matching_zones(store, eligibility, m5_flip_dir, "M5F", sl))
+    # CISD triggers -- 2026-09-15, deliberately OUTSIDE the `if primary
+    # is not None` block above (unlike all four triggers within it):
+    # confirmed "no gate at all for CISD triggers", so these fire
+    # regardless of M15 Primary Structure's current bias or even its
+    # availability -- see reversal_entry.py's own module docstring for
+    # the full confirmed design (identical here, just zones instead of
+    # HTF levels). SL is the confirmed CISD's own origin level.
+    m3_cisd = cisd_bridge.fresh_cisd(symbol, _M3_MINUTES)
+    if m3_cisd is not None:
+        direction = cisd_bridge.direction_of(m3_cisd)
+        sl = m3_cisd.last_cisd_level - sl_buffer if direction == 1 else m3_cisd.last_cisd_level + sl_buffer
+        signals.extend(_scan_matching_zones(store, eligibility, direction, "M3CD", sl))
+
+    m5_cisd = cisd_bridge.fresh_cisd(symbol, _M5_MINUTES)
+    if m5_cisd is not None:
+        direction = cisd_bridge.direction_of(m5_cisd)
+        sl = m5_cisd.last_cisd_level - sl_buffer if direction == 1 else m5_cisd.last_cisd_level + sl_buffer
+        signals.extend(_scan_matching_zones(store, eligibility, direction, "M5CD", sl))
 
     return signals

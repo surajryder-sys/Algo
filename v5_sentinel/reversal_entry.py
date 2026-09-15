@@ -62,6 +62,23 @@ atr flip, as it might create a lot of noise"):
   Nothing here gates on which side of the level price currently sits, or
   requires re-testing it after the initial touch-arm -- same as before.
 
+CISD TRIGGERS -- ADDED 2026-09-15, ALONGSIDE the four above, not
+replacing them ("we will be using entry logic based on CISD for the
+algo, only for reversal managers" -- confirmed "add alongside" over
+"replace entirely"). Sourced from a ported AlgoAlpha CISD indicator
+(mql5/CISD_AlgoAlpha.mq5, cisd_bridge.py's own reader) already attached
+and publishing on M1/M3/M5/M15 -- confirmed to use ONLY M3 ("M3CD") and
+M5 ("M5CD"), NOT M1 or M15. Deliberately NO M15 Primary Structure gate
+at all (confirmed "no gate at all for CISD triggers", the third design
+option offered and the one picked, over "keep the gate" or "CISD
+replaces the gate") -- a fresh CISD confirmation on its own timeframe is
+sufficient by itself, independent of M15's current bias or even its
+availability, which is why these two blocks sit OUTSIDE the
+`if primary is not None` gate the other four live inside.
+cisd_bridge.fresh_cisd() is the same "privileged, momentary" contract
+as st_bridge.fresh_flip() -- only non-None the exact bar a CISD
+confirmed (last_cisd_time == bar_time).
+
 BAR-CLOSE-GATED, all four. "ST1F"/"ST3F" use st_bridge.fresh_flip() --
 only returns a result the exact bar the MQL5 indicator's own Supertrend
 trend changed (event_time == bar_time). "M3F"/"M5F" use
@@ -89,17 +106,21 @@ off the fresh-flip bar. "ST3F" -> M3's own Supertrend line value +/-
 buffer, same mechanism, one timeframe up. "M3F"/"M5F" -> that
 timeframe's own far ATR trail line, FROZEN at the exact bar that
 produced the flip (BridgeBarFlipTracker.event_far_near()) +/- buffer.
-Once a position is open and past breakeven, ongoing SL trailing still
-follows M3's CURRENT live far line (bridge_flip.m3_far_line(),
-unchanged regardless of which trigger opened the position) -- only the
-INITIAL entry SL differs by trigger.
+"M3CD"/"M5CD" -> that timeframe's own confirmed CISD origin level
+(CISDState.last_cisd_level, the reversal candle's own open) +/- buffer
+-- a genuine break back past the origin negates the CISD thesis, same
+"frozen at the exact event" idiom as every other trigger's SL. Once a
+position is open and past breakeven, ongoing SL trailing still follows
+M3's CURRENT live far line (bridge_flip.m3_far_line(), unchanged
+regardless of which trigger opened the position) -- only the INITIAL
+entry SL differs by trigger.
 
 find_signals() returns EVERY level that qualifies THIS cycle, in a fixed
 scan order -- all of "ST1F"'s own matches first, then "M3F"'s, then
-"ST3F"'s, then
-"M5F"'s (each in HTF_TIMEFRAMES_MINUTES order, support level before
-resistance within a timeframe), so behaviour is deterministic rather
-than scan-order-random when more than one qualifies at once.
+"ST3F"'s, then "M5F"'s, then "M3CD"'s, then "M5CD"'s (each in
+HTF_TIMEFRAMES_MINUTES order, support level before resistance within a
+timeframe), so behaviour is deterministic rather than scan-order-random
+when more than one qualifies at once.
 reversal_main.py decides which one becomes the actual trade and which
 get marked traded + alerted as redundant -- this module only detects
 and reports, it never touches the broker or LevelEligibilityStore's
@@ -111,7 +132,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from v5_sentinel import st_bridge, structure
+from v5_sentinel import cisd_bridge, st_bridge, structure
 from v5_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v5_sentinel.flip_state import EventType
 from v5_sentinel.htf_levels import HTFState, LevelEligibilityStore
@@ -127,7 +148,7 @@ class ReversalSignal:
     direction: int              # 1 buy, -1 sell
     timeframe_minutes: int       # the HTF whose level this is
     line_no: int
-    trigger: str                 # "ST1F" | "ST3F" | "M5F"
+    trigger: str                 # "ST1F" | "ST3F" | "M5F" | "M3CD" | "M5CD"
     level_value: float
     sl: float
 
@@ -179,8 +200,9 @@ def find_signals(
     sl_buffer: float,
 ) -> list[ReversalSignal]:
     """Every armed (touched), untraded HTF level whose direction matches
-    one of the three M15-Primary-Structure-gated triggers this cycle --
-    see module docstring for the full ST1F/ST3F/M5F design."""
+    one of the four M15-Primary-Structure-gated triggers (ST1F/M3F/
+    ST3F/M5F) this cycle, PLUS the two ungated CISD triggers (M3CD/
+    M5CD) -- see module docstring for the full design."""
     signals: list[ReversalSignal] = []
 
     primary = structure.compute_structure_signal(tracker, symbol, _M15_MINUTES)
@@ -217,5 +239,28 @@ def find_signals(
                     far, _near = frozen
                     sl = far - sl_buffer if m5_flip_dir == 1 else far + sl_buffer
                     signals.extend(_scan_matching_levels(htf_states, store, m5_flip_dir, "M5F", sl))
+
+    # CISD triggers -- added 2026-09-15 ("we will be using entry logic
+    # based on CISD for the algo, only for reversal managers"), OUTSIDE
+    # the `if primary is not None` block above on purpose: confirmed
+    # "no gate at all for CISD triggers" -- a fresh CISD confirmation on
+    # its own timeframe is sufficient on its own, independent of M15
+    # Primary Structure's current bias (or even its availability). SL is
+    # the confirmed CISD's own origin level (the reversal candle's open,
+    # cisd_bridge.CISDState.last_cisd_level) +/- sl_buffer -- the natural
+    # ICT-native invalidation point: a genuine break back past the
+    # origin negates the CISD thesis, same "frozen at the exact event"
+    # idiom every other trigger's SL already uses.
+    m3_cisd = cisd_bridge.fresh_cisd(symbol, _M3_MINUTES)
+    if m3_cisd is not None:
+        direction = cisd_bridge.direction_of(m3_cisd)
+        sl = m3_cisd.last_cisd_level - sl_buffer if direction == 1 else m3_cisd.last_cisd_level + sl_buffer
+        signals.extend(_scan_matching_levels(htf_states, store, direction, "M3CD", sl))
+
+    m5_cisd = cisd_bridge.fresh_cisd(symbol, _M5_MINUTES)
+    if m5_cisd is not None:
+        direction = cisd_bridge.direction_of(m5_cisd)
+        sl = m5_cisd.last_cisd_level - sl_buffer if direction == 1 else m5_cisd.last_cisd_level + sl_buffer
+        signals.extend(_scan_matching_levels(htf_states, store, direction, "M5CD", sl))
 
     return signals
