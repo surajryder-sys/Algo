@@ -79,9 +79,11 @@ value +/- cfg.sl_buffer, same mechanism one timeframe up. "M3F"/"M5F" ->
 that timeframe's own far ATR trail line, FROZEN at the exact bar that
 produced the flip (BridgeBarFlipTracker.event_far_near()) +/-
 cfg.sl_buffer -- same freezing idiom the original unconditional "3F"
-used. "M3CD"/"M5CD" -> that timeframe's own confirmed CISD origin level
-(the reversal candle's own open) +/- cfg.sl_buffer. Reuses the very same
-sl_buffer value STR uses -- "as it is" means no new/different buffer for
+used. "M3CD"/"M5CD" -> that timeframe's own NEAREST ACTIVE SWING low/
+high (cisd_bridge.sl_basis(), frozen at confirmation, NOT
+last_cisd_level -- see cisd_bridge.py's own SL BASIS docstring) +/-
+cfg.sl_buffer. Reuses the very same sl_buffer value STR uses -- "as it
+is" means no new/different buffer for
 this component.
 
 ELIGIBILITY ("traded" tracking): kept in THIS module's OWN separate
@@ -335,17 +337,26 @@ def find_ict_signals(
     # regardless of M15 Primary Structure's current bias or even its
     # availability -- see reversal_entry.py's own module docstring for
     # the full confirmed design (identical here, just zones instead of
-    # HTF levels). SL is the confirmed CISD's own origin level.
+    # HTF levels). SL is the NEAREST ACTIVE SWING low/high
+    # (cisd_bridge.sl_basis(), frozen at confirmation), NOT
+    # last_cisd_level -- same same-day correction as reversal_entry.py's
+    # own ("cuz they are very early"). sl_basis() returning None (no
+    # active swing line existed at confirmation) means this trigger
+    # simply produces no signal that cycle -- no fallback, no guess.
     m3_cisd = cisd_bridge.fresh_cisd(symbol, _M3_MINUTES)
     if m3_cisd is not None:
-        direction = cisd_bridge.direction_of(m3_cisd)
-        sl = m3_cisd.last_cisd_level - sl_buffer if direction == 1 else m3_cisd.last_cisd_level + sl_buffer
-        signals.extend(_scan_matching_zones(store, eligibility, direction, "M3CD", sl))
+        basis = cisd_bridge.sl_basis(m3_cisd)
+        if basis is not None:
+            direction = cisd_bridge.direction_of(m3_cisd)
+            sl = basis - sl_buffer if direction == 1 else basis + sl_buffer
+            signals.extend(_scan_matching_zones(store, eligibility, direction, "M3CD", sl))
 
     m5_cisd = cisd_bridge.fresh_cisd(symbol, _M5_MINUTES)
     if m5_cisd is not None:
-        direction = cisd_bridge.direction_of(m5_cisd)
-        sl = m5_cisd.last_cisd_level - sl_buffer if direction == 1 else m5_cisd.last_cisd_level + sl_buffer
-        signals.extend(_scan_matching_zones(store, eligibility, direction, "M5CD", sl))
+        basis = cisd_bridge.sl_basis(m5_cisd)
+        if basis is not None:
+            direction = cisd_bridge.direction_of(m5_cisd)
+            sl = basis - sl_buffer if direction == 1 else basis + sl_buffer
+            signals.extend(_scan_matching_zones(store, eligibility, direction, "M5CD", sl))
 
     return signals

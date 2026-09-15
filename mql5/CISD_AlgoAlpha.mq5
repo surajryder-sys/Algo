@@ -38,6 +38,18 @@
 //|    is left out, same call made for Supertrend.mq5's fill() drop.    |
 //|  - alertcondition() has no Alert()/SendNotification() wired here,   |
 //|    same call made for Supertrend.mq5 and HammerShootingStar.mq5.    |
+//|                                                                     |
+//| BRIDGE FIELDS EXTENDED 2026-09-15 (last_cisd_has_swing/             |
+//| last_cisd_swing_level): v5_sentinel's own Reversal Manager wires    |
+//| this indicator in as two new entry triggers (M3CD/M5CD) and needed  |
+//| an SL basis -- "Nearest active swing low/high" was picked over the  |
+//| confirming candle's own low/high. Captured ONCE, frozen, the exact  |
+//| same instant g_last_cisd_level itself is (see ProcessCISDBar()'s    |
+//| own cisd==1/cisd==2 blocks) -- the front (index 0, newest/nearest)  |
+//| entry of sh_level[]/sl_level[] at that moment, never live-          |
+//| recomputed afterward. has_swing is a real, reportable false when no |
+//| active swing line existed at confirmation time -- no fallback, no   |
+//| guess, matches this whole file's existing philosophy.               |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
 #property indicator_buffers 2
@@ -105,6 +117,23 @@ int      g_last_cisd_type = 0;   // 0=none, 1=bearish, 2=bullish (most recent ev
 double   g_last_cisd_level = 0.0;
 datetime g_last_cisd_time  = 0;
 bool     g_last_sweep = false;   // was the most recent confirmed CISD a liquidity-sweep variant
+
+// Nearest still-active swing low/high AT THE EXACT MOMENT the most recent
+// CISD confirmed -- 2026-09-15, added for the Python side's own SL basis
+// ("Nearest active swing low/high" chosen over the confirming candle's
+// own low/high). FROZEN the same way g_last_cisd_level itself already
+// is -- captured once inside ProcessCISDBar()'s own cisd==1/cisd==2
+// blocks below, never touched again until the NEXT CISD confirmation
+// overwrites it, never live-recomputed on a later read. sl_level[0]/
+// sh_level[0] are the FRONT of each array (index 0 = newest, per this
+// file's own unshift-at-front convention -- see AddSwingLow/AddSwingHigh),
+// i.e. whichever swing line is currently nearest/most-recent and still
+// active (not yet expired past ExpiryBars or mitigated by a wick) at
+// that instant. has_swing flags whether one even existed then -- an
+// empty array is a real, reportable state (no fallback, no guess),
+// not an error.
+bool     g_last_cisd_has_swing = false;
+double   g_last_cisd_swing_level = 0.0;
 
 int      g_confirmed_upto = -1;  // watermark -- highest closed bar index already processed, ever
 datetime g_last_publish_time = 0;
@@ -556,6 +585,11 @@ void ProcessCISDBar(const int i, const int rates_total, const datetime &time[],
       DrawOriginLine(origin_idx, origin_lvl, i, time, BearColor);
       g_last_cisd_type = 1; g_last_cisd_level = origin_lvl; g_last_cisd_time = time[i];
       g_last_sweep = false;
+      // Bearish CISD -> the relevant structural stop is the nearest
+      // still-active swing HIGH (the front/newest entry, index 0, of
+      // sh_level[] -- see this global's own declaration comment above).
+      g_last_cisd_has_swing = (ArraySize(sh_level) > 0);
+      g_last_cisd_swing_level = g_last_cisd_has_swing ? sh_level[0] : 0.0;
 
       if(g_have_wicked_high && (i - g_last_wicked_high_bar) <= LiquidityLookback && close[i] < g_last_wicked_high_level)
       {
@@ -569,6 +603,11 @@ void ProcessCISDBar(const int i, const int rates_total, const datetime &time[],
       DrawOriginLine(origin_idx, origin_lvl, i, time, BullColor);
       g_last_cisd_type = 2; g_last_cisd_level = origin_lvl; g_last_cisd_time = time[i];
       g_last_sweep = false;
+      // Bullish CISD -> the relevant structural stop is the nearest
+      // still-active swing LOW (front/newest entry, index 0, of
+      // sl_level[]).
+      g_last_cisd_has_swing = (ArraySize(sl_level) > 0);
+      g_last_cisd_swing_level = g_last_cisd_has_swing ? sl_level[0] : 0.0;
 
       if(g_have_wicked_low && (i - g_last_wicked_low_bar) <= LiquidityLookback && close[i] > g_last_wicked_low_level)
       {
@@ -594,6 +633,7 @@ void ResetAllCISDState()
    g_have_wicked_low  = false; g_last_wicked_low_bar  = -1;
    g_trend = 0;
    g_last_cisd_type = 0; g_last_cisd_level = 0.0; g_last_cisd_time = 0; g_last_sweep = false;
+   g_last_cisd_has_swing = false; g_last_cisd_swing_level = 0.0;
    g_confirmed_upto = -1;
 
    ObjectsDeleteAll(0, PREFIX_SWING_HIGH);
@@ -625,7 +665,9 @@ void PublishBridgeFile(const int closed_idx, const datetime &time[], const doubl
    j += "\"last_cisd\":\"" + cisd_text + "\",";
    j += "\"last_cisd_level\":" + DoubleToString(g_last_cisd_level, 8) + ",";
    j += "\"last_cisd_time\":" + IntegerToString((long)g_last_cisd_time) + ",";
-   j += "\"last_cisd_sweep\":" + (g_last_sweep ? "true" : "false");
+   j += "\"last_cisd_sweep\":" + (g_last_sweep ? "true" : "false") + ",";
+   j += "\"last_cisd_has_swing\":" + (g_last_cisd_has_swing ? "true" : "false") + ",";
+   j += "\"last_cisd_swing_level\":" + DoubleToString(g_last_cisd_swing_level, 8);
    j += "}";
 
    FolderCreate(FileBridgeFolder, FILE_COMMON);

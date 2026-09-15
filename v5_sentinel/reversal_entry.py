@@ -106,10 +106,11 @@ off the fresh-flip bar. "ST3F" -> M3's own Supertrend line value +/-
 buffer, same mechanism, one timeframe up. "M3F"/"M5F" -> that
 timeframe's own far ATR trail line, FROZEN at the exact bar that
 produced the flip (BridgeBarFlipTracker.event_far_near()) +/- buffer.
-"M3CD"/"M5CD" -> that timeframe's own confirmed CISD origin level
-(CISDState.last_cisd_level, the reversal candle's own open) +/- buffer
--- a genuine break back past the origin negates the CISD thesis, same
-"frozen at the exact event" idiom as every other trigger's SL. Once a
+"M3CD"/"M5CD" -> that timeframe's own NEAREST ACTIVE SWING low/high
+(cisd_bridge.sl_basis(), FROZEN at the exact bar the CISD confirmed,
+NOT last_cisd_level -- see cisd_bridge.py's own SL BASIS docstring
+section for why) +/- buffer, same "frozen at the exact event" idiom as
+every other trigger's SL. Once a
 position is open and past breakeven, ongoing SL trailing still follows
 M3's CURRENT live far line (bridge_flip.m3_far_line(), unchanged
 regardless of which trigger opened the position) -- only the INITIAL
@@ -246,21 +247,28 @@ def find_signals(
     # "no gate at all for CISD triggers" -- a fresh CISD confirmation on
     # its own timeframe is sufficient on its own, independent of M15
     # Primary Structure's current bias (or even its availability). SL is
-    # the confirmed CISD's own origin level (the reversal candle's open,
-    # cisd_bridge.CISDState.last_cisd_level) +/- sl_buffer -- the natural
-    # ICT-native invalidation point: a genuine break back past the
-    # origin negates the CISD thesis, same "frozen at the exact event"
-    # idiom every other trigger's SL already uses.
+    # the NEAREST ACTIVE SWING low/high (cisd_bridge.sl_basis(), frozen
+    # at confirmation) -- NOT last_cisd_level, corrected same day the
+    # trigger itself was added ("lets take low of cisd candle with
+    # buffer? or recent swing low?? ... cuz they are very early" --
+    # last_cisd_level is the exact price CISD confirms THROUGH, too
+    # tight/premature). sl_basis() returns None if no active swing line
+    # existed at confirmation time -- no fallback, no guess, this
+    # trigger simply produces no signal that cycle.
     m3_cisd = cisd_bridge.fresh_cisd(symbol, _M3_MINUTES)
     if m3_cisd is not None:
-        direction = cisd_bridge.direction_of(m3_cisd)
-        sl = m3_cisd.last_cisd_level - sl_buffer if direction == 1 else m3_cisd.last_cisd_level + sl_buffer
-        signals.extend(_scan_matching_levels(htf_states, store, direction, "M3CD", sl))
+        basis = cisd_bridge.sl_basis(m3_cisd)
+        if basis is not None:
+            direction = cisd_bridge.direction_of(m3_cisd)
+            sl = basis - sl_buffer if direction == 1 else basis + sl_buffer
+            signals.extend(_scan_matching_levels(htf_states, store, direction, "M3CD", sl))
 
     m5_cisd = cisd_bridge.fresh_cisd(symbol, _M5_MINUTES)
     if m5_cisd is not None:
-        direction = cisd_bridge.direction_of(m5_cisd)
-        sl = m5_cisd.last_cisd_level - sl_buffer if direction == 1 else m5_cisd.last_cisd_level + sl_buffer
-        signals.extend(_scan_matching_levels(htf_states, store, direction, "M5CD", sl))
+        basis = cisd_bridge.sl_basis(m5_cisd)
+        if basis is not None:
+            direction = cisd_bridge.direction_of(m5_cisd)
+            sl = basis - sl_buffer if direction == 1 else basis + sl_buffer
+            signals.extend(_scan_matching_levels(htf_states, store, direction, "M5CD", sl))
 
     return signals
