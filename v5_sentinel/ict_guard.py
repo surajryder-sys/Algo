@@ -29,6 +29,25 @@ shared across TM-STR/RM-STR/TM-ICT -- matches this project's "own
 state, own everything per component" convention; one component's entry
 price getting blocked near a zone says nothing about whether another
 component's own different entry price/timing would also be blocked.
+
+NOTIFICATION DEDUP (2026-09-15, found live): check() itself is called
+every poll cycle a component keeps trying (by design -- it must, to
+notice the instant a block clears), but a STICKY block can stand for
+hours, and every caller was logging/alerting on EVERY one of those
+calls. One real block (D1 zone, TM-STR + TM-ICT both blocked ~6 hours)
+produced ~58,000 decision_log rows, and TM-STR's own block path ALSO
+pushes a real Telegram message to the critical-alerts channel on every
+call -- thousands of real messages sent for what is, to a human, ONE
+notable event ("this zone blocked me") that never changed. already_
+notified()/mark_notified() below (in-memory only, deliberately NOT
+persisted -- a restart re-notifying once is useful signal, "still
+blocked after restart", not noise) let each of the three call sites
+log/alert exactly ONCE per zone_id per block, then go silent for every
+repeat call until that zone is pruned (invalidated) -- matches
+bridge_flip.StaleAlertTracker's own "once per episode" precedent.
+check()'s own return type changed from a bare reason string to
+(reason, zone_id) so callers can key their own notified-check off the
+same zone_id sticky already tracks, without re-deriving it.
 """
 from __future__ import annotations
 
@@ -48,6 +67,9 @@ class ICTGuardStickyStore:
     def __init__(self, path: str):
         self._path = Path(path)
         self._blocked: set[str] = set()
+        # In-memory only, deliberately never persisted -- see module
+        # docstring's own NOTIFICATION DEDUP section.
+        self._notified: set[str] = set()
         self._load()
 
     def _load(self) -> None:
@@ -69,27 +91,45 @@ class ICTGuardStickyStore:
             self._blocked.add(zone_id)
             self._save()
 
+    def already_notified(self, zone_id: str) -> bool:
+        return zone_id in self._notified
+
+    def mark_notified(self, zone_id: str) -> None:
+        self._notified.add(zone_id)
+
     def prune(self, existing_zone_ids: set) -> None:
         """Drops any sticky entry for a zone_id no longer present in the
         Block at all -- that zone has been genuinely invalidated and
         deleted (nlb_nsb_block.py never merely "shrinks" a zone), so
-        there is nothing left for the sticky entry to mean."""
+        there is nothing left for the sticky entry to mean. Also drops
+        the (in-memory) notified entry -- a zone_id is never reused, so
+        this only ever matters for tidiness, not correctness."""
         stale = self._blocked - existing_zone_ids
         if stale:
             self._blocked -= stale
             self._save()
+        self._notified &= existing_zone_ids
 
 
 def check(block_state_file: str, sticky: ICTGuardStickyStore, direction: int, entry_price: float,
-         buffer_points: float) -> Optional[str]:
-    """Returns a human-readable block reason if blocked -- either a
-    standing sticky block from an earlier cycle, or a fresh proximity
-    breach discovered THIS cycle (which immediately becomes sticky
-    too) -- else None. A LONG checks every NLB (bearish OB) zone's own
-    BOTTOM edge; a SHORT checks every NSB (bullish OB) zone's own TOP
-    edge. Also prunes `sticky` against the Block's current zone set on
-    every call, so a genuinely invalidated zone's standing block clears
-    itself automatically without any separate housekeeping step."""
+         buffer_points: float) -> Optional[tuple[str, str]]:
+    """Returns (reason, zone_id) if blocked -- either a standing sticky
+    block from an earlier cycle, or a fresh proximity breach discovered
+    THIS cycle (which immediately becomes sticky too) -- else None. A
+    LONG checks every NLB (bearish OB) zone's own BOTTOM edge; a SHORT
+    checks every NSB (bullish OB) zone's own TOP edge. Also prunes
+    `sticky` against the Block's current zone set on every call, so a
+    genuinely invalidated zone's standing block clears itself
+    automatically without any separate housekeeping step.
+
+    zone_id is returned (2026-09-15, added alongside the reason string)
+    specifically so callers can key their own already_notified()/
+    mark_notified() dedup off the exact same identity sticky already
+    uses -- see module docstring's own NOTIFICATION DEDUP section for
+    why that dedup exists. This function itself does NOT decide whether
+    to log/alert -- it only ever reports state; callers own that
+    decision since only they know their own component's log file/alert
+    channel."""
     target_role = "no_long_buffer" if direction == 1 else "no_short_buffer"
     store = nlb_nsb_block.BlockStore(block_state_file)
     zones = store.zones()
@@ -99,13 +139,15 @@ def check(block_state_file: str, sticky: ICTGuardStickyStore, direction: int, en
         if zone.role != target_role:
             continue
         if sticky.is_blocked(zone.zone_id):
-            return (f"{zone.timeframe_name} {zone.role} [{zone.btm:.3f}-{zone.top:.3f}] -- "
-                   f"standing block (was too close at least once; doesn't clear just because "
-                   f"price drifted back out)")
+            reason = (f"{zone.timeframe_name} {zone.role} [{zone.btm:.3f}-{zone.top:.3f}] -- "
+                     f"standing block (was too close at least once; doesn't clear just because "
+                     f"price drifted back out)")
+            return reason, zone.zone_id
         edge = zone.btm if target_role == "no_long_buffer" else zone.top
         gap = abs(entry_price - edge)
         if gap < buffer_points:
             sticky.mark_blocked(zone.zone_id)
-            return (f"{zone.timeframe_name} {zone.role} [{zone.btm:.3f}-{zone.top:.3f}] "
-                   f"edge@{edge:.3f} is only {gap:.3f}pts away")
+            reason = (f"{zone.timeframe_name} {zone.role} [{zone.btm:.3f}-{zone.top:.3f}] "
+                     f"edge@{edge:.3f} is only {gap:.3f}pts away")
+            return reason, zone.zone_id
     return None

@@ -309,14 +309,21 @@ def _open_position(cfg: TMICTConfig, sticky: ict_guard.ICTGuardStickyStore, dire
     docstring for why this genuinely applies to TM-ICT too, unlike
     RM-ICT's exemption. entry_price is the signal's own "qualifying
     entry level" (see TMICTSignal.entry_price), not a fresh live read."""
-    block_reason = ict_guard.check(cfg.nlb_nsb_block_state_file, sticky, direction, entry_price,
-                                   cfg.ict_guard_buffer_points)
-    if block_reason is not None:
-        label = "ICT Long Blocked" if direction == 1 else "ICT Short Blocked"
-        msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({tag}) skipped"
-        print(f"[V5S-TM-ICT-ENTRY] {msg}")
-        decision_log.log(cfg.decision_log_file, "ict_guard_blocked", direction=_DIR_LABEL[direction],
-                         tag=tag, reason=block_reason, entry_price=entry_price)
+    block = ict_guard.check(cfg.nlb_nsb_block_state_file, sticky, direction, entry_price,
+                            cfg.ict_guard_buffer_points)
+    if block is not None:
+        block_reason, block_zone_id = block
+        # Logged ONCE per zone_id, not every cycle it stays blocked --
+        # see ict_guard.py's own NOTIFICATION DEDUP docstring. This
+        # component was the worst offender found live: one standing D1
+        # block alone produced ~54,000 decision_log rows in a single day.
+        if not sticky.already_notified(block_zone_id):
+            sticky.mark_notified(block_zone_id)
+            label = "ICT Long Blocked" if direction == 1 else "ICT Short Blocked"
+            msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({tag}) skipped"
+            print(f"[V5S-TM-ICT-ENTRY] {msg}")
+            decision_log.log(cfg.decision_log_file, "ict_guard_blocked", direction=_DIR_LABEL[direction],
+                             tag=tag, reason=block_reason, entry_price=entry_price)
         return False
 
     print(f"[V5S-TM-ICT-ENTRY] {_DIR_LABEL[direction]} ({tag}) {ref_desc} sl={sl:.3f}")

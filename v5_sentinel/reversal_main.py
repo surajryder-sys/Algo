@@ -195,14 +195,20 @@ def _open_position(cfg: RMConfig, sticky: ict_guard.ICTGuardStickyStore, compone
     if component == "STR":
         bid, ask = broker.get_tick_price(cfg.symbol)
         entry_price = ask if direction == 1 else bid
-        block_reason = ict_guard.check(cfg.nlb_nsb_block_state_file, sticky, direction, entry_price,
-                                       cfg.ict_guard_buffer_points)
-        if block_reason is not None:
-            label = "ICT Long Blocked" if direction == 1 else "ICT Short Blocked"
-            msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({tag}) skipped"
-            print(f"[V5S-{component}-ENTRY] {msg}")
-            decision_log.log(cfg.decision_log_file, "ict_guard_blocked", component=component,
-                             direction=_DIR_LABEL[direction], tag=tag, reason=block_reason, entry_price=entry_price)
+        block = ict_guard.check(cfg.nlb_nsb_block_state_file, sticky, direction, entry_price,
+                                cfg.ict_guard_buffer_points)
+        if block is not None:
+            block_reason, block_zone_id = block
+            # Logged ONCE per zone_id, not every cycle it stays blocked --
+            # see ict_guard.py's own NOTIFICATION DEDUP docstring.
+            if not sticky.already_notified(block_zone_id):
+                sticky.mark_notified(block_zone_id)
+                label = "ICT Long Blocked" if direction == 1 else "ICT Short Blocked"
+                msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({tag}) skipped"
+                print(f"[V5S-{component}-ENTRY] {msg}")
+                decision_log.log(cfg.decision_log_file, "ict_guard_blocked", component=component,
+                                 direction=_DIR_LABEL[direction], tag=tag, reason=block_reason,
+                                 entry_price=entry_price)
             return False
 
     comment = _entry_comment(component, tag)

@@ -186,6 +186,33 @@ class M5FlipEligibility:
             self._save()
 
 
+class M3SignalNotifier:
+    """In-memory 'log once per distinct signal, not every cycle it keeps
+    qualifying' gate for the m3_signal decision_log entry -- 2026-09-15,
+    found live, same class of spam as ict_guard.py's own NOTIFICATION
+    DEDUP (see that module's docstring): m3_signal was being logged on
+    EVERY cycle a QUALIFY/PULLBACK/FRESH condition kept holding (e.g.
+    price sitting inside the +/-2pt qualifying band for many consecutive
+    cycles), not just once when it first qualified -- one M5 event alone
+    produced ~1,944 rows over a single afternoon while permanently
+    ICT-Guard-blocked. Logs again the moment the underlying signal
+    actually CHANGES (a different trigger_type, direction, or parent
+    event_time) -- e.g. QUALIFY flickering out and back in for the SAME
+    parent event does NOT re-log, since the key is unchanged. Not
+    persisted -- a restart re-logging once is useful signal ("still
+    qualifying after restart"), not noise, matching bridge_flip.
+    StaleAlertTracker's own precedent."""
+
+    def __init__(self):
+        self._last_key: Optional[tuple] = None
+
+    def should_log(self, key: tuple) -> bool:
+        if key != self._last_key:
+            self._last_key = key
+            return True
+        return False
+
+
 def _far_line_for(symbol: str, tf_minutes: int, direction: int) -> Optional[float]:
     result = far_near(symbol, tf_minutes, direction)
     return None if result is None else result[0]
@@ -241,15 +268,25 @@ def _open_position(cfg: Config, sticky: ict_guard.ICTGuardStickyStore, direction
     hard way more than once (see RM's own _open_position docstrings)."""
     bid, ask = broker.get_tick_price(cfg.symbol)
     entry_price = ask if direction == 1 else bid
-    block_reason = ict_guard.check(cfg.nlb_nsb_block_state_file, sticky, direction, entry_price,
-                                   cfg.ict_guard_buffer_points)
-    if block_reason is not None:
-        label = "ICT Long Blocked" if direction == 1 else "ICT Short Blocked"
-        msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({comment}) skipped"
-        print(f"[V5S-ENTRY] {msg}")
-        _send_critical_alert(f"\U0001F6D1 {msg}")
-        decision_log.log(cfg.decision_log_file, "ict_guard_blocked", direction=_DIR_LABEL[direction],
-                         comment=comment, reason=block_reason, entry_price=entry_price)
+    block = ict_guard.check(cfg.nlb_nsb_block_state_file, sticky, direction, entry_price,
+                            cfg.ict_guard_buffer_points)
+    if block is not None:
+        block_reason, block_zone_id = block
+        # Logged/alerted ONCE per zone_id, not every cycle it stays
+        # blocked -- 2026-09-15, found live: a single standing block
+        # produced thousands of decision_log rows AND thousands of real
+        # Telegram sends to the critical-alerts channel (see ict_guard.
+        # py's own NOTIFICATION DEDUP docstring). The block itself is
+        # still enforced identically every cycle below (return False) --
+        # only the human-facing notification is deduped.
+        if not sticky.already_notified(block_zone_id):
+            sticky.mark_notified(block_zone_id)
+            label = "ICT Long Blocked" if direction == 1 else "ICT Short Blocked"
+            msg = f"{label} -- {block_reason} -- {_DIR_LABEL[direction]} ({comment}) skipped"
+            print(f"[V5S-ENTRY] {msg}")
+            _send_critical_alert(f"\U0001F6D1 {msg}")
+            decision_log.log(cfg.decision_log_file, "ict_guard_blocked", direction=_DIR_LABEL[direction],
+                             comment=comment, reason=block_reason, entry_price=entry_price)
         return False
 
     print(f"[V5S-ENTRY] {_DIR_LABEL[direction]} ({comment}) {ref_desc} sl={sl:.3f}")
@@ -403,7 +440,7 @@ def _check_stale(cfg: Config, stale_tracker: StaleAlertTracker) -> None:
 
 def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager,
             eligibility: M5FlipEligibility, tracker: BridgeBarFlipTracker, stale_tracker: StaleAlertTracker,
-            sticky: ict_guard.ICTGuardStickyStore) -> None:
+            sticky: ict_guard.ICTGuardStickyStore, m3_notifier: M3SignalNotifier) -> None:
     _check_stale(cfg, stale_tracker)
 
     parent = structure.compute_structure_signal(tracker, cfg.symbol, _M5_MINUTES)
@@ -425,11 +462,15 @@ def run_once(cfg: Config, sl_mgr: sl_manager.SLManager, tm_mgr: trade_manager.Tr
             comment = _comment_for_tag(tag)
             sl = parent.sl_value - cfg.sl_buffer if parent.direction == 1 else parent.sl_value + cfg.sl_buffer
 
-            print(f"[V5S] M3 {trigger_type} -> {_DIR_LABEL[parent.direction]} "
-                  f"(parent_source={parent.source}, parent_event={parent.event_time}, {ref_desc})")
-            decision_log.log(cfg.decision_log_file, "m3_signal", trigger_type=trigger_type,
-                             direction=_DIR_LABEL[parent.direction], parent_source=parent.source,
-                             parent_event_time=parent.event_time, sl=sl, ref=ref_desc)
+            # Logged ONCE per distinct (trigger_type, direction,
+            # parent_event_time) -- not every cycle it keeps qualifying.
+            # See M3SignalNotifier's own docstring.
+            if m3_notifier.should_log((trigger_type, parent.direction, parent.event_time)):
+                print(f"[V5S] M3 {trigger_type} -> {_DIR_LABEL[parent.direction]} "
+                      f"(parent_source={parent.source}, parent_event={parent.event_time}, {ref_desc})")
+                decision_log.log(cfg.decision_log_file, "m3_signal", trigger_type=trigger_type,
+                                 direction=_DIR_LABEL[parent.direction], parent_source=parent.source,
+                                 parent_event_time=parent.event_time, sl=sl, ref=ref_desc)
 
             if position is None:
                 if _open_position(cfg, sticky, parent.direction, sl, comment, ref_desc):
@@ -475,11 +516,12 @@ def main() -> None:
     tracker = BridgeBarFlipTracker(cfg.bridge_bar_flip_state_file)
     stale_tracker = StaleAlertTracker()
     sticky = ict_guard.ICTGuardStickyStore(cfg.ict_guard_sticky_state_file)
+    m3_notifier = M3SignalNotifier()
 
     try:
         while True:
             try:
-                run_once(cfg, sl_mgr, tm_mgr, eligibility, tracker, stale_tracker, sticky)
+                run_once(cfg, sl_mgr, tm_mgr, eligibility, tracker, stale_tracker, sticky, m3_notifier)
             except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
                 print(f"[V5S] cycle error: {exc!r}")
             # Written every iteration regardless of whether run_once
