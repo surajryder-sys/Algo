@@ -428,41 +428,56 @@ void DrawSweepMarker(const int i, const datetime &time[], const double price,
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
 }
 
-#define STATUS_LABEL_NAME "CISD_StatusLabel"
+#define STATUS_LABEL_NAME  "CISD_StatusLabel"
+#define STATUS_LABEL_NAME2 "CISD_StatusLabel2"
+
+//+------------------------------------------------------------------+
+//| One line of the status label -- pulled out so both lines share    |
+//| identical object setup, only name/yDistance/text differ.          |
+//+------------------------------------------------------------------+
+void SetStatusLine(const string name, const int yDistance, const string text, const color clr)
+{
+   if(ObjectFind(0, name) < 0)
+   {
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 10);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, yDistance);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 11);
+      ObjectSetString(0, name, OBJPROP_FONT, "Arial Bold");
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   }
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+}
 
 //+------------------------------------------------------------------+
 //| Unambiguous on-chart proof-of-life -- same corner-label style as  |
 //| ATRTrailDual_MajorMinor.mq5's DisplayTrailValue, placed lower      |
-//| (yDistance 70) to sit below that indicator's own ATR2/ATR300       |
+//| (yDistance 70/90) to sit below that indicator's own ATR2/ATR300    |
 //| labels rather than overlapping them. Added 2026-09-15: on a chart  |
 //| with 5+ overlaid indicators, colored dots/lines can be genuinely   |
 //| impossible to tell apart by eye -- this settles "is it actually    |
-//| generating anything" without hunting through the Object List.     |
+//| generating anything" without hunting through the Object List.      |
+//|                                                                     |
+//| TWO short lines instead of one long one (2026-09-15, confirmed     |
+//| live): a single line long enough to spell out every field ran past |
+//| the visible edge of a narrower chart pane -- this user moves chart |
+//| windows across 4 differently-sized monitors (see project notes),   |
+//| so a fixed-width single line was never going to reliably fit.      |
 //+------------------------------------------------------------------+
 void DisplayStatus()
 {
-   if(ObjectFind(0, STATUS_LABEL_NAME) < 0)
-   {
-      ObjectCreate(0, STATUS_LABEL_NAME, OBJ_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-      ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_XDISTANCE, 10);
-      ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_YDISTANCE, 70);
-      ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_FONTSIZE, 11);
-      ObjectSetString(0, STATUS_LABEL_NAME, OBJPROP_FONT, "Arial Bold");
-      ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_HIDDEN, true);
-   }
-
    string trend_text = (g_trend > 0) ? "BULLISH" : (g_trend < 0) ? "BEARISH" : "NONE";
    string cisd_text  = (g_last_cisd_type == 1) ? "Bearish" : (g_last_cisd_type == 2) ? "Bullish" : "none yet";
    color  clr = (g_trend > 0) ? BullColor : (g_trend < 0) ? BearColor : clrSilver;
 
-   string text = StringFormat("CISD | SwingHigh:%d SwingLow:%d | Trend:%s | Last CISD:%s%s",
-                               ArraySize(sh_startIdx), ArraySize(sl_startIdx), trend_text, cisd_text,
-                               g_last_sweep ? " (sweep)" : "");
+   string line1 = StringFormat("CISD  SH:%d SL:%d  Trend:%s", ArraySize(sh_startIdx), ArraySize(sl_startIdx), trend_text);
+   string line2 = StringFormat("Last CISD: %s%s", cisd_text, g_last_sweep ? " (sweep)" : "");
 
-   ObjectSetString(0, STATUS_LABEL_NAME, OBJPROP_TEXT, text);
-   ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_COLOR, clr);
+   SetStatusLine(STATUS_LABEL_NAME,  70, line1, clr);
+   SetStatusLine(STATUS_LABEL_NAME2, 90, line2, clr);
 }
 
 //+------------------------------------------------------------------+
@@ -706,6 +721,7 @@ int OnCalculate(const int rates_total,
 void OnDeinit(const int reason)
 {
    ObjectDelete(0, STATUS_LABEL_NAME);
+   ObjectDelete(0, STATUS_LABEL_NAME2);
 
    if(reason == REASON_REMOVE)
    {
