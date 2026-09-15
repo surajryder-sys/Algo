@@ -428,6 +428,43 @@ void DrawSweepMarker(const int i, const datetime &time[], const double price,
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
 }
 
+#define STATUS_LABEL_NAME "CISD_StatusLabel"
+
+//+------------------------------------------------------------------+
+//| Unambiguous on-chart proof-of-life -- same corner-label style as  |
+//| ATRTrailDual_MajorMinor.mq5's DisplayTrailValue, placed lower      |
+//| (yDistance 70) to sit below that indicator's own ATR2/ATR300       |
+//| labels rather than overlapping them. Added 2026-09-15: on a chart  |
+//| with 5+ overlaid indicators, colored dots/lines can be genuinely   |
+//| impossible to tell apart by eye -- this settles "is it actually    |
+//| generating anything" without hunting through the Object List.     |
+//+------------------------------------------------------------------+
+void DisplayStatus()
+{
+   if(ObjectFind(0, STATUS_LABEL_NAME) < 0)
+   {
+      ObjectCreate(0, STATUS_LABEL_NAME, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_XDISTANCE, 10);
+      ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_YDISTANCE, 70);
+      ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_FONTSIZE, 11);
+      ObjectSetString(0, STATUS_LABEL_NAME, OBJPROP_FONT, "Arial Bold");
+      ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_HIDDEN, true);
+   }
+
+   string trend_text = (g_trend > 0) ? "BULLISH" : (g_trend < 0) ? "BEARISH" : "NONE";
+   string cisd_text  = (g_last_cisd_type == 1) ? "Bearish" : (g_last_cisd_type == 2) ? "Bullish" : "none yet";
+   color  clr = (g_trend > 0) ? BullColor : (g_trend < 0) ? BearColor : clrSilver;
+
+   string text = StringFormat("CISD | SwingHigh:%d SwingLow:%d | Trend:%s | Last CISD:%s%s",
+                               ArraySize(sh_startIdx), ArraySize(sl_startIdx), trend_text, cisd_text,
+                               g_last_sweep ? " (sweep)" : "");
+
+   ObjectSetString(0, STATUS_LABEL_NAME, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, STATUS_LABEL_NAME, OBJPROP_COLOR, clr);
+}
+
 //+------------------------------------------------------------------+
 //| Full per-bar orchestration for ONE closed bar i -- steps run in   |
 //| the exact same order as the Pine script's top-to-bottom execution |
@@ -641,6 +678,7 @@ int OnCalculate(const int rates_total,
       ResetAllCISDState();
 
    int last_closed = rates_total - 2;
+   int watermark_before = g_confirmed_upto;
 
    // Never reprocess a bar twice, ever -- see this file's header for why.
    for(int i = g_confirmed_upto + 1; i <= last_closed; i++)
@@ -651,12 +689,24 @@ int OnCalculate(const int rates_total,
 
    PublishBridgeFile(last_closed, time, close);
 
+   // DisplayStatus's own text only ever changes as a RESULT of the loop
+   // above (swing counts / trend / last-cisd are all bar-close-driven,
+   // never tick-reactive) -- so only touch the label object when that
+   // loop actually processed at least one bar. Calling it unconditionally
+   // every tick was pure per-tick object-property churn for a label whose
+   // content couldn't have changed, exactly what this project's own
+   // lightweight-indicator convention warns against.
+   if(g_confirmed_upto != watermark_before)
+      DisplayStatus();
+
    return(rates_total);
 }
 
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   ObjectDelete(0, STATUS_LABEL_NAME);
+
    if(reason == REASON_REMOVE)
    {
       ObjectsDeleteAll(0, PREFIX_SWING_HIGH);
