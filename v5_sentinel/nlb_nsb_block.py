@@ -107,6 +107,69 @@ from typing import Optional
 
 from v5_sentinel import ob_levels
 
+# Seconds-per-bar, and each timeframe's OWN expected remainder within
+# that period -- see _is_aligned_to_timeframe()'s own docstring for why
+# the remainder isn't just 0 for every timeframe. "1D" deliberately has
+# NO entry -- see that docstring's own D1 note.
+#
+# Derived 2026-09-16 by tallying start_time % period_seconds across
+# EVERY zone currently in the live Block, per timeframe, and taking the
+# clear plurality value -- NOT from MT5's own copy_rates_from_pos
+# (an EARLIER attempt to cross-check against that gave 0 for every
+# timeframe including H4, which directly contradicted H4's own zone
+# data showing a consistent 3600s/1hr offset across 8 months of real
+# zones -- MT5's broker feed and TradingView's own OB-indicator feed
+# turned out to run on DIFFERENT vendor session grids for at least H4,
+# so MT5's own candle grid is the wrong reference to validate
+# TradingView-sourced zones against).
+_TIMEFRAME_SECONDS = {"240": 14400, "60": 3600, "30": 1800, "15": 900, "5": 300}
+_TIMEFRAME_OFFSET = {"240": 3600, "60": 0, "30": 0, "15": 0, "5": 0}
+# A start_time exactly ONE SECOND past the expected offset is a known,
+# benign, unexplained-but-consistent variant seen throughout this
+# Block's own real zones (paired entries like ...1786082400/...
+# 1786082401) -- NOT corruption, tolerated rather than rejected.
+_ALIGNMENT_TOLERANCE_SECONDS = 1
+
+
+def _is_aligned_to_timeframe(start_time: int, timeframe: str) -> bool:
+    """True iff start_time is a genuinely valid candle-open for THIS
+    timeframe's own bar grid (within _ALIGNMENT_TOLERANCE_SECONDS).
+    Added 2026-09-16, found live TWICE the same evening: a real RM-ICT
+    SELL fired off an "H1" zone [4354.140-4356.095], start_time=
+    1789565220 (13:27:00 UTC) -- 1620 seconds past H1's own expected
+    0-offset (impossible as a genuine H1 open), but a clean M3 boundary
+    (mod 180 = 0) -- user's own words: "there is no ob on H1, bearish
+    ob, i dont see on chart at all... we have a big problem with
+    scraper, its reporting false zones." This is a STRONGER defense
+    than _has_cross_timeframe_duplicate() below: that guard only catches
+    a SECOND copy of an already-existing zone, so a false zone seeded
+    under the WRONG timeframe with no other copy anywhere else in the
+    Block sailed straight through it. This check rejects a false zone
+    on its own FIRST and only seeding attempt, no duplicate required.
+
+    NOT applied to "1D" or M1/M3 (M1/M3 aren't in ob_levels.TIMEFRAMES
+    at all, never seeded here) -- D1's own remainder distribution across
+    the live Block showed NO single clear plurality (several comparably-
+    sized clusters, spread over many months), unlike every other
+    timeframe, which each had one dominant value. Not enough confidence
+    to validate D1 without risking false rejections of genuine zones;
+    left uninvestigated for now rather than guessed at.
+
+    M30 is a genuine edge case, not a bug in this check: M30's own grid
+    is exactly 2x M15's, so a mislabeled M15 zone lands on M30's own
+    valid boundary (remainder 0) roughly half the time by pure
+    coincidence -- unprovable via alignment alone (that half needs
+    _has_cross_timeframe_duplicate() to catch it, if an M15 copy also
+    exists to compare against). The OTHER half (remainder 900, exactly
+    M30's own half-period) is unambiguous and rejected outright -- a
+    genuine M30 bar can never open there."""
+    seconds = _TIMEFRAME_SECONDS.get(timeframe)
+    if seconds is None:
+        return True  # "1D", or any timeframe we don't validate -- don't block on something we can't check
+    offset = _TIMEFRAME_OFFSET[timeframe]
+    remainder = (start_time - offset) % seconds
+    return remainder <= _ALIGNMENT_TOLERANCE_SECONDS or remainder >= seconds - _ALIGNMENT_TOLERANCE_SECONDS
+
 
 @dataclass
 class BlockZone:
@@ -194,21 +257,27 @@ class BlockStore:
         zone [4273.985-4276.775], start_time=1789484760, got seeded
         under H4, H1, AND M15 too over a ~2 hour window -- proven
         impossible as genuine native zones on those timeframes (that
-        start_time is 15:06:00 UTC, a valid M3 bar boundary but not
-        aligned to H1's or M15's own clean hour-multiple/900s grids, and
-        H4's own alignment scheme is inconsistent enough in this
-        instrument's own history that a boundary check risks false
-        positives -- an EXACT match across timeframes needs no such
-        check to be certain it's the same misattributed zone, not a
-        coincidence). Root cause not fully nailed down -- window sizing
-        was ruled out (confirmed fullscreen for two days) -- most likely
+        start_time is 15:06:00 UTC, a valid M3 bar boundary, confirmed
+        misaligned to every other timeframe's own grid -- see
+        _is_aligned_to_timeframe(), which now catches this class of bug
+        directly and is checked FIRST in sync_from_scraper(), before
+        this). This cross-timeframe check stays as a SECOND layer for
+        the case _is_aligned_to_timeframe() can't cover on its own: two
+        DIFFERENT timeframes whose own bar grids happen to share a
+        common multiple (e.g. an M15 zone's start_time is also,
+        incidentally, a valid M3 boundary -- M15 is 5x M3 -- so
+        alignment alone wouldn't catch a real M15 zone mislabeled as
+        M3). Root cause not fully nailed down -- window sizing was
+        ruled out (confirmed fullscreen for two days), a longer post-
+        focus settle wait was tried 2026-09-16 -- most likely
         tv_scraper's own Data Window re-render lagging a pane-focus
-        switch past its own settling window, still under investigation.
-        This is a defensive backstop independent of that root cause: a
-        start_time is only ever a valid native candle-open for ONE
-        timeframe's own bar grid, so an EXACT match across two different
-        timeframes can only mean a misattribution, never two genuinely
-        distinct zones."""
+        switch past its own settling window, still recurring after that
+        change, still under investigation. This is a defensive backstop
+        independent of that root cause: a start_time is only ever a
+        valid native candle-open for ONE timeframe's own bar grid at
+        its OWN finest resolution, so an EXACT match across two
+        different timeframes can only mean a misattribution, never two
+        genuinely distinct zones."""
         for z in self._zones.values():
             if z.symbol == symbol and z.timeframe != timeframe and z.direction == direction \
                     and z.formed_time == start_time \
@@ -245,6 +314,20 @@ class BlockStore:
                         # once tv_scraper's 2-poll correction rekeys it.
                         continue
                     start_time = int(z["start_time"])
+                    if not _is_aligned_to_timeframe(start_time, tf):
+                        # A zone whose own start_time isn't even a valid
+                        # candle-open for the timeframe it's CLAIMED under
+                        # -- provably a misattribution, not a real zone
+                        # for this timeframe at all. See
+                        # _is_aligned_to_timeframe()'s own docstring for
+                        # the real incident that found this. REJECTED,
+                        # never seeded, regardless of whether a duplicate
+                        # exists anywhere else.
+                        print(f"[V5S-BLOCK] zone {symbol}|{tf}|{direction}|{start_time} "
+                              f"[{float(z['btm']):.3f}-{float(z['top']):.3f}] REJECTED -- "
+                              f"start_time isn't a valid {ob_levels.TIMEFRAME_NAMES.get(tf, tf)} "
+                              f"candle boundary, provably not a genuine zone for this timeframe")
+                        continue
                     zid = _zone_id(symbol, tf, direction, start_time)
                     if zid in self._zones:
                         continue  # already ours -- our own state governs from here, not the scraper's
