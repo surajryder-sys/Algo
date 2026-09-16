@@ -504,7 +504,22 @@ def run_once_pane(page: Page, zones: ZoneStore, first_seen: FirstSeenStore,
     # The Data Window sidebar doesn't repaint for the newly-focused pane
     # instantly -- a short wait for TradingView to actually repaint avoids
     # capturing the PREVIOUSLY focused pane's still-displayed data.
-    time.sleep(0.4)
+    # Lengthened 0.4s -> 1.5s 2026-09-16 (found live: the SAME real OB
+    # zone got seeded under FOUR different timeframes -- M3, H4, H1, M15
+    # -- over a ~2 hour window; the reported symbol/timeframe header text
+    # updates fast on focus, but Pine's own indicator recalculation for
+    # the newly-focused pane can still be lagging when _collect_data_
+    # window_text()'s own 16-step scroll (another ~3.4s, see that
+    # function's own docstring) starts reading zone values -- both this
+    # read AND its own later "must-agree" confirm re-read can converge on
+    # the SAME stale-but-internally-consistent PREVIOUS pane's data, which
+    # passes that check without ever catching the mislabel. Widening this
+    # gap first, as the smallest, safest, most reversible change, before
+    # touching any of the settle/stuck-pane logic itself -- see nlb_nsb_
+    # block.py's own _has_cross_timeframe_duplicate() for the defensive
+    # backstop that catches this regardless of whether this alone fixes
+    # it.
+    time.sleep(1.5)
     _open_data_window(page)
     text = _collect_data_window_text(page)
     parsed = parse_data_window(text)
