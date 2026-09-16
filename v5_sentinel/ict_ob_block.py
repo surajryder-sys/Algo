@@ -28,6 +28,18 @@ zone across BOTH sources wins whenever more than one qualifies at once
 and now suddenly we see a bullish ob on MT5, M3 timeframe, but tv bridge
 doesn't get any, yes we can go based on MT5 confirmations").
 
+PRUNING (sync(), added 2026-09-17, TV source only): every sync() call
+also removes any "tv"-sourced zone this store is holding that
+tv_scraper no longer reports at all -- confirmed with the user: "we
+only need the zones what we see on chart... rest we have to keep
+deleting what we dont see on chart." Found live the same evening as
+nlb_nsb_block.py's own matching fix: a real SELL fired off a zone
+formed 12 days earlier, long gone from tv_scraper's own current view,
+but still sitting here since this store never re-checked against that
+ongoing truth after its own initial copy. Deliberately NOT applied to
+"mt5"-sourced zones (ob_bridge_lite) -- a different, MT5-native
+indicator, not "the scraper" the user's own words were about.
+
 SEEDING (sync(), one-time per zone): a zone already known here (by its
 own stable id) is NEVER re-seeded or overwritten -- our own top/btm/
 entry-plan governs its whole life, independent of whatever either
@@ -170,16 +182,28 @@ class ICTBlockStore:
     def _save(self) -> None:
         self._path.write_text(json.dumps({zid: asdict(z) for zid, z in self._zones.items()}))
 
-    def sync(self, zone_state_file: str, symbol: str, tf_minutes: int, bid: float, ask: float) -> int:
+    def sync(self, zone_state_file: str, symbol: str, tf_minutes: int, bid: float, ask: float) -> tuple[int, int]:
         """Seeds every zone either source currently reports that this
-        block has never seen before (by its own stable id). Returns how
-        many new zones were seeded this call."""
+        block has never seen before (by its own stable id), then prunes
+        every TV-sourced zone this block is holding that tv_scraper no
+        longer reports at all. Returns (added, pruned).
+
+        PRUNING added 2026-09-17, scoped to the "tv" source only -- see
+        nlb_nsb_block.py's own BlockStore.sync_from_scraper() docstring
+        for the full confirmed design ("we only need the zones what we
+        see on chart... rest we have to keep deleting what we dont see
+        on chart"), the same architecture change applied here. NOT
+        applied to "mt5"-sourced zones (ob_bridge_lite) -- that's a
+        different, MT5-native indicator, not "the scraper" the user's
+        own words were about; its own retention behavior is untouched
+        for now."""
         added = 0
-        added += self._sync_tv(zone_state_file, symbol, tf_minutes, bid, ask)
+        tv_added, tv_pruned = self._sync_tv(zone_state_file, symbol, tf_minutes, bid, ask)
+        added += tv_added
         added += self._sync_mt5(symbol, tf_minutes, bid, ask)
-        if added:
+        if added or tv_pruned:
             self._save()
-        return added
+        return added, tv_pruned
 
     def _seed(self, source: str, symbol: str, tf_minutes: int, direction: str, top: float, btm: float,
               start_time: int, bid: float, ask: float) -> bool:
@@ -198,15 +222,17 @@ class ICTBlockStore:
         )
         return True
 
-    def _sync_tv(self, zone_state_file: str, symbol: str, tf_minutes: int, bid: float, ask: float) -> int:
+    def _sync_tv(self, zone_state_file: str, symbol: str, tf_minutes: int,
+                bid: float, ask: float) -> tuple[int, int]:
         path = Path(zone_state_file)
         if not path.exists():
-            return 0
+            return 0, 0
         try:
             raw = json.loads(path.read_text())
         except (json.JSONDecodeError, OSError):
-            return 0
+            return 0, 0
         added = 0
+        live_zone_ids: set[str] = set()
         for direction in ("bull", "bear"):
             key = f"{symbol}|{tf_minutes}|{direction}"
             for z in raw.get(key, {}).values():
@@ -226,10 +252,20 @@ class ICTBlockStore:
                     # it resurfaces here as a fresh, legitimately
                     # identified zone on its own next sync().
                     continue
+                start_time = int(z["start_time"])
+                live_zone_ids.add(_zone_id("tv", direction, start_time))
                 if self._seed("tv", symbol, tf_minutes, direction, float(z["top"]), float(z["btm"]),
-                              int(z["start_time"]), bid, ask):
+                              start_time, bid, ask):
                     added += 1
-        return added
+
+        stale = [zid for zid, zone in self._zones.items()
+                if zone.source == "tv" and zid not in live_zone_ids]
+        for zid in stale:
+            zone = self._zones.pop(zid)
+            print(f"[V5S-TM-ICT-BLOCK] zone {zid} [{zone.btm:.3f}-{zone.top:.3f}] PRUNED -- "
+                  f"scraper no longer reports it (not on chart anymore)")
+
+        return added, len(stale)
 
     def _sync_mt5(self, symbol: str, tf_minutes: int, bid: float, ask: float) -> int:
         snap = ob_bridge_lite.read_lite(symbol, tf_minutes)

@@ -494,7 +494,11 @@ def run_once(cfg: TMICTConfig, sl_mgr: ict_sl_manager.ICTSLManager, tm_mgr: trad
             store: ict_ob_block.ICTBlockStore, eligibility: ICTEligibilityStore,
             tracker: BridgeBarFlipTracker, sticky: ict_guard.ICTGuardStickyStore) -> None:
     bid, ask = broker.get_tick_price(cfg.symbol)
-    store.sync(cfg.tv_zone_state_file, cfg.symbol, _M3_MINUTES, bid, ask)
+    added, pruned = store.sync(cfg.tv_zone_state_file, cfg.symbol, _M3_MINUTES, bid, ask)
+    if added:
+        print(f"[V5S-TM-ICT] seeded {added} new zone(s) from scraper")
+    if pruned:
+        print(f"[V5S-TM-ICT] pruned {pruned} zone(s) no longer reported by scraper")
     store.update_live(bid, ask)
 
     signals = find_signals(cfg, store, eligibility, tracker, bid, ask)

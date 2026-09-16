@@ -57,9 +57,11 @@ def load_config() -> WatcherConfig:
 
 
 def run_once(cfg: WatcherConfig, store: BlockStore) -> None:
-    added = store.sync_from_scraper(cfg.zone_state_file, cfg.symbol)
+    added, pruned = store.sync_from_scraper(cfg.zone_state_file, cfg.symbol)
     if added:
         print(f"[V5S-NLBNSB] seeded {added} new zone(s) from scraper")
+    if pruned:
+        print(f"[V5S-NLBNSB] pruned {pruned} zone(s) no longer reported by scraper")
 
     tick = mt5.symbol_info_tick(cfg.symbol)
     if tick is None:

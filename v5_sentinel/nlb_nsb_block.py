@@ -36,10 +36,40 @@ SEEDING (one-time, per zone, the moment it's first seen -- sync_from_scraper()):
   - A zone already present in this block (by its own stable id) is NEVER
     re-seeded or overwritten from the scraper again -- once a zone is
     ours, our own top/btm/retested state governs for its entire life
-    here, completely independent of the scraper's own copy (which may
-    still show it on-chart, may mark it retested later on a bar close,
-    or may remove it on its own delayed mitigation logic -- none of that
-    is read again after seeding).
+    here, independent of whatever the scraper's own copy's FIELDS do
+    afterward (may mark it retested later on a bar close, etc. -- none
+    of that is read again after seeding). ITS CONTINUED EXISTENCE is a
+    different matter, though -- see PRUNING below (added 2026-09-17):
+    this store's own copy is deleted once the scraper stops reporting
+    the zone AT ALL, even though its own fields stay un-re-read the
+    whole time it does exist.
+
+PRUNING (also sync_from_scraper(), added 2026-09-17): every zone this
+block is holding that the scraper no longer reports at all gets
+removed, EVEN one currently holding a sticky ICT Guard block (confirmed
+with the user over keeping such zones around: ict_guard.py's own
+ICTGuardStickyStore.prune() already clears a standing block the moment
+its zone leaves the Block, by design -- this is that existing mechanism
+finally exercised as intended). Confirmed with the user: "at any point
+of given time, scraper should give us the data of only 4 bullish ob's
+and 4 bearish ob's from the all timeframes... no other zones should be
+kept with neither scraper nor the python memory... we only need the
+zones what we see on chart... rest we have to keep deleting what we
+dont see on chart." Before this, seeding was one-way and permanent --
+confirmed live: 232 zones held here against a handful ever actually
+visible on chart at once, most of which tv_scraper's own ZoneStore had
+already genuinely deleted (zone_store.py's own apply_mitigated()
+removes a zone entirely once missing for 2 consecutive polls) long
+before this store ever noticed. Already-traded eligibility
+(ICTEligibilityStore) is UNAFFECTED by pruning -- it stores its own
+top/btm range independently at trade time, not a live reference into
+this store, so pruning a zone here never weakens overlaps_traded()'s
+own protection against re-trading the same real zone if it later
+flickers back under a new start_time. Live invalidation (price trading
+through a zone, via MT5's own live bid/ask -- see update_live() below)
+stays completely separate and unchanged by this: "mitigation/
+invalidation we can do even before Tv publishes, through liverates of
+meta trader" was already exactly how it worked.
   - A zone whose own "formed_time_confirmed" reads False is NEVER seeded
     at all (2026-09-14, found live: a real RM-ICT trade fired off an M5
     zone with this flag False whose top edge was already above live
@@ -286,13 +316,45 @@ class BlockStore:
                 return z.zone_id
         return None
 
-    def sync_from_scraper(self, zone_state_file: str, symbol: str = "XAUUSD") -> int:
+    def sync_from_scraper(self, zone_state_file: str, symbol: str = "XAUUSD") -> tuple[int, int]:
         """Seeds every zone the scraper currently reports that this block
-        has never seen before (by its own stable id) -- never touches a
-        zone already present here. Returns how many new zones were
-        seeded this call (0 most cycles -- new OBs don't form often)."""
+        has never seen before (by its own stable id), THEN prunes every
+        zone this block is holding that the scraper no longer reports at
+        all. Returns (added, pruned).
+
+        PRUNING added 2026-09-17 -- a genuine architecture change, not a
+        bug fix, confirmed with the user: "at any point of given time,
+        scraper should give us the data of only 4 bullish ob's and 4
+        bearish ob's from the all timeframes... no other zones should be
+        kept with neither scraper nor the python memory... we only need
+        the zones what we see on chart... rest we have to keep deleting
+        what we dont see on chart." Before this, seeding was one-way and
+        permanent -- once a zone was copied in here, NOTHING ever removed
+        it again except live invalidation (price trading through it).
+        tv_scraper's own ZoneStore already deletes a zone once it's
+        genuinely missing from the Data Window for 2 consecutive polls
+        (zone_store.py's own apply_mitigated() docstring: "removes the
+        zone entirely rather than flagging it") -- this block just never
+        re-checked against that ongoing truth after its own initial copy,
+        so it kept accumulating zones tv_scraper itself had already
+        deleted (confirmed live: 232 zones held here against a handful
+        ever actually visible on chart at once).
+
+        Deliberately prunes EVEN a zone currently holding a sticky ICT
+        Guard block -- confirmed with the user over keeping such zones
+        around regardless of scraper churn: ict_guard.py's own
+        ICTGuardStickyStore.prune() already clears a standing block the
+        moment its zone leaves the Block, by design, so this is that
+        existing mechanism finally being exercised as intended rather
+        than dead code. Already-traded eligibility (ICTEligibilityStore)
+        is UNAFFECTED -- it stores its own top/btm range independently
+        at trade time, not a live reference into this store, so pruning
+        a zone here never weakens overlaps_traded()'s own protection
+        against re-trading the same real zone if it later flickers back
+        under a new start_time."""
         raw = ob_levels._load_zone_store(zone_state_file)
         added = 0
+        live_zone_ids: set[str] = set()
         for tf in ob_levels.TIMEFRAMES:
             for direction in ("bull", "bear"):
                 key = f"{symbol}|{tf}|{direction}"
@@ -329,6 +391,15 @@ class BlockStore:
                               f"candle boundary, provably not a genuine zone for this timeframe")
                         continue
                     zid = _zone_id(symbol, tf, direction, start_time)
+                    # Counts as "currently live" for pruning purposes
+                    # regardless of what happens below -- a genuinely
+                    # aligned zone the scraper is STILL reporting must
+                    # never be pruned, even if it turns out to be a
+                    # near/cross-timeframe duplicate of something else
+                    # (that only stops it being SEEDED again, not
+                    # ongoing existence for whichever entry already
+                    # legitimately owns this exact zone_id).
+                    live_zone_ids.add(zid)
                     if zid in self._zones:
                         continue  # already ours -- our own state governs from here, not the scraper's
                     top = float(z["top"])
@@ -377,9 +448,21 @@ class BlockStore:
                         zone_id=zid,
                     )
                     added += 1
-        if added:
+
+        # Scoped to THIS symbol only -- live_zone_ids only ever reflects
+        # what was just read for `symbol`, so a zone belonging to some
+        # OTHER symbol (if this store ever held more than one) must
+        # never be judged against it.
+        stale = [zid for zid, z in self._zones.items() if z.symbol == symbol and zid not in live_zone_ids]
+        for zid in stale:
+            z = self._zones.pop(zid)
+            print(f"[V5S-BLOCK] zone {zid} [{z.btm:.3f}-{z.top:.3f}] PRUNED -- "
+                  f"scraper no longer reports it (not on chart anymore)")
+        pruned = len(stale)
+
+        if added or pruned:
             self._save()
-        return added
+        return added, pruned
 
     def update_live(self, bid: float, ask: float, now: Optional[int] = None) -> tuple[list[str], list[str]]:
         """One live-tick pass over every zone currently in the block.
