@@ -22,7 +22,20 @@ Full design recap (confirmed with the user 2026-09-12):
 
     Trigger 1 (fresh) -- M3's own event_time is AFTER the parent bias's
     own event_time (M3 flipped/reconfirmed to match AFTER M5 already set
-    its bias) -> fires immediately, "on the flip candle".
+    its bias) -> fires immediately, "on the flip candle". BAR-CLOSE-GATED
+    (fixed 2026-09-16, found live: a real trade fired 47 minutes after
+    its own M3 flip, having sat ICT-Guard-blocked the whole time, user's
+    own words "flip happened very very long back") -- StructureSignal.
+    event_time is a STANDING value (whichever event is most recent,
+    however long ago), so `m3.event_time > parent.event_time` alone can
+    stay true indefinitely once it becomes true, contradicting "fires
+    immediately". _m3_event_is_fresh() below adds the SAME "privileged,
+    momentary" gate every other trigger in this project already has
+    (st_bridge.fresh_flip()'s event_time==bar_time / FlipStateResult.
+    event_just_happened()) -- Trigger 1 only fires the EXACT bar M3's
+    own event happened; miss that bar (blocked, or any other reason) and
+    the opportunity is gone for that M5 event, same as any other
+    trigger's own missed freshness window -- no fallback, no guess.
 
     Trigger 2 (catch-up) -- M3's own event_time is AT OR BEFORE the
     parent bias's event_time (M3 was already favoring before M5 even
@@ -384,6 +397,20 @@ def _run_trade_manager(cfg: Config, mgr: trade_manager.TradeManager, position) -
         print(f"[V5S-TM] partial close failed: retcode={result.retcode} comment={result.comment}")
 
 
+def _m3_event_is_fresh(m3: "structure.StructureSignal") -> bool:
+    """True only if M3's own event (whichever of Supertrend/ATR-dual
+    produced it) happened on the bar that JUST closed -- see
+    _find_m3_signal()'s own Trigger 1 comment and the module docstring's
+    2026-09-16 fix note for why this exists. Supertrend-sourced: same
+    idiom as st_bridge.fresh_flip() (event_time == the bar it read off
+    of). ATR_STRUCTURE-sourced: FlipStateResult's own one-shot
+    event_just_happened() flag, the SAME bar-close gate M3F/M5F etc.
+    already use elsewhere in this project."""
+    if m3.source == "SUPERTREND":
+        return m3.event_time == m3.supertrend.bar_time
+    return m3.atr.event_just_happened()
+
+
 def _find_m3_signal(cfg: Config, tracker: BridgeBarFlipTracker,
                     parent: "structure.StructureSignal") -> Optional[tuple[str, str]]:
     """Returns (trigger_type, ref_desc) if M3 qualifies THIS cycle to
@@ -398,6 +425,16 @@ def _find_m3_signal(cfg: Config, tracker: BridgeBarFlipTracker,
         return None
 
     if m3.event_time > parent.event_time:
+        if not _m3_event_is_fresh(m3):
+            # M3 flipped after M5's own bias event, but not on the bar
+            # that just closed -- the fresh window has already passed
+            # (see this fix's own comment above). No fallback to
+            # Trigger 2 here either: that trigger's own math assumes
+            # m3.event_time <= parent.event_time, so it would compute a
+            # nonsensical qualifying price for this case. This M5 event
+            # simply produces no signal from here on -- same as any
+            # other trigger's missed freshness window.
+            return None
         ref_desc = f"m3_source={m3.source} m3_event={m3.event_time}"
         return "FRESH", ref_desc
 
