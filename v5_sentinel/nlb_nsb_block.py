@@ -185,6 +185,38 @@ class BlockStore:
                 return True
         return False
 
+    def _has_cross_timeframe_duplicate(self, symbol: str, timeframe: str, direction: str,
+                                       start_time: int, top: float, btm: float) -> Optional[str]:
+        """Returns the zone_id of an EXISTING zone under a DIFFERENT
+        timeframe that shares this exact (direction, start_time, top,
+        btm), or None. Found live 2026-09-16 (user's own report: "i dont
+        see any bullish ob on H4... but i see on H1"): the same real M3
+        zone [4273.985-4276.775], start_time=1789484760, got seeded
+        under H4, H1, AND M15 too over a ~2 hour window -- proven
+        impossible as genuine native zones on those timeframes (that
+        start_time is 15:06:00 UTC, a valid M3 bar boundary but not
+        aligned to H1's or M15's own clean hour-multiple/900s grids, and
+        H4's own alignment scheme is inconsistent enough in this
+        instrument's own history that a boundary check risks false
+        positives -- an EXACT match across timeframes needs no such
+        check to be certain it's the same misattributed zone, not a
+        coincidence). Root cause not fully nailed down -- window sizing
+        was ruled out (confirmed fullscreen for two days) -- most likely
+        tv_scraper's own Data Window re-render lagging a pane-focus
+        switch past its own settling window, still under investigation.
+        This is a defensive backstop independent of that root cause: a
+        start_time is only ever a valid native candle-open for ONE
+        timeframe's own bar grid, so an EXACT match across two different
+        timeframes can only mean a misattribution, never two genuinely
+        distinct zones."""
+        for z in self._zones.values():
+            if z.symbol == symbol and z.timeframe != timeframe and z.direction == direction \
+                    and z.formed_time == start_time \
+                    and abs(z.top - top) <= self._PRICE_DUPLICATE_TOLERANCE \
+                    and abs(z.btm - btm) <= self._PRICE_DUPLICATE_TOLERANCE:
+                return z.zone_id
+        return None
+
     def sync_from_scraper(self, zone_state_file: str, symbol: str = "XAUUSD") -> int:
         """Seeds every zone the scraper currently reports that this block
         has never seen before (by its own stable id) -- never touches a
@@ -235,6 +267,18 @@ class BlockStore:
                         # live as "same repeated alerts fired 100's of
                         # times" (16 duplicate-price groups in the block,
                         # up to 5 reincarnations of the same zone).
+                        continue
+                    dup_zid = self._has_cross_timeframe_duplicate(symbol, tf, direction, start_time, top, btm)
+                    if dup_zid is not None:
+                        # Same real zone misattributed to a DIFFERENT
+                        # timeframe -- see _has_cross_timeframe_duplicate's
+                        # own docstring (found live 2026-09-16, user's own
+                        # report of an "H4" zone that provably couldn't be
+                        # native to H4).
+                        print(f"[V5S-BLOCK] zone {symbol}|{tf}|{direction}|{start_time} "
+                              f"[{btm:.3f}-{top:.3f}] REJECTED -- exact match to existing "
+                              f"cross-timeframe zone {dup_zid}, almost certainly the same "
+                              f"real zone misattributed to a different timeframe")
                         continue
                     virgin = bool(z.get("virgin", True))
                     scraper_retested_at = z.get("retested_at")
