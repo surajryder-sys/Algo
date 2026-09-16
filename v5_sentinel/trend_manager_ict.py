@@ -76,6 +76,22 @@ where the user explicitly said to change it):
       (no freezing needed -- the MQL5 side only updates it once per
       closed bar already).
 
+  AGE CAP (added 2026-09-16, found live: a real SELL fired off a zone
+  12 days old, 150+ points from price -- "I don't see a bearish OB on
+  M3 chart" -- confirmed genuinely un-invalidated by our own rules, just
+  far too stale to be a real setup by then): Rule 3 now additionally
+  requires the zone's own formed_time to be within
+  _RULE3_MAX_AGE_CANDLES (50) M3 candles of the CURRENT M3 bar --
+  user's own number, "trend manager can we add 50 candles". Deliberately
+  NOT applied to Rule 1/2 (MO/PB) -- those already have their own
+  proximity requirement baked into entry_mode/entry_target, so an old
+  zone that's still near enough to qualify for either is fine; the age
+  cap only ever matters for Rule 3, the one trigger with no proximity
+  check of its own. _zone_within_rule3_age() below is checked
+  independently for "3F" (against fs_m3's own current bar) and "ST3F"
+  (against st_fresh's own current bar), since each has its own current-
+  bar reference.
+
 ELIGIBILITY BLOCKING (_zone_blocked(), confirmed 2026-09-14): a zone
 becomes PERMANENTLY ineligible for entry in its own original direction
 the moment M3's structure has moved AGAINST it since it formed --
@@ -155,6 +171,18 @@ from v5_sentinel.trend_manager_ict_config import TMICTConfig, load_config
 _M3_MINUTES = 3
 _TF_LABEL = "M3"
 _DIR_LABEL = {1: "BUY", -1: "SELL"}
+
+# Rule 3's own age cap, in M3 candles -- see module docstring's own AGE
+# CAP section. User's own number: "trend manager can we add 50 candles".
+_RULE3_MAX_AGE_CANDLES = 50
+_RULE3_MAX_AGE_SECONDS = _RULE3_MAX_AGE_CANDLES * _M3_MINUTES * 60
+
+
+def _zone_within_rule3_age(current_bar_time: int, zone_formed_time: int) -> bool:
+    """True if the zone formed within the last _RULE3_MAX_AGE_CANDLES M3
+    candles of current_bar_time -- see module docstring's own AGE CAP
+    section for why this exists and why it's scoped to Rule 3 only."""
+    return (current_bar_time - zone_formed_time) <= _RULE3_MAX_AGE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -281,7 +309,8 @@ def find_signals(cfg: TMICTConfig, store: ict_ob_block.ICTBlockStore, eligibilit
                                            zone.formed_time, zone.entry_target, zone.source))
 
         if (fresh_atr_flip and fs_m3.last_event.confirmed.value == zone.direction_int
-                and fs_m3.last_event.bar_time > zone.formed_time):
+                and fs_m3.last_event.bar_time > zone.formed_time
+                and _zone_within_rule3_age(fs_m3.last_time, zone.formed_time)):
             frozen = tracker.event_far_near(_M3_MINUTES)
             if frozen is not None:
                 far, _near = frozen
@@ -290,7 +319,8 @@ def find_signals(cfg: TMICTConfig, store: ict_ob_block.ICTBlockStore, eligibilit
                                            zone.formed_time, market_price, zone.source))
 
         if (st_fresh is not None and st_fresh.trend == zone.direction_int
-                and st_fresh.event_time > zone.formed_time):
+                and st_fresh.event_time > zone.formed_time
+                and _zone_within_rule3_age(st_fresh.bar_time, zone.formed_time)):
             sl = st_fresh.supertrend - cfg.trail_sl_buffer if zone.direction_int == 1 else \
                 st_fresh.supertrend + cfg.trail_sl_buffer
             signals.append(TMICTSignal(zone.direction_int, zone.zone_id, "ST3F", sl, zone.top, zone.btm,
