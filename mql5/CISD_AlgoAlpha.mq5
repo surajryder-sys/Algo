@@ -77,6 +77,14 @@ input bool   HideExpiredLevels   = true;
 input bool   HideMitigatedLevels = false;
 input int    MaxSwingLines       = 100;   // Pine hardcodes this cap (while size()>100: pop)
 
+// Pine's plotchar for every swing pivot is PERMANENT -- it never expires
+// or clears, same as this port's markers (ExpiryBars/HideMitigatedLevels
+// only govern the liquidity LINES, not these dots). On a long history at
+// a fine timeframe that's a lot of permanent dots by design -- this is a
+// display-only toggle (doesn't touch SwingPeriod/detection at all) for
+// decluttering without changing what counts as a swing.
+input bool   ShowSwingMarkers    = true;
+
 input bool   PublishToFile       = true;
 input string FileBridgeFolder    = "OBBridge";
 input string BridgeSymbol        = "";
@@ -137,6 +145,21 @@ double   g_last_cisd_swing_level = 0.0;
 
 int      g_confirmed_upto = -1;  // watermark -- highest closed bar index already processed, ever
 datetime g_last_publish_time = 0;
+
+// Defense against a real, confirmed-live MT5 gotcha: every swing/CISD
+// entry above is keyed by RAW BAR INDEX, not time. If MetaTrader loads
+// MORE HISTORY (older bars prepended -- typically from scrolling back),
+// every existing bar's index shifts forward, but `prev_calculated` does
+// NOT reliably reset to 0 for this specific case the way it does for a
+// recompile/symbol/period change -- so the watermark loop below can keep
+// running against stale indices that now point at a DIFFERENT bar than
+// when they were stored. Confirmed live 2026-09-16: markers with a real,
+// plausible PRICE ended up at the wrong TIME once more history loaded --
+// exactly what stale-index-vs-shifted-array produces (the price/value
+// stored is still correct, but by the time it's drawn against `time[]`,
+// that index no longer means the same bar). Bar 0's own timestamp is the
+// standard, unambiguous tell: it can ONLY change if bars were prepended.
+datetime g_bar0_time = 0;
 
 //+------------------------------------------------------------------+
 //| tiny front-insert / arbitrary-remove helpers for the parallel     |
@@ -529,12 +552,12 @@ void ProcessCISDBar(const int i, const int rates_total, const datetime &time[],
       if(CISD_IsPivotHigh(high, c, SwingPeriod, rates_total))
       {
          AddSwingHigh(c, high[c]);
-         SwingHighMarker[c] = high[c];
+         if(ShowSwingMarkers) SwingHighMarker[c] = high[c];
       }
       if(CISD_IsPivotLow(low, c, SwingPeriod, rates_total))
       {
          AddSwingLow(c, low[c]);
-         SwingLowMarker[c] = low[c];
+         if(ShowSwingMarkers) SwingLowMarker[c] = low[c];
       }
    }
 
@@ -622,7 +645,7 @@ void ProcessCISDBar(const int i, const int rates_total, const datetime &time[],
 //| has ever drawn -- used on a fresh attach (prev_calculated<=0),     |
 //| same role as ATRTrailDual_MajorMinor.mq5's ResetAllConfirmed().    |
 //+------------------------------------------------------------------+
-void ResetAllCISDState()
+void ResetAllCISDState(const int rates_total)
 {
    ArrayResize(sh_level,0); ArrayResize(sh_startIdx,0);
    ArrayResize(sl_level,0); ArrayResize(sl_startIdx,0);
@@ -635,6 +658,21 @@ void ResetAllCISDState()
    g_last_cisd_type = 0; g_last_cisd_level = 0.0; g_last_cisd_time = 0; g_last_sweep = false;
    g_last_cisd_has_swing = false; g_last_cisd_swing_level = 0.0;
    g_confirmed_upto = -1;
+
+   // Must explicitly wipe the plotted marker buffers too, not just the
+   // state arrays above -- a bar that had a pivot marker written on an
+   // EARLIER pass but doesn't get one written again on THIS pass (indices
+   // shifted, or more history now changes whether that bar still
+   // qualifies as a 12-bar pivot near what used to be history's edge)
+   // would otherwise keep its stale old value forever. This is what
+   // actually produced "correct price, wrong time" dots, confirmed live
+   // 2026-09-16 -- ResetAllCISDState previously reset every OTHER piece
+   // of state but never this.
+   for(int k = 0; k < rates_total; k++)
+   {
+      SwingHighMarker[k] = EMPTY_VALUE;
+      SwingLowMarker[k]  = EMPTY_VALUE;
+   }
 
    ObjectsDeleteAll(0, PREFIX_SWING_HIGH);
    ObjectsDeleteAll(0, PREFIX_SWING_LOW);
@@ -731,8 +769,16 @@ int OnCalculate(const int rates_total,
    if(rates_total < 2*SwingPeriod + 2)
       return(0);
 
-   if(prev_calculated <= 0)
-      ResetAllCISDState();
+   // Bar 0's timestamp changing is unambiguous proof older bars got
+   // prepended (shifting every stored index) -- force a full reset even
+   // if `prev_calculated` didn't report it. See g_bar0_time's own
+   // comment for why this can't be trusted to prev_calculated alone.
+   bool history_shifted = (time[0] != g_bar0_time);
+
+   if(prev_calculated <= 0 || history_shifted)
+      ResetAllCISDState(rates_total);
+
+   g_bar0_time = time[0];
 
    int last_closed = rates_total - 2;
    int watermark_before = g_confirmed_upto;
