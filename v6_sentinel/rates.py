@@ -45,15 +45,19 @@ from typing import Optional
 import MetaTrader5 as mt5
 
 # MT5 timeframe constants -- the original Trend Manager 8 (H4,H2,H1,M30,
-# M15,M5,M3,M1) plus D1/H8/H6/H3 added for HTF levels stores. H7/H5/M45
-# were also considered but are NOT standard MT5 timeframes -- no
-# TIMEFRAME_H7/TIMEFRAME_H5/TIMEFRAME_M45 constant exists, so they're
-# dropped rather than built as custom-resampled bars (same call V5S made,
-# confirmed with the user 2026-09-06).
+# M15,M5,M3,M1) plus D1/H8/H6/H3 added for HTF levels stores, plus M10
+# added 2026-09-19 for RM-STR's own new HTF line scope (D1,H4,H2,H1,M30,
+# M15,M10,M5 -- see htf_levels.py). H7/H5/M45 were also considered but
+# are NOT standard MT5 timeframes -- no TIMEFRAME_H7/TIMEFRAME_H5/
+# TIMEFRAME_M45 constant exists, so they're dropped rather than built as
+# custom-resampled bars (same call V5S made, confirmed with the user
+# 2026-09-06). M10 IS standard (mt5.TIMEFRAME_M10 exists), confirmed
+# before adding it.
 _TIMEFRAME_CONST = {
     1: mt5.TIMEFRAME_M1,
     3: mt5.TIMEFRAME_M3,
     5: mt5.TIMEFRAME_M5,
+    10: mt5.TIMEFRAME_M10,
     15: mt5.TIMEFRAME_M15,
     30: mt5.TIMEFRAME_M30,
     60: mt5.TIMEFRAME_H1,
@@ -326,6 +330,146 @@ def read_all_atr_dual(symbol: str, **kwargs) -> dict[int, Optional[ATRDualSnapsh
     keyed by timeframe_minutes. A None value for a timeframe means that
     one didn't have enough bar history -- other timeframes are unaffected."""
     return {tf: read_atr_dual(symbol, tf, **kwargs) for tf in TARGET_TIMEFRAMES_MINUTES}
+
+
+# ===================== Supertrend (native, no chart/indicator needed) =====================
+#
+# Direct Python port of mql5/Supertrend.mq5's own recurrence (itself a
+# 1:1 port of the TradingView Pine v4 "Supertrend" script, KivancOzbilgic
+# style) -- added 2026-09-19 for RM-STR's new HTF line scope, confirmed
+# with the user: "we dont need charts open, as we are getting live rates
+# from meta trader" -- no MQL5 indicator/open chart dependency at all,
+# same self-contained approach read_atr_dual() above already uses.
+# Defaults (ATR period 10, hl2 source, multiplier 3.0, Wilder-smoothed
+# ATR) match that .mq5 file's own defaults exactly, reusing this
+# module's own _wilder_atr() (identical algorithm to Pine's ta.atr(),
+# which the .mq5's ChangeATR=true / iATR() path already relies on).
+#
+# FIDELITY CAVEAT (verified 2026-09-19, cross-checked against the live
+# bridge's own M15 output): same category of caveat this module's own
+# docstring already gives for Major/Minor -- Supertrend's up/dn bands
+# RATCHET (each only ever tightens toward price, never resets except on
+# a genuine flip), so unlike a plain ATR value (which the module
+# docstring already calls "self-correcting... converges within a
+# handful of bars"), a small residual difference between MT5's built-in
+# iATR() and this module's own _wilder_atr() can occasionally tip a
+# close-to-a-boundary flip decision by ONE BAR either way -- confirmed
+# live: M15 flipped bullish one bar earlier here than the real indicator
+# reported (2026-09-17 23:45 vs 00:15 IST), same direction, line values
+# within ~0.6 points on XAUUSD (~4380). Confirmed NOT a warm-up/
+# bar_count issue (tested up to 20,000 bars, identical result each
+# time) -- it's a seeding/algorithm characteristic of running Wilder's
+# RMA from a different starting point than the live indicator's own
+# since-attachment history, not a bug in this port (verified line-by-
+# line against mql5/ATR_Trial_Dual_SuperTrend_Major_Minor_HammerStar.mq5's
+# own CalcSupertrend()). Accepted as adequate for RM-STR's own "touch a
+# line" gate -- treat this as "structure over the fetched window," not
+# guaranteed pixel-identical to a chart running the indicator since
+# inception.
+
+DEFAULT_SUPERTREND_ATR_PERIOD = 10
+DEFAULT_SUPERTREND_MULTIPLIER = 3.0
+
+
+@dataclass(frozen=True)
+class SupertrendSnapshot:
+    symbol: str
+    timeframe_minutes: int
+    updated: int
+    supertrend: float   # current line value (the up band while bullish, dn band while bearish)
+    trend: int            # 1 bullish, -1 bearish
+    event_time: int        # bar time of this line's own last trend flip
+
+
+def _compute_supertrend_series(
+    highs: list[float], lows: list[float], closes: list[float], atr_period: int, multiplier: float,
+) -> tuple[list[Optional[float]], list[Optional[float]], list[Optional[int]]]:
+    """(up, dn, trend) per bar -- direct port of Supertrend.mq5's own
+    CalcSupertrend(): up/dn are the two ATR bands (src=hl2 -/+
+    multiplier*atr), each only ever ratcheting toward price once the
+    PRIOR bar's close was already on the favorable side; trend flips the
+    moment close crosses the opposite band's own PRIOR value. up1/dn1
+    below are that prior bar's own finalized band (Pine's nz(up[1],up)/
+    nz(dn[1],dn)) -- falls back to this bar's own raw band when no prior
+    value exists yet (either the true first bar, or still within the ATR
+    warm-up window, where _wilder_atr() itself returns None -- same
+    bootstrap idiom as MQL5's i==0 case, just triggered by "no valid
+    prior" instead of "no prior index" since our own array starts at
+    None rather than MQL5's always-defined-but-possibly-garbage 0.0)."""
+    atr = _wilder_atr(highs, lows, closes, atr_period)
+    n = len(closes)
+    up: list[Optional[float]] = [None] * n
+    dn: list[Optional[float]] = [None] * n
+    trend: list[Optional[int]] = [None] * n
+
+    for i in range(n):
+        if atr[i] is None:
+            continue
+        src = (highs[i] + lows[i]) / 2.0  # hl2, Pine's default Source
+
+        up_raw = src - multiplier * atr[i]
+        prev_up = up[i - 1] if i > 0 else None
+        up1 = prev_up if prev_up is not None else up_raw
+        close_prev = closes[i - 1] if i > 0 else closes[i]
+        up_val = max(up_raw, up1) if close_prev > up1 else up_raw
+
+        dn_raw = src + multiplier * atr[i]
+        prev_dn = dn[i - 1] if i > 0 else None
+        dn1 = prev_dn if prev_dn is not None else dn_raw
+        dn_val = min(dn_raw, dn1) if close_prev < dn1 else dn_raw
+
+        prev_trend = trend[i - 1] if i > 0 else None
+        trend_prev = prev_trend if prev_trend is not None else 1
+        t = trend_prev
+        if trend_prev == -1 and closes[i] > dn1:
+            t = 1
+        elif trend_prev == 1 and closes[i] < up1:
+            t = -1
+
+        up[i] = up_val
+        dn[i] = dn_val
+        trend[i] = t
+
+    return up, dn, trend
+
+
+def read_supertrend(
+    symbol: str,
+    tf_minutes: int,
+    atr_period: int = DEFAULT_SUPERTREND_ATR_PERIOD,
+    multiplier: float = DEFAULT_SUPERTREND_MULTIPLIER,
+    bar_count: int = DEFAULT_ATR_BAR_COUNT,
+) -> Optional[SupertrendSnapshot]:
+    """Supertrend snapshot for one timeframe, computed entirely from
+    MT5's own bar history -- no chart/indicator required. Returns None
+    if the timeframe isn't recognized or there isn't enough bar history
+    to satisfy the ATR warm-up."""
+    tf_const = _TIMEFRAME_CONST.get(tf_minutes)
+    if tf_const is None:
+        return None
+
+    rates = mt5.copy_rates_from_pos(symbol, tf_const, 0, bar_count)
+    if rates is None or len(rates) < atr_period + 2:
+        return None
+
+    closed = rates[:-1]  # drop the still-forming last bar -- closed bars only
+    if len(closed) < atr_period + 1:
+        return None
+
+    highs = [float(r["high"]) for r in closed]
+    lows = [float(r["low"]) for r in closed]
+    closes = [float(r["close"]) for r in closed]
+    times = [int(r["time"]) for r in closed]
+
+    up, dn, trend = _compute_supertrend_series(highs, lows, closes, atr_period, multiplier)
+    flip = _last_flip(trend, times)
+    if flip is None or up[-1] is None or dn[-1] is None:
+        return None
+    t, event_time = flip
+    line_value = up[-1] if t == 1 else dn[-1]
+
+    return SupertrendSnapshot(symbol=symbol, timeframe_minutes=tf_minutes, updated=int(time.time()),
+                              supertrend=line_value, trend=t, event_time=event_time)
 
 
 # ===================== Major/Minor swing structure =====================

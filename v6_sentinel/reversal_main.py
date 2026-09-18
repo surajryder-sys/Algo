@@ -26,20 +26,28 @@ docstring for why: V5S is still running live on the same MT5 account).
 
 Run with: python -m v6_sentinel.reversal_main
 
-Summary of the STR component's own full rule set:
-  - 9 HTF timeframes (D1, H8, H6, H4, H3, H2, H1, M30, M15), each
-    independently classified STRONG/WEAK/TRAP via flip_state, with both
-    trail lines exposed as individual SUPPORT/RESISTANCE levels
-    (htf_levels.py). Pure copy_rates recompute, no bridge tie-breaker.
+Summary of the STR component's own full rule set (FULL REDESIGN,
+2026-09-19 -- see reversal_entry.py's own docstring for the complete
+design; no longer the M15-Primary-Structure-gated system this used to
+be, and no longer depends on structure.py/BridgeBarFlipTracker/the live
+ATR-dual bridge AT ALL for its entry logic):
+  - 8 HTF timeframes (D1, H4, H2, H1, M30, M15, M10, M5), each with
+    THREE independently-tracked lines: the ATR dual-trail's own two
+    lines (STRONG/WEAK/TRAP via flip_state, pure copy_rates recompute)
+    PLUS a native Supertrend line (rates.read_supertrend(), also pure
+    copy_rates -- no chart/indicator needed for either source now).
   - A level is ARMED the moment LIVE price (bid for support, ask for
     resistance) touches it, and stays armed across cycles until traded or
-    its parent HTF's own character changes (reversal_entry.scan_touches).
-  - Confirmation + entry (reversal_entry.find_signals): an M15-Primary-
-    Structure-gated ST1F/M3F/ST3F/M5F system, PLUS two ungated CISD
-    triggers (M3CD/M5CD) -- see reversal_entry.py's own docstring for the
-    full confirmed design.
-  - One trade per flip: each level, once traded, is skipped until its
-    parent HTF's own character changes (a fresh flip/trap-resolve there).
+    that SPECIFIC source's own character changes (ATR and Supertrend
+    tracked independently per timeframe).
+  - Confirmation + entry (reversal_entry.find_signals): once armed and
+    untraded, wait for a FRESH CISD confirmation in the matching
+    direction from EITHER M3 or M5, whichever fires first -- one
+    uniform rule across all 8 timeframes.
+  - One trade per flip: each specific line, once traded, is skipped
+    until ITS OWN source (ATR or Supertrend) genuinely changes character
+    (a fresh flip/trap-resolve), or its own value moves on (a trailing
+    line's old touch self-invalidates the moment its value changes).
   - Position lifecycle (_process_signal, shared by BOTH components), run
     once per qualifying signal per cycle -- STR's own signals scanned
     first, then ICT's, always against whatever position is ACTUALLY open
@@ -80,18 +88,18 @@ from dataclasses import dataclass
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import bridge, broker, config, decision_log, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sl_manager, trade_manager
-from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
-from v6_sentinel.bridge_flip import StaleAlertTracker, m3_far_line
+from v6_sentinel import broker, config, decision_log, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sl_manager, trade_manager
+from v6_sentinel.bridge_flip import m3_far_line
 from v6_sentinel.critical_alerts_telegram import send_message as _telegram_send
 from v6_sentinel.reversal_config import RMSymbolConfig, load_symbol_config
 
 _DIR_LABEL = {1: "BUY", -1: "SELL"}
 _COMPONENTS = ("STR", "ICT")  # the two Reversal Manager components sharing this magic number/position slot
+_SOURCE_SHORT = {"ATR": "ATR", "SUPERTREND": "ST"}
 
 
 def _tag(sig: "reversal_entry.ReversalSignal") -> str:
-    return f"{htf_levels.TIMEFRAME_NAMES[sig.timeframe_minutes]}/{sig.trigger}"
+    return f"{htf_levels.TIMEFRAME_NAMES[sig.timeframe_minutes]}/{_SOURCE_SHORT[sig.source]}/{sig.trigger}"
 
 
 def _ict_tag(sig: "reversal_ict.ICTSignal") -> str:
@@ -304,15 +312,6 @@ def _process_signal(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, 
         on_redundant(direction, tag, ref_desc, position.ticket)
 
 
-def _check_stale(cfg: RMSymbolConfig, stale_tracker: StaleAlertTracker) -> None:
-    """M3 only -- the sole remaining signal source, nothing else to
-    monitor here for this bot."""
-    msg = stale_tracker.check(3, bridge.read_lines(cfg.symbol, 3) is not None)
-    if msg is not None:
-        print(msg)
-        _send_alert(msg)
-
-
 @dataclass
 class _SymbolRuntime:
     """Every stateful object one symbol's own STR+ICT Reversal Manager
@@ -321,7 +320,9 @@ class _SymbolRuntime:
     globals, V5S's own single-symbol shape) is what makes this file
     genuinely multi-instrument: adding a symbol means constructing
     another _SymbolRuntime, never touching run_once() or any class
-    above."""
+    above. No BridgeBarFlipTracker/StaleAlertTracker any more (2026-09-19)
+    -- neither STR nor ICT depend on the live ATR-dual bridge for entry
+    logic any more, both are now native-copy_rates + CISD driven."""
     cfg: RMSymbolConfig
     sl_mgr_str: sl_manager.SLManager
     tm_mgr_str: trade_manager.TradeManager
@@ -329,8 +330,6 @@ class _SymbolRuntime:
     tm_mgr_ict: trade_manager.TradeManager
     store: htf_levels.LevelEligibilityStore
     ict_eligibility: reversal_ict.ICTEligibilityStore
-    tracker: BridgeBarFlipTracker
-    stale_tracker: StaleAlertTracker
     sticky: ict_guard.ICTGuardStickyStore
 
 
@@ -346,8 +345,6 @@ def _build_runtime(symbol: str) -> _SymbolRuntime:
                                               cfg.partial2_trigger_points, cfg.partial2_fraction),
         store=htf_levels.LevelEligibilityStore(cfg.levels_state_file),
         ict_eligibility=reversal_ict.ICTEligibilityStore(cfg.ict_eligibility_state_file),
-        tracker=BridgeBarFlipTracker(cfg.bridge_bar_flip_state_file),
-        stale_tracker=StaleAlertTracker(),
         sticky=ict_guard.ICTGuardStickyStore(cfg.ict_guard_sticky_state_file),
     )
 
@@ -357,13 +354,10 @@ def run_once(rt: _SymbolRuntime) -> None:
     htf_states = htf_levels.compute_all_htf_states(cfg.symbol)
     bid, ask = broker.get_tick_price(cfg.symbol)
     # Touch arming stays LIVE-tick (bid/ask against HTF levels) -- only
-    # the M3 confirmation/entry trigger itself is bar-close-gated:
-    # "live tick only for higher timeframe touch analysis, decision and
-    # execution analysis is based on m3 which is bar close analysis."
+    # the CISD confirmation itself is bar-close-gated.
     reversal_entry.scan_touches(htf_states, rt.store, bid, ask)
-    _check_stale(cfg, rt.stale_tracker)
 
-    str_signals = reversal_entry.find_signals(cfg.symbol, htf_states, rt.store, rt.tracker, cfg.sl_buffer)
+    str_signals = reversal_entry.find_signals(cfg.symbol, htf_states, rt.store, cfg.sl_buffer)
     # RM-ICT (second component) -- OB-zone (NLB/NSB Block) touch +
     # post-touch CISD confirmation, fully independent of the M15/tracker
     # machinery STR uses. See reversal_ict.py's own docstring for the
@@ -382,8 +376,9 @@ def run_once(rt: _SymbolRuntime) -> None:
     # position (assuming no position was already open).
     if str_signals:
         decision_log.log(cfg.decision_log_file, "str_signals_found", count=len(str_signals), signals=[
-            {"tf_minutes": s.timeframe_minutes, "line_no": s.line_no, "direction": _DIR_LABEL[s.direction],
-             "trigger": s.trigger, "level_value": s.level_value, "sl": s.sl} for s in str_signals])
+            {"tf_minutes": s.timeframe_minutes, "source": s.source, "line_no": s.line_no,
+             "direction": _DIR_LABEL[s.direction], "trigger": s.trigger, "level_value": s.level_value, "sl": s.sl}
+            for s in str_signals])
     if ict_signals:
         decision_log.log(cfg.decision_log_file, "ict_signals_found", count=len(ict_signals), signals=[
             {"zone_id": s.zone_id, "timeframe_name": s.timeframe_name, "direction": _DIR_LABEL[s.direction],
@@ -410,7 +405,7 @@ def run_once(rt: _SymbolRuntime) -> None:
     for sig in str_signals:
         _process_signal(cfg, rt.sticky, "STR", cfg.magic_number, sig.direction, sig.sl, _tag(sig),
                         f"level={sig.level_value:.3f}",
-                        lambda tf=sig.timeframe_minutes, d=sig.direction: rt.store.mark_traded(tf, d),
+                        lambda tf=sig.timeframe_minutes, src=sig.source, d=sig.direction: rt.store.mark_traded(tf, src, d),
                         lambda direction, tag, ref_desc, ticket: _on_redundant("STR", direction, tag, ref_desc, ticket))
     for sig in ict_signals:
         _process_signal(cfg, rt.sticky, "ICT", cfg.ict_magic_number, sig.direction, sig.sl, _ict_tag(sig),
