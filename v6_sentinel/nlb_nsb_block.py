@@ -215,7 +215,19 @@ class BlockStore:
     def __init__(self, path: str):
         self._path = Path(path)
         self._zones: dict[str, BlockZone] = {}
+        # Rejections already announced this process lifetime. A rejected zone
+        # is never added to self._zones, so sync_from_scraper() sees it again
+        # on EVERY call (once a second) -- without this the same line prints
+        # ~86,000 times a day (found in the first dry-run: 94 identical lines
+        # in ~95s). In-memory only on purpose: a restart re-announcing once
+        # is useful, not noise.
+        self._announced_rejections: set[str] = set()
         self._load()
+
+    def _announce_rejection(self, key: str, message: str) -> None:
+        if key not in self._announced_rejections:
+            self._announced_rejections.add(key)
+            print(message)
 
     def _load(self) -> None:
         if not self._path.exists():
@@ -342,10 +354,12 @@ class BlockStore:
                         # for this timeframe at all. REJECTED, never
                         # seeded, regardless of whether a duplicate
                         # exists anywhere else.
-                        print(f"[V6S-BLOCK] zone {symbol}|{tf}|{direction}|{start_time} "
-                              f"[{float(z['btm']):.3f}-{float(z['top']):.3f}] REJECTED -- "
-                              f"start_time isn't a valid {ob_levels.TIMEFRAME_NAMES.get(tf, tf)} "
-                              f"candle boundary, provably not a genuine zone for this timeframe")
+                        self._announce_rejection(
+                            f"align|{symbol}|{tf}|{direction}|{start_time}",
+                            f"[V6S-BLOCK] zone {symbol}|{tf}|{direction}|{start_time} "
+                            f"[{float(z['btm']):.3f}-{float(z['top']):.3f}] REJECTED -- "
+                            f"start_time isn't a valid {ob_levels.TIMEFRAME_NAMES.get(tf, tf)} "
+                            f"candle boundary, provably not a genuine zone for this timeframe")
                         continue
                     zid = _zone_id(symbol, tf, direction, start_time)
                     # Counts as "currently live" for pruning purposes
@@ -380,10 +394,12 @@ class BlockStore:
                         # Same real zone misattributed to a DIFFERENT
                         # timeframe -- see _has_cross_timeframe_duplicate's
                         # own docstring.
-                        print(f"[V6S-BLOCK] zone {symbol}|{tf}|{direction}|{start_time} "
-                              f"[{btm:.3f}-{top:.3f}] REJECTED -- exact match to existing "
-                              f"cross-timeframe zone {dup_zid}, almost certainly the same "
-                              f"real zone misattributed to a different timeframe")
+                        self._announce_rejection(
+                            f"xtf|{symbol}|{tf}|{direction}|{start_time}",
+                            f"[V6S-BLOCK] zone {symbol}|{tf}|{direction}|{start_time} "
+                            f"[{btm:.3f}-{top:.3f}] REJECTED -- exact match to existing "
+                            f"cross-timeframe zone {dup_zid}, almost certainly the same "
+                            f"real zone misattributed to a different timeframe")
                         continue
                     virgin = bool(z.get("virgin", True))
                     scraper_retested_at = z.get("retested_at")
