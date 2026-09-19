@@ -48,9 +48,26 @@ ENTRY RULE:
   zone.retested_at is wall-clock, cisd.last_cisd_time is bar-time --
   different clock domains).
 
-SL: no longer CISD's own swing-basis -- simply the zone's own edge plus
-a buffer. Bullish zone (BUY) -> zone.btm ("ob low") minus buffer.
-Bearish zone (SELL) -> zone.top ("ob high") plus buffer.
+SL: by default the zone's own edge plus a buffer. Bullish zone (BUY) ->
+zone.btm ("ob low") minus buffer. Bearish zone (SELL) -> zone.top
+("ob high") plus buffer.
+
+SL-DISTANCE OVERRIDE (confirmed with the user 2026-09-19): if the
+zone-edge SL sits farther than cfg.ict_sl_override_points (15 for XAUUSD)
+from the live entry price (ask for a BUY, bid for a SELL, measured after
+buffer), look for a BETTER SL -- the sole trigger is SL distance (zone
+size is not a condition). The candidate is picked by the same rule
+RM-STR uses (sl_basis.py): the FARTHEST usable ATR-dual / Supertrend line
+on M5, else on M3, else CISD's own swing high/low, plus buffer. The whole
+point is to REDUCE risk, so that candidate is then checked against the
+zone-edge SL: if its final SL is not strictly TIGHTER, it is REJECTED and
+the zone-edge SL is kept unchanged -- user's own words: "if the new sl is
+22 points, dont take new sl of 22 points, then apply same sl". This is a
+plain reject, not a re-search: it does not look for a nearer line, and
+it does not fall through to M3/swing after M5's pick was rejected. The
+trade still fires either way -- the signal is never skipped over this. A
+replacement is only required to be tighter, not necessarily under 15
+points itself.
 
 ELIGIBILITY ("traded" tracking): unchanged from before -- kept in THIS
 module's OWN separate state file (ICTEligibilityStore below), never
@@ -73,7 +90,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from v6_sentinel import cisd_bridge
+from v6_sentinel import cisd_bridge, sl_basis
 from v6_sentinel.nlb_nsb_block import BlockStore, BlockZone
 
 # Which CISD timeframe(s) can confirm a touched zone of a given
@@ -101,6 +118,7 @@ class ICTSignal:
     zone_btm: float
     trigger: str                  # "M1CD" | "M3CD" | "M5CD" -- whichever CISD timeframe fired first
     sl: float
+    sl_source: str                  # "ZONE" (plain zone edge) | "M5/ATR2" | "M3/ST" | "SWING" (only when it replaced a too-far zone SL with a tighter one)
 
 
 class ICTEligibilityStore:
@@ -180,12 +198,14 @@ class ICTEligibilityStore:
         return None
 
 
-def _check_zone(zone: BlockZone, symbol: str) -> Optional[tuple[int, str]]:
-    """(direction, trigger_tag) if this TOUCHED, otherwise-eligible zone
-    has a fresh, matching-direction CISD confirmation THIS cycle from
-    its own timeframe's pool -- None if not (wrong/no fresh CISD yet, or
-    an unrecognized zone timeframe, e.g. M1, which _ZONE_CISD_POOLS
-    deliberately has no entry for -- see module docstring)."""
+def _check_zone(zone: BlockZone, symbol: str):
+    """(direction, trigger_tag, cisd) if this TOUCHED, otherwise-eligible
+    zone has a fresh, matching-direction CISD confirmation THIS cycle
+    from its own timeframe's pool -- None if not (wrong/no fresh CISD
+    yet, or an unrecognized zone timeframe, e.g. M1, which
+    _ZONE_CISD_POOLS deliberately has no entry for -- see module
+    docstring). The confirming CISD object is returned too, since the
+    SL-distance override may need its swing as the last-resort basis."""
     direction = 1 if zone.role == "no_short_buffer" else -1  # bullish OB -> BUY, bearish OB -> SELL
     pool = _ZONE_CISD_POOLS.get(zone.timeframe)
     if pool is None:
@@ -193,19 +213,22 @@ def _check_zone(zone: BlockZone, symbol: str) -> Optional[tuple[int, str]]:
     for tf_minutes in pool:
         cisd = cisd_bridge.fresh_cisd(symbol, tf_minutes)
         if cisd is not None and cisd_bridge.direction_of(cisd) == direction:
-            return direction, _CISD_TAG[tf_minutes]
+            return direction, _CISD_TAG[tf_minutes], cisd
     return None
 
 
 def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibilityStore,
-                     sl_buffer: float) -> list[ICTSignal]:
+                     sl_buffer: float, bid: float, ask: float, sl_override_points: float) -> list[ICTSignal]:
     """Every currently-valid (not invalidated -- an invalidated zone is
     already deleted from the Block outright), TOUCHED, untraded OB zone
     with a fresh matching-direction CISD confirmation this cycle -- see
-    module docstring for the full design. Reads the Block fresh
-    (read-only -- this component never writes to it) every call."""
+    module docstring for the full design, including the SL-distance
+    override. Reads the Block fresh (read-only -- this component never
+    writes to it) every call. bid/ask are the live prices, used only as
+    the entry price for the SL-distance test."""
     store = BlockStore(block_state_file)
     signals: list[ICTSignal] = []
+    cache: dict = {}
 
     for zone in store.zones():
         if not zone.retested:
@@ -221,11 +244,23 @@ def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibi
         result = _check_zone(zone, symbol)
         if result is None:
             continue
-        direction, trigger = result
+        direction, trigger, cisd = result
+
         sl = zone.btm - sl_buffer if direction == 1 else zone.top + sl_buffer
+        sl_source = "ZONE"
+        entry_price = ask if direction == 1 else bid
+        if abs(entry_price - sl) > sl_override_points:
+            # Only a strictly TIGHTER SL replaces it (must_beat_sl) -- None means
+            # nothing would reduce risk, so the zone-edge SL stays as-is.
+            resolved = sl_basis.initial_sl_basis(symbol, direction, entry_price, cisd, cache,
+                                                 sl_buffer=sl_buffer, must_beat_sl=sl)
+            if resolved is not None:
+                basis, sl_source = resolved
+                sl = basis - sl_buffer if direction == 1 else basis + sl_buffer
+
         signals.append(ICTSignal(
             direction=direction, zone_id=zone.zone_id, timeframe_name=zone.timeframe_name,
-            zone_top=zone.top, zone_btm=zone.btm, trigger=trigger, sl=sl,
+            zone_top=zone.top, zone_btm=zone.btm, trigger=trigger, sl=sl, sl_source=sl_source,
         ))
 
     return signals

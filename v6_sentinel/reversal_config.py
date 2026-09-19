@@ -87,6 +87,12 @@ class RMSymbolConfig:
     ict_guard_buffer_points: float
     ict_guard_sticky_state_file: str
 
+    # RM-ICT SL-distance override (2026-09-19): when the zone-edge SL would
+    # sit farther than this many points from entry, the SL comes from
+    # M5/M3 lines (or CISD swing) instead -- see reversal_ict.py. Zone
+    # size is not a condition. XAUUSD points; deliberately per-symbol config.
+    ict_sl_override_points: float
+
     decision_log_file: str
 
     mt5_terminal_path: str | None
@@ -113,6 +119,7 @@ _SYMBOL_DEFAULTS: dict[str, dict] = {
         magic_number=26091801,
         ict_magic_number=26091802,
         ict_guard_buffer_points=5.0,
+        ict_sl_override_points=15.0,
     ),
 }
 
@@ -156,6 +163,7 @@ def load_symbol_config(symbol: str) -> RMSymbolConfig:
         nlb_nsb_block_state_file=config.state_file_for("nlb_nsb_block", symbol),
         ict_guard_buffer_points=float(os.getenv(prefix + "ICT_GUARD_BUFFER_POINTS", str(d["ict_guard_buffer_points"]))),
         ict_guard_sticky_state_file=config.state_file_for("reversal_manager_ict_guard_sticky", symbol),
+        ict_sl_override_points=float(os.getenv(prefix + "ICT_SL_OVERRIDE_POINTS", str(d["ict_sl_override_points"]))),
         decision_log_file=config.state_file_for("reversal_manager_decision_log", symbol, ext="jsonl"),
         mt5_terminal_path=config.MT5_TERMINAL_PATH,
         mt5_login=config.MT5_LOGIN,

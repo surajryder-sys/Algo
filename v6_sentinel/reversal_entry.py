@@ -43,15 +43,29 @@ matching direction before the touch doesn't count, only a genuinely
 fresh confirmation after does, and fresh_cisd()'s own one-shot contract
 delivers that naturally with no explicit touch-timestamp bookkeeping.
 
-SL: the CONFIRMING CISD's own nearest active swing low/high
-(cisd_bridge.sl_basis()), frozen at the exact bar CISD confirmed, +/-
-buffer -- NOT the touched HTF line's own value (confirmed with the user
-2026-09-19, "instead can we use swing low high"). "We enter trade based
-on the trigger timeframe" (the HTF line being defended decides WHICH
-level is eligible and its own direction), "and execute based on cisd
-timeframe" (the CISD confirmation's own bar/swing is what actually
-prices and fires the order, whichever of M3/M5 got there first). See
-_check_level()'s own docstring for the exact mechanics.
+INITIAL SL (confirmed with the user 2026-09-19 -- swing high/low is the
+FALLBACK, lines are preferred when one is usable):
+  1. M5's own lines first (ATR dual line1/line2 + Supertrend), then M3's
+     if M5 has none -- any single line is enough. A line is USABLE only
+     if it sits on the correct side of the live entry price: ABOVE it
+     for a SELL, BELOW it for a BUY (a line on the wrong side, e.g. every
+     line below price as support during a bearish-CISD SELL, can't be a
+     stop). If several are usable on that timeframe, the FARTHEST from
+     entry wins (widest SL -- user's explicit choice over nearest).
+     SL = that line's value +/- buffer. NOTE: there is no maximum
+     distance cap on this -- a far ATR line can put the stop a long way
+     from entry.
+  2. Only if neither M5 nor M3 has a usable line: the confirming CISD's
+     own nearest active swing high (SELL) / low (BUY),
+     cisd_bridge.sl_basis(), frozen at the exact bar CISD confirmed, +/-
+     buffer. If there's no active swing either, that CISD produces no
+     signal this cycle (no fallback, no guess).
+M3's lines aren't part of the HTF scope (htf_levels stops at M5), so
+they're computed on demand (sl_basis.py), only when a signal is actually
+about to fire. "We enter trade based on the trigger timeframe" (the touched HTF
+line decides WHICH level is eligible and its direction), "and execute
+based on cisd timeframe" (the CISD bar is what fires the order). See
+sl_basis.py's own docstring for the exact mechanics (shared with RM-ICT).
 
 find_signals() returns EVERY level that qualifies THIS cycle, in a fixed
 scan order (HTF_TIMEFRAMES_MINUTES order, ATR line1/line2 then
@@ -68,7 +82,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from v6_sentinel import cisd_bridge
+from v6_sentinel import cisd_bridge, sl_basis
 from v6_sentinel.htf_levels import HTFState, LevelEligibilityStore
 
 _CISD_POOL = (3, 5)  # M3, M5 -- uniform across every HTF timeframe here, whichever confirms first
@@ -85,6 +99,7 @@ class ReversalSignal:
     trigger: str                   # "M3CD" | "M5CD" -- whichever CISD timeframe fired first
     level_value: float
     sl: float
+    sl_source: str                  # where the SL basis came from, for the decision log: "M5/ATR1", "M3/ST", "SWING", ...
 
 
 def scan_touches(htf_states: dict[int, Optional[HTFState]], store: LevelEligibilityStore,
@@ -107,54 +122,49 @@ def scan_touches(htf_states: dict[int, Optional[HTFState]], store: LevelEligibil
                 store.mark_touched(tf, level.source, level.line_no, level.value, level.role)
 
 
-def _check_level(store: LevelEligibilityStore, symbol: str, tf: int, level, sl_buffer: float) -> Optional[ReversalSignal]:
+def _check_level(store: LevelEligibilityStore, symbol: str, tf: int, level, sl_buffer: float,
+                 bid: float, ask: float, cache: dict) -> Optional[ReversalSignal]:
     """A single ReversalSignal if this TOUCHED, untraded level has a
     fresh, matching-direction CISD confirmation THIS cycle from either
     M3 or M5 (checked in that order -- an arbitrary but deterministic
-    tie-break for the rare case both fire the exact same cycle) -- None
-    otherwise.
-
-    SL basis (confirmed with the user 2026-09-19, "instead can we use
-    swing low high"): NOT the touched HTF line's own value -- the
-    CONFIRMING CISD's own tracked nearest active swing low/high
-    (cisd_bridge.sl_basis()), frozen at the exact bar CISD confirmed.
-    Same basis this project's CISD triggers always used elsewhere
-    (reversal_ict.py's own OB-zone redesign uses the zone's own edge
-    instead, a deliberate difference for that component -- RM-STR goes
-    back to the swing basis here). sl_basis() returning None (no active
-    swing line existed at confirmation) means this trigger simply
-    produces no signal this cycle -- no fallback, no guess, same
-    philosophy every other trigger in this project already follows."""
+    tie-break for the rare case both fire the exact same cycle) AND a
+    usable initial SL exists (see sl_basis.initial_sl_basis()) -- None
+    otherwise. Entry price for the "correct side" test is the live ask
+    for a BUY, the live bid for a SELL -- what the market order would
+    actually fill at."""
     direction = 1 if level.role == "SUPPORT" else -1
     if store.is_traded(tf, level.source, direction) or not store.is_touched(
             tf, level.source, level.line_no, level.value, level.role):
         return None
+    entry_price = ask if direction == 1 else bid
     for tf_minutes in _CISD_POOL:
         cisd = cisd_bridge.fresh_cisd(symbol, tf_minutes)
         if cisd is None or cisd_bridge.direction_of(cisd) != direction:
             continue
-        basis = cisd_bridge.sl_basis(cisd)
-        if basis is None:
+        resolved = sl_basis.initial_sl_basis(symbol, direction, entry_price, cisd, cache)
+        if resolved is None:
             continue
+        basis, sl_source = resolved
         sl = basis - sl_buffer if direction == 1 else basis + sl_buffer
         return ReversalSignal(direction=direction, timeframe_minutes=tf, source=level.source,
                               line_no=level.line_no, trigger=_CISD_TAG[tf_minutes],
-                              level_value=level.value, sl=sl)
+                              level_value=level.value, sl=sl, sl_source=sl_source)
     return None
 
 
 def find_signals(symbol: str, htf_states: dict[int, Optional[HTFState]], store: LevelEligibilityStore,
-                 sl_buffer: float) -> list[ReversalSignal]:
+                 sl_buffer: float, bid: float, ask: float) -> list[ReversalSignal]:
     """Every armed (touched), untraded HTF level (ATR dual-trail or
     Supertrend, any of the 8 timeframes) with a fresh matching-direction
-    CISD confirmation this cycle -- see module docstring for the full
-    design."""
+    CISD confirmation this cycle and a usable initial SL -- see module
+    docstring for the full design."""
     signals: list[ReversalSignal] = []
+    cache: dict = {}
     for tf, state in htf_states.items():
         if state is None:
             continue
         for level in state.levels:
-            sig = _check_level(store, symbol, tf, level, sl_buffer)
+            sig = _check_level(store, symbol, tf, level, sl_buffer, bid, ask, cache)
             if sig is not None:
                 signals.append(sig)
     return signals

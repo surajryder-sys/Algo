@@ -357,14 +357,14 @@ def run_once(rt: _SymbolRuntime) -> None:
     # the CISD confirmation itself is bar-close-gated.
     reversal_entry.scan_touches(htf_states, rt.store, bid, ask)
 
-    str_signals = reversal_entry.find_signals(cfg.symbol, htf_states, rt.store, cfg.sl_buffer)
+    str_signals = reversal_entry.find_signals(cfg.symbol, htf_states, rt.store, cfg.sl_buffer, bid, ask)
     # RM-ICT (second component) -- OB-zone (NLB/NSB Block) touch +
     # post-touch CISD confirmation, fully independent of the M15/tracker
     # machinery STR uses. See reversal_ict.py's own docstring for the
     # full entry rule (a complete redesign, 2026-09-18 -- no longer the
     # M15-Primary-Structure-gated system).
     ict_signals = reversal_ict.find_ict_signals(cfg.symbol, cfg.nlb_nsb_block_state_file, rt.ict_eligibility,
-                                                cfg.sl_buffer)
+                                                cfg.sl_buffer, bid, ask, cfg.ict_sl_override_points)
 
     # Logged BEFORE _process_signal acts on them, listing EVERY qualifying
     # signal this cycle (not just the one that becomes a real position) --
@@ -377,12 +377,14 @@ def run_once(rt: _SymbolRuntime) -> None:
     if str_signals:
         decision_log.log(cfg.decision_log_file, "str_signals_found", count=len(str_signals), signals=[
             {"tf_minutes": s.timeframe_minutes, "source": s.source, "line_no": s.line_no,
-             "direction": _DIR_LABEL[s.direction], "trigger": s.trigger, "level_value": s.level_value, "sl": s.sl}
+             "direction": _DIR_LABEL[s.direction], "trigger": s.trigger, "level_value": s.level_value,
+             "sl": s.sl, "sl_source": s.sl_source}
             for s in str_signals])
     if ict_signals:
         decision_log.log(cfg.decision_log_file, "ict_signals_found", count=len(ict_signals), signals=[
             {"zone_id": s.zone_id, "timeframe_name": s.timeframe_name, "direction": _DIR_LABEL[s.direction],
-             "trigger": s.trigger, "zone_top": s.zone_top, "zone_btm": s.zone_btm, "sl": s.sl} for s in ict_signals])
+             "trigger": s.trigger, "zone_top": s.zone_top, "zone_btm": s.zone_btm, "sl": s.sl,
+             "sl_source": s.sl_source} for s in ict_signals])
 
     # Each component's own magic-number-scoped positions, pruned/acted on
     # entirely independently -- see module docstring, this is not a
