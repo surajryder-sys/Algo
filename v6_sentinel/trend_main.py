@@ -33,6 +33,27 @@ THE RULES (all confirmed with the user):
   next matching M5 CISD. A same-direction signal while a trade is open is
   ignored (its event is marked handled so it can't fire later).
 
+  M5 FLIP EXIT (user, 2026-09-20: "the M5 flip itself closes the SELL
+  straight away") -- when the M5 ATR-dual state genuinely FLIPS against an
+  open trade (to strong under a SELL, to weak under a BUY) on a bar that
+  closed after the trade opened, the trade is closed at once
+  (trend_entry.find_flip_exit). An EVENT, not a state comparison: a BUY
+  entered while M5 is already weak is not closed for that. A trap-resolved
+  snap-back is not a flip. Everything is on CLOSED candles -- live price never
+  matters ("candle close always").
+
+  SQUARE-OFF (user, 2026-09-20) -- the third and last way a trade closes:
+  a fresh M5 CISD in the OPPOSITE direction that qualifies on its own, i.e.
+  the M5 ATR-dual CONFIRMED state (as of the last closed candle -- even while
+  price sits between the lines) already agrees with it
+  (trend_entry.find_squareoff).
+  E.g. SELL entered on M15 bearish + M5 bearish CISD while M5 price is above
+  both ATR lines (strong); a bullish M5 CISD now arrives with M5 still
+  strong -> it qualifies a buy by itself -> the SELL is squared off (no buy
+  follows unless the M15 bias also allows one). Mirror for a BUY. An opposite
+  CISD that the M5 state does NOT agree with closes nothing -- the trade
+  waits for the structure to shift. The M5 state is NOT an entry gate.
+
   BIAS FEED WATCH -- the M15 ATR bias comes from a file the MQL5 indicator
   rewrites every couple of seconds. If that indicator/chart stops, the
   tracker just keeps the last state and the bias would silently FREEZE.
@@ -41,13 +62,17 @@ THE RULES (all confirmed with the user):
   and PAUSES NEW ENTRIES until the feed is fresh again (open trades are
   still managed, and a bias-flip close still works). It only counts as a
   fault while ticks are actually arriving -- a closed market makes the file
-  stale too, and that must not alarm or block anything.
+  stale too, and that must not alarm or block anything. The M5 ATR feed
+  (which the flip exit and the square-off read) gets its own watch: when it
+  is stale both are PAUSED (a frozen "strong/weak" must not close a trade)
+  and one alert is sent; entries are unaffected.
 
   ICT GUARD -- not applied (assumed to match RM's "no guard as of now";
   not separately confirmed for TM).
 
 Comments: "V6S-TM-STR-{trigger}" on entry (e.g. "V6S-TM-STR-M5CD"),
-"-P1"/"-P2"/"-BF" appended for partials / bias-flip close.
+"-P1"/"-P2"/"-BF"/"-MF"/"-SQ" appended for partials / bias-flip close / M5-flip
+close / square-off.
 
 Safety: each symbol's own enable_trading (trend_config.py,
 V6S_TM_{SYMBOL}_ENABLE_TRADING) must be explicitly true for any order to
@@ -56,7 +81,7 @@ be sent/modified/closed for THAT symbol.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import MetaTrader5 as mt5
@@ -256,7 +281,8 @@ class _SymbolRuntime:
     eligibility: trend_entry.TrendEligibilityStore
     sl_mgr: sl_manager.SLManager
     tm_mgr: trade_manager.TradeManager
-    feed_watch: BiasFeedWatch
+    feed_watch: BiasFeedWatch                  # the M15 bias feed: stale -> entries paused
+    state_feed_watch: BiasFeedWatch = field(default_factory=BiasFeedWatch)   # the M5 state feed: stale -> square-off paused
 
 
 def _build_runtime(symbol: str) -> _SymbolRuntime:
@@ -299,6 +325,27 @@ def run_once(rt: _SymbolRuntime) -> None:
         decision_log.log(cfg.decision_log_file, "bias_feed_recovered", bias_timeframe=cfg.bias_timeframe)
         alerts.send_alert(msg)
 
+    # The M5 ATR strong/weak state (1 strong, -1 weak, None unknown) -- read every cycle so the
+    # persisted tracker stays warm -- and its own feed watch (see the docstring).
+    state_fs = rt.tracker.update(cfg.symbol, cfg.squareoff_timeframe)
+    m5_state = state_fs.confirmed.value if state_fs is not None else None
+    m5_exits_paused, state_event = rt.state_feed_watch.update(
+        time.time(), tick.time if tick is not None else None,
+        bridge.read_lines(cfg.symbol, cfg.squareoff_timeframe) is not None)
+    if state_event == "stale":
+        msg = (f"[V6S-TM] {cfg.symbol} M{cfg.squareoff_timeframe} ATR bridge has been stale for over "
+               f"{STALE_FEED_SECONDS:.0f}s while prices are still ticking -- the strong/weak state may be "
+               f"frozen. The M5 flip exit and square-off are PAUSED until it recovers (entries and other management continue). "
+               f"Check the M{cfg.squareoff_timeframe} chart/indicator.")
+        print(msg)
+        decision_log.log(cfg.decision_log_file, "state_feed_stale", timeframe=cfg.squareoff_timeframe)
+        alerts.send_alert(msg)
+    elif state_event == "recovered":
+        msg = f"[V6S-TM] {cfg.symbol} M{cfg.squareoff_timeframe} ATR bridge is fresh again -- M5 exits resumed."
+        print(msg)
+        decision_log.log(cfg.decision_log_file, "state_feed_recovered", timeframe=cfg.squareoff_timeframe)
+        alerts.send_alert(msg)
+
     open_tickets = {p.ticket for p in broker.get_positions(cfg.symbol, cfg.magic_number)}
     rt.sl_mgr.prune(open_tickets)
     rt.tm_mgr.prune(open_tickets)
@@ -315,6 +362,35 @@ def run_once(rt: _SymbolRuntime) -> None:
                              position=_DIR_LABEL[pos_direction], bias=_DIR_LABEL[bias.direction],
                              bias_source=bias.source, bias_event_time=bias.event_time)
             _close_position(cfg, position, "BIASFLIP", tag, "BF")
+            position = _current_position(cfg)
+
+    # 1b. The M5 state genuinely flipped against the trade after it opened -> close it at once.
+    if position is not None and not m5_exits_paused:
+        pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+        flip = trend_entry.find_flip_exit(pos_direction, position.time, cfg.squareoff_timeframe, state_fs)
+        if flip is not None:
+            tag = _extract_tag(rt.tm_mgr.get_entry_comment(position.ticket) or position.comment or "")
+            print(f"[V6S-TM] {cfg.symbol} M{cfg.squareoff_timeframe} state flipped {flip.confirmed.name} "
+                  f"(bar {flip.bar_time}) against the open {_DIR_LABEL[pos_direction]} #{position.ticket}")
+            decision_log.log(cfg.decision_log_file, "m5_flip_exit", ticket=position.ticket,
+                             position=_DIR_LABEL[pos_direction], timeframe=cfg.squareoff_timeframe,
+                             flip_to=flip.confirmed.name, flip_bar_time=flip.bar_time)
+            _close_position(cfg, position, "M5FLIP", tag, "MF")
+            position = _current_position(cfg)
+
+    # 1c. Square-off: a fresh opposite M5 CISD that the M5 strong/weak state agrees with (see docstring).
+    if position is not None and not m5_exits_paused:
+        pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+        cisd = trend_entry.find_squareoff(cfg.symbol, pos_direction, cfg.squareoff_timeframe, m5_state)
+        if cisd is not None:
+            tag = _extract_tag(rt.tm_mgr.get_entry_comment(position.ticket) or position.comment or "")
+            print(f"[V6S-TM] {cfg.symbol} M{cfg.squareoff_timeframe} {cisd.last_cisd} CISD@{cisd.last_cisd_time} "
+                  f"with M{cfg.squareoff_timeframe} {'strong' if m5_state == 1 else 'weak'} squares off the open "
+                  f"{_DIR_LABEL[pos_direction]} #{position.ticket}")
+            decision_log.log(cfg.decision_log_file, "squareoff", ticket=position.ticket,
+                             position=_DIR_LABEL[pos_direction], timeframe=cfg.squareoff_timeframe,
+                             cisd=cisd.last_cisd, cisd_time=cisd.last_cisd_time, state=m5_state)
+            _close_position(cfg, position, "SQUAREOFF", tag, "SQ")
             position = _current_position(cfg)
 
     # 2. Entry: fresh M5 CISD matching the M15 bias (paused while the bias feed is stale).

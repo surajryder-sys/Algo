@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Optional
 
 from v6_sentinel import cisd_bridge, sl_basis
+from v6_sentinel.flip_state import EventType, FlipEvent, FlipStateResult
 from v6_sentinel.trend_bias import Bias
 
 # Which timeframes' lines may supply the initial SL, in order, per
@@ -92,6 +93,60 @@ class TrendEligibilityStore:
         if self._last.get(key) is None or event_time > self._last[key]:
             self._last[key] = event_time
             self._save()
+
+
+def find_flip_exit(position_direction: int, position_open_time: int, timeframe: int,
+                   state_result: Optional[FlipStateResult]) -> Optional[FlipEvent]:
+    """M5 FLIP EXIT (user, 2026-09-20: "the M5 flip itself closes the SELL
+    straight away"): the timeframe's ATR-dual state genuinely FLIPPED against
+    the open trade -- to strong under a SELL, to weak under a BUY -- on a bar
+    that closed AFTER the trade was opened. Everything is decided on closed
+    candles (the tracker is bar-close-gated); live price never matters.
+
+    Deliberately an EVENT, not a state comparison: a BUY entered while M5 is
+    already weak (M15 favours, "price under both lines") has a state that
+    disagrees with it from the first second, and must not be closed for that
+    -- only a flip that happens after entry counts. A TRAP_RESOLVED (snap-back
+    to the side it was already on) is not a flip and closes nothing.
+    position_open_time and the bar times share MT5's server-time base
+    (verified against real deals 2026-09-20). A flip is confirmed at its bar's
+    CLOSE, i.e. bar_time + the timeframe's length. Returns the event or None."""
+    event = state_result.last_event if state_result is not None else None
+    if event is None or event.event_type != EventType.FLIP:
+        return None
+    if event.confirmed.value != -position_direction:
+        return None
+    if event.bar_time + timeframe * 60 <= position_open_time:
+        return None
+    return event
+
+
+def find_squareoff(symbol: str, position_direction: int, timeframe: int,
+                   state: Optional[int]) -> Optional[object]:
+    """SQUARE-OFF (user, 2026-09-20): an open trade is squared off by a fresh
+    CISD on `timeframe` in the OPPOSITE direction that qualifies on its OWN --
+    i.e. the timeframe's ATR-dual state (`state`: 1 strong, -1 weak, None
+    unknown) already agrees with that CISD. Example: a SELL was entered on
+    M15 bearish + an M5 bearish CISD while M5 price was above both ATR lines
+    (M5 strong); an M5 BULLISH CISD now arrives with M5 still strong -- it
+    qualifies a buy by itself ("price is already above atr lines"), so the SELL
+    is squared off. If the state does NOT agree with the CISD (price weak,
+    bullish CISD) it qualifies nothing and the trade stays open until the
+    structure itself shifts. "Strong/weak" is always the CONFIRMED state as of
+    the last closed candle (user, 2026-09-20: "candle close always, nothing to
+    do with live price on or above the levels"), even while price sits between
+    the two lines. The M15 bias is not consulted -- so no buy
+    follows unless find_signal() separately allows one. Returns the CISD (for
+    logging) or None."""
+    if state is None:
+        return None
+    cisd = cisd_bridge.fresh_cisd(symbol, timeframe)
+    if cisd is None:
+        return None
+    direction = cisd_bridge.direction_of(cisd)
+    if direction != -position_direction or state != direction:
+        return None
+    return cisd
 
 
 def find_signal(symbol: str, bias: Bias, execution_timeframes: tuple[int, ...],

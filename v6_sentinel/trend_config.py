@@ -59,6 +59,7 @@ class TMSymbolConfig:
     bias_timeframe: int                    # M15
     execution_timeframes: tuple[int, ...]   # (5,) now; (5, 3) once M3 is added
     trailing_timeframe: int                 # whose far ATR line the post-breakeven SL follows
+    squareoff_timeframe: int                 # whose CISD + ATR strong/weak state can square off an open trade
 
     state_file: str                # TradeManager (partial booking) state
     sl_state_file: str              # SLManager state
@@ -87,6 +88,7 @@ _SYMBOL_DEFAULTS: dict[str, dict] = {
         bias_timeframe=15,
         execution_timeframes=(5,),
         trailing_timeframe=5,
+        squareoff_timeframe=5,
     ),
 }
 
@@ -120,6 +122,7 @@ def load_symbol_config(symbol: str) -> TMSymbolConfig:
         bias_timeframe=d["bias_timeframe"],
         execution_timeframes=d["execution_timeframes"],
         trailing_timeframe=d["trailing_timeframe"],
+        squareoff_timeframe=d["squareoff_timeframe"],
         state_file=config.state_file_for("trend_manager_state", symbol),
         sl_state_file=config.state_file_for("trend_manager_sl_state", symbol),
         eligibility_state_file=config.state_file_for("trend_manager_eligibility", symbol),
