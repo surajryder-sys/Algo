@@ -56,9 +56,8 @@ own independent source:
      ATR's own traded_directions and vice versa.
 
 Multi-instrument note: LevelEligibilityStore's _state dict is keyed by
-(tf_minutes, source) ONLY, not (symbol, tf_minutes, source) -- same
-pattern as bridge_bar_flip.BridgeBarFlipTracker. Safe ONLY because each
-symbol gets its OWN store instance with its OWN state file (see
+(tf_minutes, source) ONLY, not (symbol, tf_minutes, source). Safe ONLY
+because each symbol gets its OWN store instance with its OWN state file (see
 config.state_file_for()) -- never one instance shared across symbols.
 """
 from __future__ import annotations

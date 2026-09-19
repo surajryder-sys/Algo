@@ -6,13 +6,13 @@ Multi-instrument from day one (see v6_sentinel/__init__.py): ACTIVE_SYMBOLS
 lists every symbol this process currently serves, and state_file_for()
 gives each symbol its own state file per component (confirmed with the
 user 2026-09-18: one file per symbol, not one shared file keyed
-internally) -- e.g. v6s_bridge_bar_flip_state_XAUUSD.json. Only XAUUSD is
+internally) -- e.g. v6s_reversal_manager_state_XAUUSD.json. Only XAUUSD is
 active today; adding a symbol later means appending to ACTIVE_SYMBOLS
 plus any per-symbol tuning that component needs, not rewriting the
 component itself.
 
 This module only covers what the data/bridge layer (rates/bridge/
-st_bridge/flip_state/bridge_flip/bridge_bar_flip/structure) needs --
+flip_state/bridge_flip/cisd_bridge) needs --
 magic numbers, lot sizes, SL/trailing thresholds etc. belong to each
 entry/execution component's own config, added when that component is
 ported.
@@ -46,8 +46,8 @@ MT5_SERVER: str | None = os.getenv("MT5_SERVER") or None
 
 def state_file_for(component: str, symbol: str, ext: str = "json") -> str:
     """Per-symbol state file name for a given component, e.g.
-    state_file_for("bridge_bar_flip_state", "XAUUSD") ->
-    "v6s_bridge_bar_flip_state_XAUUSD.json", or
+    state_file_for("reversal_manager_state", "XAUUSD") ->
+    "v6s_reversal_manager_state_XAUUSD.json", or
     state_file_for("rm_str_decision_log", "XAUUSD", ext="jsonl") for an
     append-only log. Every stateful V6S component should derive its file
     path this way instead of taking one fixed path, so each symbol's own

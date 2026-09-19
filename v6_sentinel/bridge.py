@@ -4,13 +4,14 @@ and stateless (no persisted state, so nothing needed changing for V6S's
 multi-instrument design). Only the module docstring/log prefix below are
 V6S's own.
 
-The bridge is the PRIMARY (only) source for M3/M5/M1, via
-bridge_bar_flip.py's own bar-close-gated state machine, which reads
-read_lines()/read_close() below directly -- deliberately never the
-bridge's own bundled "structure" field, only the raw line1/line2
-trail_stop VALUES, run through the same geometric test flip_state.py
-uses (see v5_sentinel's git history for the live false-positive that
-shaped this rule originally).
+read_lines()/read_close() below are how V6S reads the live ATR-dual
+bridge -- deliberately never the bridge's own bundled "structure" field,
+only the raw line1/line2 trail_stop VALUES, run through the same
+geometric test flip_state.py uses (see v5_sentinel's git history for the
+live false-positive that shaped this rule originally). RM's entry logic
+no longer reads this bridge at all (native copy_rates instead); the one
+remaining consumer is bridge_flip.m3_far_line(), for post-breakeven SL
+trailing.
 """
 from __future__ import annotations
 

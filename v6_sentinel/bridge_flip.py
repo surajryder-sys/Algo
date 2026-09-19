@@ -17,8 +17,7 @@ StaleAlertTracker per symbol.
 far_near() below is the far-line SL basis for ONGOING (post-breakeven)
 trailing specifically -- a live read is correct there, since trailing SL
 should keep moving with the current line, unlike an INITIAL entry SL
-basis (frozen at the flip's own candle, see bridge_bar_flip.py's
-event_far_near()).
+basis (fixed at the moment the entry signal fired, see sl_basis.py).
 """
 from __future__ import annotations
 

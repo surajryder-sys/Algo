@@ -2,8 +2,8 @@
 (confirmed with the user 2026-09-18, "full replacement") -- this is NOT
 the M15-Primary-Structure-gated ST1F/M3F/ST3F/M5F system this module
 used to run (see git history / v5_sentinel/reversal_ict.py for that
-design). No more M15 Primary Structure, `structure.py`, or
-BridgeBarFlipTracker dependency at all -- this component is now purely
+design). No more M15 Primary Structure or bar-close flip-tracker dependency at
+all -- this component is now purely
 OB-zone-touch + CISD-confirmation driven.
 
 ENTRY RULE:
@@ -37,9 +37,8 @@ ENTRY RULE:
   uses cisd_bridge.fresh_cisd() (the "privileged, momentary, only
   non-None the EXACT bar it confirmed" contract already used elsewhere
   in this project for one-shot triggers), not cisd_bridge.read_cisd()
-  (the standing/current state, which structure.py's own arbitration
-  uses instead, deliberately a DIFFERENT contract for a different
-  purpose). A standing-but-stale CISD from before the touch would
+  (the standing/current state -- a deliberately DIFFERENT contract for
+  a different purpose). A standing-but-stale CISD from before the touch would
   already have been "fresh" on ITS OWN bar, long past -- by the time a
   zone becomes eligible (touched) and this check starts running against
   it every cycle, only a confirmation that fires on some LATER cycle can

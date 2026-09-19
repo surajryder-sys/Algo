@@ -1,9 +1,8 @@
 """RM-STR -- entry engine. FULL REDESIGN (confirmed with the user
 2026-09-19, "big changes in RM STR") -- this is NOT the M15-Primary-
 Structure-gated ST1F/M3F/ST3F/M5F system this module used to run (see
-git history for that design). No more M15 Primary Structure or
-`structure.py` dependency at all for RM-STR -- this component is now
-purely HTF-line-touch + CISD-confirmation driven, the same overall
+git history for that design). No more M15 Primary Structure
+dependency at all for RM-STR -- this component is now purely HTF-line-touch + CISD-confirmation driven, the same overall
 mechanism RM-ICT's own redesign uses (reversal_ict.py), just applied to
 ATR-dual/Supertrend lines instead of OB zones.
 

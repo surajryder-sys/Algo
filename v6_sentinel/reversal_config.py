@@ -63,7 +63,6 @@ class RMSymbolConfig:
     state_file: str
     sl_state_file: str
     levels_state_file: str
-    bridge_bar_flip_state_file: str
     heartbeat_file: str
 
     # RM-ICT component (OB-zone-based, reversal_ict.py) -- FULLY
@@ -154,7 +153,6 @@ def load_symbol_config(symbol: str) -> RMSymbolConfig:
         state_file=config.state_file_for("reversal_manager_state", symbol),
         sl_state_file=config.state_file_for("reversal_manager_sl_state", symbol),
         levels_state_file=config.state_file_for("reversal_manager_levels_state", symbol),
-        bridge_bar_flip_state_file=config.state_file_for("reversal_manager_bridge_bar_flip_state", symbol),
         heartbeat_file=config.state_file_for("reversal_manager_heartbeat", symbol),
         ict_magic_number=int(os.getenv(prefix + "ICT_MAGIC_NUMBER", str(d["ict_magic_number"]))),
         ict_state_file=config.state_file_for("reversal_manager_ict_state", symbol),

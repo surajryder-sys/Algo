@@ -29,8 +29,8 @@ Run with: python -m v6_sentinel.reversal_main
 Summary of the STR component's own full rule set (FULL REDESIGN,
 2026-09-19 -- see reversal_entry.py's own docstring for the complete
 design; no longer the M15-Primary-Structure-gated system this used to
-be, and no longer depends on structure.py/BridgeBarFlipTracker/the live
-ATR-dual bridge AT ALL for its entry logic):
+be, and no longer depends on the live ATR-dual bridge AT ALL for its entry
+logic):
   - 8 HTF timeframes (D1, H4, H2, H1, M30, M15, M10, M5), each with
     THREE independently-tracked lines: the ATR dual-trail's own two
     lines (STRONG/WEAK/TRAP via flip_state, pure copy_rates recompute)
@@ -160,9 +160,7 @@ def _open_position(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, c
     proximity check to STR's own entries only (never ICT's, since ICT's
     entries are already sourced FROM these exact zones). `sticky` is
     still threaded through and instantiated (see _build_runtime()) so
-    reinstating the check later is a small, isolated change -- same
-    "keep the plumbing, skip the active use" treatment as Supertrend in
-    structure.py."""
+    reinstating the check later is a small, isolated change."""
     comment = _entry_comment(component, tag)
     print(f"[V6S-{component}-ENTRY] {_DIR_LABEL[direction]} ({tag}) {ref_desc} sl={sl:.3f}")
     if not cfg.enable_trading:
@@ -320,7 +318,7 @@ class _SymbolRuntime:
     globals, V5S's own single-symbol shape) is what makes this file
     genuinely multi-instrument: adding a symbol means constructing
     another _SymbolRuntime, never touching run_once() or any class
-    above. No BridgeBarFlipTracker/StaleAlertTracker any more (2026-09-19)
+    above. No flip/stale-alert trackers any more (2026-09-19)
     -- neither STR nor ICT depend on the live ATR-dual bridge for entry
     logic any more, both are now native-copy_rates + CISD driven."""
     cfg: RMSymbolConfig

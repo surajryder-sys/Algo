@@ -6,33 +6,33 @@ CISD_{symbol}_{tf}.json, same OBBridge Common Files folder every other
 bridge reader here uses. Scoped to Reversal Manager components only
 (RM-STR/RM-ICT), not Trend Manager.
 
-DESIGN (carried over from V5S's confirmed design, 2026-09-15):
-  - ADDS ALONGSIDE the existing ST1F/M3F/ST3F/M5F triggers, doesn't
-    replace them -- same "any one sufficient" additive pattern.
-  - M3 and M5 ONLY (not M1, not M15) -- tags "M3CD"/"M5CD" ("CD" = CISD,
-    matching this project's short trigger-code convention).
-  - NO M15 Primary Structure gate -- a CISD confirmation on its own
-    timeframe is sufficient to fire on its own, independent of M15's
-    current bias (unlike ST1F/M3F/ST3F/M5F, which are all gated by it).
+HOW IT'S USED (current V6S design -- see reversal_entry.py and
+reversal_ict.py):
+  - CISD confirmation is the ENTRY TRIGGER for both Reversal Manager
+    components: a fresh confirmation (fresh_cisd()) in the matching
+    direction after a level/zone touch. RM-STR listens on M3 or M5;
+    RM-ICT's pool depends on the touched zone's timeframe (M3/M5, or
+    M1/M3 for M3 zones, M1/M3/M5 for M5 zones). Trigger tags are
+    "M1CD"/"M3CD"/"M5CD" ("CD" = CISD).
+  - There is no M15 Primary Structure gate and no other trigger type any
+    more -- the older ST1F/M3F/ST3F/M5F triggers are gone.
 
-SL BASIS: NOT last_cisd_level (the origin candle's own open, i.e. the
-exact price CISD confirms THROUGH -- too early/easy to stop-hunt) --
-"nearest active swing low/high" instead: wider, structural, ties the
-stop to the swing the reversal is actually trading against rather than
-a tight technical level price sits right back on. Sourced from
-CISD_AlgoAlpha.mq5's own last_cisd_has_swing/last_cisd_swing_level
-fields -- FROZEN at the exact instant the CISD confirmed, never
-live-recomputed here. has_swing can genuinely be False (no active swing
-line existed yet) -- no fallback, no guess, that CISD trigger simply
-produces no signal this cycle, same philosophy every other trigger here
-already follows.
+SL BASIS: last_cisd_level (the origin candle's own open, i.e. the exact
+price CISD confirms THROUGH) is NOT used -- too early/easy to stop-hunt.
+The "nearest active swing low/high" (sl_basis() below) is the LAST-RESORT
+SL basis: sl_basis.py tries the farthest usable M5 line, then M3, and only
+then this swing. Sourced from CISD_AlgoAlpha.mq5's own
+last_cisd_has_swing/last_cisd_swing_level fields -- FROZEN at the exact
+instant the CISD confirmed, never live-recomputed here. has_swing can
+genuinely be False (no active swing line existed yet) -- sl_basis()
+then returns None and, if no line was usable either, that CISD produces
+no signal this cycle (RM-STR) -- no fallback, no guess.
 
 Bar-close-gated on the MQL5 side already, same bridge-is-ground-truth
-philosophy st_bridge.py's own reader uses -- no independent recompute
-here. fresh_cisd() mirrors st_bridge.fresh_flip()'s own "privileged,
-momentary" contract exactly: only non-None the EXACT bar a CISD
-confirmed (last_cisd_time == bar_time), never an older-but-still-current
-CISD state.
+philosophy as this project's other bridge readers -- no independent
+recompute here. fresh_cisd() has a "privileged, momentary" contract:
+only non-None the EXACT bar a CISD confirmed (last_cisd_time ==
+bar_time), never an older-but-still-current CISD state.
 """
 from __future__ import annotations
 
@@ -101,8 +101,8 @@ def read_cisd(symbol: str, tf_minutes: int) -> Optional[CISDState]:
 
 def fresh_cisd(symbol: str, tf_minutes: int) -> Optional[CISDState]:
     """The CISDState only if it confirmed on the CURRENT/latest closed
-    bar (last_cisd_time == bar_time) -- same "privileged, momentary"
-    contract as st_bridge.fresh_flip(): an OLDER CISD that's still the
+    bar (last_cisd_time == bar_time) -- a "privileged, momentary"
+    contract: an OLDER CISD that's still the
     current trend but didn't just confirm THIS bar does NOT count, so
     this never re-fires once a bar passes without a fresh confirmation.
     None if there's no fresh confirmation, or the bridge has nothing to
