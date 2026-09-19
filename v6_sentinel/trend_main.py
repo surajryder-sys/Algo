@@ -1,0 +1,377 @@
+"""V6-Sentinel Trend Manager (TM-STR) -- main loop. Built 2026-09-20 from a
+rule-by-rule discussion with the user (NOT a port of V5-Sentinel's main.py,
+whose M5-parent/M3-execution design sat on structure.py, which V6S no
+longer has). One runtime bundle PER SYMBOL in config.ACTIVE_SYMBOLS, same
+multi-instrument shape as reversal_main.py.
+
+Run with: python -m v6_sentinel.trend_main
+
+THE RULES (all confirmed with the user):
+
+  BIAS -- M15 primary structure (trend_bias.py): the M15 ATR-dual flip
+  (strong = up, weak = down, a trap keeps the previous direction) and the
+  M15 CISD (bullish = up, bearish = down); whichever event is most recent
+  decides. ATR comes from the live MQL5 bridge via the persisted flip
+  tracker.
+
+  ENTRY -- M5 execution (trend_entry.py): a FRESH M5 CISD in the same
+  direction as the M15 bias. Nothing else triggers an entry. One trade per
+  M5 CISD event. M3 is a second execution timeframe to be added later.
+
+  INITIAL SL -- farthest usable M5 line (ATR dual / Supertrend), else the
+  same on M15, else the CISD's swing, else no trade; plus buffer.
+
+  AFTER ENTRY (V5S's scheme, trailing on M5 -- confirmed): breakeven at
+  +breakeven_trigger_points or after the first partial, 70% closed at +10
+  and a further 15% at +15, the last 15% trails M5's far ATR line minus
+  buffer. The SL only tightens and a manual SL edit pauses trailing
+  (sl_manager.py / trade_manager.py, reused unchanged).
+
+  LIFECYCLE -- when the M15 bias flips AGAINST an open trade, the trade
+  is CLOSED IMMEDIATELY (confirmed; chosen over V5S's "only when an
+  opposite entry fires"). A new trade in the new direction then needs the
+  next matching M5 CISD. A same-direction signal while a trade is open is
+  ignored (its event is marked handled so it can't fire later).
+
+  BIAS FEED WATCH -- the M15 ATR bias comes from a file the MQL5 indicator
+  rewrites every couple of seconds. If that indicator/chart stops, the
+  tracker just keeps the last state and the bias would silently FREEZE.
+  BiasFeedWatch below notices that: when the file has been stale for
+  STALE_FEED_SECONDS while prices are still ticking, it sends ONE alert
+  and PAUSES NEW ENTRIES until the feed is fresh again (open trades are
+  still managed, and a bias-flip close still works). It only counts as a
+  fault while ticks are actually arriving -- a closed market makes the file
+  stale too, and that must not alarm or block anything.
+
+  ICT GUARD -- not applied (assumed to match RM's "no guard as of now";
+  not separately confirmed for TM).
+
+Comments: "V6S-TM-STR-{trigger}" on entry (e.g. "V6S-TM-STR-M5CD"),
+"-P1"/"-P2"/"-BF" appended for partials / bias-flip close.
+
+Safety: each symbol's own enable_trading (trend_config.py,
+V6S_TM_{SYMBOL}_ENABLE_TRADING) must be explicitly true for any order to
+be sent/modified/closed for THAT symbol.
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Optional
+
+import MetaTrader5 as mt5
+
+from v6_sentinel import alerts, bridge, broker, config, decision_log, heartbeat, rates, sl_manager, trade_manager, trend_bias, trend_entry
+from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
+from v6_sentinel.flip_state import far_near_line
+from v6_sentinel.trend_config import TMSymbolConfig, load_symbol_config
+
+_DIR_LABEL = {1: "BUY", -1: "SELL"}
+
+STALE_FEED_SECONDS = 60.0            # sustained staleness, not a blip (same threshold V5S used)
+TICKS_FLOWING_WINDOW_SECONDS = 120.0  # prices count as "flowing" if the tick time changed this recently
+
+
+class BiasFeedWatch:
+    """Watches the M15 ATR bridge feed. Pure logic (time and tick time are
+    passed in) so it can be tested without MT5.
+
+    update() returns (entries_blocked, message): entries_blocked is True once
+    the feed has been stale for STALE_FEED_SECONDS WHILE ticks are flowing;
+    message is a one-off alert string on entering that state, and a one-off
+    recovery string on leaving it (else None).
+
+    "Ticks flowing" needs an OBSERVED CHANGE of the broker's tick time within
+    TICKS_FLOWING_WINDOW_SECONDS -- the very first tick seen only sets the
+    baseline. So a process started on a weekend never counts as flowing, and
+    a stale file then is treated as normal, not a fault. Deliberately based
+    on the tick time CHANGING rather than its age, so it doesn't depend on the
+    broker's server clock matching this machine's."""
+
+    def __init__(self):
+        self._last_tick_time: Optional[int] = None
+        self._last_tick_change: Optional[float] = None
+        self._stale_since: Optional[float] = None
+        self._alerted = False
+
+    def update(self, now: float, tick_time: Optional[int], feed_ok: bool) -> tuple[bool, Optional[str]]:
+        if tick_time is not None and tick_time != self._last_tick_time:
+            if self._last_tick_time is not None:
+                self._last_tick_change = now
+            self._last_tick_time = tick_time
+        flowing = (self._last_tick_change is not None
+                   and (now - self._last_tick_change) < TICKS_FLOWING_WINDOW_SECONDS)
+
+        if feed_ok or not flowing:
+            recovered = self._alerted and feed_ok
+            self._stale_since = None
+            self._alerted = False
+            return False, ("recovered" if recovered else None)
+
+        if self._stale_since is None:
+            self._stale_since = now
+        if (now - self._stale_since) < STALE_FEED_SECONDS:
+            return False, None
+        if not self._alerted:
+            self._alerted = True
+            return True, "stale"
+        return True, None
+
+
+def _entry_comment(tag: str) -> str:
+    return f"V6S-TM-STR-{tag}"
+
+
+def _action_comment(tag: str, action_code: str) -> str:
+    return f"V6S-TM-STR-{tag}-{action_code}"
+
+
+def _extract_tag(comment: str) -> str:
+    """The entry tag out of a "V6S-TM-STR-{tag}[-action]" comment, used to
+    carry it forward onto later partial-booking / close comments. Joins
+    everything after the fixed prefix so a dash-containing tag survives."""
+    parts = comment.split("-") if comment else []
+    if len(parts) >= 4 and parts[0] == "V6S" and parts[1] == "TM" and parts[2] == "STR":
+        return "-".join(parts[3:])
+    return "UNK"
+
+
+def _open_position(cfg: TMSymbolConfig, direction: int, sl: float, tag: str, ref_desc: str) -> bool:
+    """True if the entry went through (filled, or enable_trading is False
+    so it's decision-only and conceptually accepted); False only on a
+    genuine order rejection while live. The caller must NOT mark the
+    event handled on a False return -- a failed order (e.g. retcode 10044
+    "session closed") must not consume a valid setup that never got a
+    position."""
+    comment = _entry_comment(tag)
+    print(f"[V6S-TM-ENTRY] {cfg.symbol} {_DIR_LABEL[direction]} ({tag}) {ref_desc} sl={sl:.3f}")
+    if not cfg.enable_trading:
+        print("[V6S-TM-ENTRY] enable_trading is false -- decision only, no order sent")
+        decision_log.log(cfg.decision_log_file, "entry_decision_only", direction=_DIR_LABEL[direction],
+                         tag=tag, ref=ref_desc, sl=sl)
+        return True
+    result = broker.send_market_order(cfg.symbol, direction, cfg.lots, sl, cfg.magic_number,
+                                      cfg.deviation_points, comment)
+    if not result.ok:
+        print(f"[V6S-TM-ENTRY] order_send failed: retcode={result.retcode} comment={result.comment}")
+        decision_log.log(cfg.decision_log_file, "entry_failed", direction=_DIR_LABEL[direction], tag=tag,
+                         ref=ref_desc, retcode=result.retcode, broker_comment=result.comment)
+        return False
+    print(f"[V6S-TM-ENTRY] filled, ticket={result.ticket}")
+    decision_log.log(cfg.decision_log_file, "entry_filled", direction=_DIR_LABEL[direction], tag=tag,
+                     ref=ref_desc, sl=sl, ticket=result.ticket)
+    return True
+
+
+def _close_position(cfg: TMSymbolConfig, position, action_label: str, tag: str, action_code: str) -> bool:
+    print(f"[V6S-TM-EXIT] {cfg.symbol} closing #{position.ticket} ({action_label}), volume={position.volume}")
+    if not cfg.enable_trading:
+        print("[V6S-TM-EXIT] enable_trading is false -- decision only, no order sent")
+        decision_log.log(cfg.decision_log_file, "close_decision_only", ticket=position.ticket, action=action_label)
+        return True
+    result = broker.close_position(cfg.symbol, position, cfg.deviation_points,
+                                   comment=_action_comment(tag, action_code))
+    if not result.ok:
+        print(f"[V6S-TM-EXIT] close failed: retcode={result.retcode} comment={result.comment}")
+        decision_log.log(cfg.decision_log_file, "close_failed", ticket=position.ticket, action=action_label,
+                         retcode=result.retcode)
+        return False
+    decision_log.log(cfg.decision_log_file, "close_filled", ticket=position.ticket, action=action_label, tag=tag)
+    return True
+
+
+def _trailing_far_line(symbol: str, tf_minutes: int, direction: int) -> Optional[float]:
+    """The far ATR trail line of one timeframe for a trade's own
+    direction (the lower line for a BUY, the higher for a SELL), computed
+    natively from MT5 history -- no chart needed. None if unavailable, in
+    which case that cycle's SL update is skipped rather than guessed at."""
+    series = rates.read_trail_series(symbol, tf_minutes)
+    if series is None:
+        return None
+    t1, t2 = series.trail1[-1], series.trail2[-1]
+    if t1 is None or t2 is None:
+        return None
+    far, _near = far_near_line(direction, t1, t2)
+    return far
+
+
+def _run_sl_manager(cfg: TMSymbolConfig, mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager, position) -> None:
+    direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+    bid, ask = broker.get_tick_price(cfg.symbol)
+    current_price = bid if direction == 1 else ask
+    far = _trailing_far_line(cfg.symbol, cfg.trailing_timeframe, direction)
+    if far is None:
+        print(f"[V6S-TM-SL] M{cfg.trailing_timeframe} far line unavailable -- skipping SL update this cycle")
+        return
+    current_sl = position.sl if position.sl else None
+
+    proposed = mgr.compute(position.ticket, direction, position.price_open, current_price, current_sl, far,
+                           tm_mgr.is_partially_cut(position.ticket))
+    if proposed is None:
+        return
+    print(f"[V6S-TM-SL] #{position.ticket} -> {proposed:.3f}")
+    if not cfg.enable_trading:
+        print("[V6S-TM-SL] enable_trading is false -- decision only, no modify sent")
+        return
+    result = broker.modify_position_sl(cfg.symbol, position.ticket, proposed, tp=position.tp)
+    if result.ok:
+        mgr.confirm_applied(position.ticket, proposed)
+    else:
+        print(f"[V6S-TM-SL] modify failed: retcode={result.retcode} comment={result.comment}")
+
+
+def _run_trade_manager(cfg: TMSymbolConfig, mgr: trade_manager.TradeManager, position) -> None:
+    direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+    bid, ask = broker.get_tick_price(cfg.symbol)
+    current_price = bid if direction == 1 else ask
+    has_tp = broker.has_manual_tp(position)
+
+    symbol_info = mt5.symbol_info(cfg.symbol)
+    volume_step = symbol_info.volume_step if symbol_info is not None else 0.01
+
+    outcome = mgr.evaluate(position.ticket, direction, position.price_open, current_price,
+                           position.volume, has_tp, volume_step, entry_comment=position.comment)
+    if outcome is None:
+        return
+    volume, label = outcome
+    action_code = "P1" if label == "partial1" else "P2"
+    entry_tag = _extract_tag(mgr.get_entry_comment(position.ticket) or "")
+
+    print(f"[V6S-TM-TM] #{position.ticket} booking {label}: {volume} lots")
+    if not cfg.enable_trading:
+        print("[V6S-TM-TM] enable_trading is false -- decision only, no close sent")
+        return
+    result = broker.close_position(cfg.symbol, position, cfg.deviation_points, volume=volume,
+                                   comment=_action_comment(entry_tag, action_code))
+    if not result.ok:
+        print(f"[V6S-TM-TM] partial close failed: retcode={result.retcode} comment={result.comment}")
+
+
+@dataclass
+class _SymbolRuntime:
+    """Every stateful object one symbol's TM-STR needs -- one per symbol
+    in config.ACTIVE_SYMBOLS."""
+    cfg: TMSymbolConfig
+    tracker: BridgeBarFlipTracker
+    eligibility: trend_entry.TrendEligibilityStore
+    sl_mgr: sl_manager.SLManager
+    tm_mgr: trade_manager.TradeManager
+    feed_watch: BiasFeedWatch
+
+
+def _build_runtime(symbol: str) -> _SymbolRuntime:
+    cfg = load_symbol_config(symbol)
+    return _SymbolRuntime(
+        cfg=cfg,
+        tracker=BridgeBarFlipTracker(cfg.bridge_bar_flip_state_file),
+        eligibility=trend_entry.TrendEligibilityStore(cfg.eligibility_state_file),
+        sl_mgr=sl_manager.SLManager(cfg.sl_state_file, cfg.breakeven_trigger_points, cfg.sl_buffer),
+        tm_mgr=trade_manager.TradeManager(cfg.state_file, cfg.partial1_trigger_points, cfg.partial1_fraction,
+                                          cfg.partial2_trigger_points, cfg.partial2_fraction),
+        feed_watch=BiasFeedWatch(),
+    )
+
+
+def _current_position(cfg: TMSymbolConfig):
+    positions = broker.get_positions(cfg.symbol, cfg.magic_number)
+    return positions[0] if positions else None
+
+
+def run_once(rt: _SymbolRuntime) -> None:
+    cfg = rt.cfg
+    bid, ask = broker.get_tick_price(cfg.symbol)
+    bias = trend_bias.compute_bias(rt.tracker, cfg.symbol, cfg.bias_timeframe)
+
+    tick = mt5.symbol_info_tick(cfg.symbol)
+    feed_ok = bridge.read_lines(cfg.symbol, cfg.bias_timeframe) is not None
+    entries_blocked, feed_event = rt.feed_watch.update(time.time(), tick.time if tick is not None else None, feed_ok)
+    if feed_event == "stale":
+        msg = (f"[V6S-TM] {cfg.symbol} M{cfg.bias_timeframe} ATR bridge has been stale for over "
+               f"{STALE_FEED_SECONDS:.0f}s while prices are still ticking -- the bias may be frozen. New "
+               f"entries are PAUSED until it recovers; open trades are still managed. Check the "
+               f"M{cfg.bias_timeframe} chart/indicator.")
+        print(msg)
+        decision_log.log(cfg.decision_log_file, "bias_feed_stale", bias_timeframe=cfg.bias_timeframe)
+        alerts.send_alert(msg)
+    elif feed_event == "recovered":
+        msg = f"[V6S-TM] {cfg.symbol} M{cfg.bias_timeframe} ATR bridge is fresh again -- new entries resumed."
+        print(msg)
+        decision_log.log(cfg.decision_log_file, "bias_feed_recovered", bias_timeframe=cfg.bias_timeframe)
+        alerts.send_alert(msg)
+
+    open_tickets = {p.ticket for p in broker.get_positions(cfg.symbol, cfg.magic_number)}
+    rt.sl_mgr.prune(open_tickets)
+    rt.tm_mgr.prune(open_tickets)
+    position = _current_position(cfg)
+
+    # 1. Bias flipped AGAINST an open trade -> close it now (confirmed).
+    if position is not None and bias is not None:
+        pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+        if bias.direction != pos_direction:
+            tag = _extract_tag(rt.tm_mgr.get_entry_comment(position.ticket) or position.comment or "")
+            print(f"[V6S-TM] {cfg.symbol} M{cfg.bias_timeframe} bias is now {_DIR_LABEL[bias.direction]} "
+                  f"({bias.source}) against the open {_DIR_LABEL[pos_direction]} #{position.ticket}")
+            decision_log.log(cfg.decision_log_file, "bias_flip", ticket=position.ticket,
+                             position=_DIR_LABEL[pos_direction], bias=_DIR_LABEL[bias.direction],
+                             bias_source=bias.source, bias_event_time=bias.event_time)
+            _close_position(cfg, position, "BIASFLIP", tag, "BF")
+            position = _current_position(cfg)
+
+    # 2. Entry: fresh M5 CISD matching the M15 bias (paused while the bias feed is stale).
+    if bias is not None and not entries_blocked:
+        sig = trend_entry.find_signal(cfg.symbol, bias, cfg.execution_timeframes, rt.eligibility,
+                                      cfg.sl_buffer, bid, ask)
+        if sig is not None:
+            ref = f"cisd@{sig.event_time} bias={bias.source}@{bias.event_time} sl={sig.sl_source}"
+            decision_log.log(cfg.decision_log_file, "signal_found", direction=_DIR_LABEL[sig.direction],
+                             tf_minutes=sig.timeframe_minutes, trigger=sig.trigger, event_time=sig.event_time,
+                             sl=sig.sl, sl_source=sig.sl_source, bias_source=sig.bias_source,
+                             bias_event_time=sig.bias_event_time)
+            if position is None:
+                if _open_position(cfg, sig.direction, sig.sl, sig.trigger, ref):
+                    rt.eligibility.mark_traded(sig.timeframe_minutes, sig.event_time)
+            else:
+                pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+                if sig.direction == pos_direction:
+                    rt.eligibility.mark_traded(sig.timeframe_minutes, sig.event_time)
+                    print(f"[V6S-TM] {sig.trigger} qualifies ({_DIR_LABEL[sig.direction]}) but a "
+                          f"{_DIR_LABEL[pos_direction]} is already open on #{position.ticket} -- marked handled")
+                    decision_log.log(cfg.decision_log_file, "redundant_signal", direction=_DIR_LABEL[sig.direction],
+                                     trigger=sig.trigger, existing_ticket=position.ticket)
+                else:
+                    # An opposite trade is somehow still open (its bias-flip close failed):
+                    # don't stack, and don't consume the event -- retry next cycle.
+                    print(f"[V6S-TM] {sig.trigger} qualifies ({_DIR_LABEL[sig.direction]}) but an opposite "
+                          f"position #{position.ticket} is still open -- not entering this cycle")
+
+    # 3. Manage whatever is open (independent of whether a bias exists right now).
+    position = _current_position(cfg)
+    if position is not None:
+        _run_sl_manager(cfg, rt.sl_mgr, rt.tm_mgr, position)
+        _run_trade_manager(cfg, rt.tm_mgr, position)
+
+
+def main() -> None:
+    runtimes = [_build_runtime(symbol) for symbol in config.ACTIVE_SYMBOLS]
+    for rt in runtimes:
+        cfg = rt.cfg
+        print(f"[V6S-TM] {cfg.symbol} starting -- magic={cfg.magic_number} bias=M{cfg.bias_timeframe} "
+              f"exec={[f'M{t}' for t in cfg.execution_timeframes]} enable_trading={cfg.enable_trading} "
+              f"poll={cfg.poll_seconds}s")
+        broker.connect(cfg.symbol, cfg.mt5_terminal_path, cfg.mt5_login, cfg.mt5_password, cfg.mt5_server)
+
+    try:
+        while True:
+            for rt in runtimes:
+                try:
+                    run_once(rt)
+                except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
+                    print(f"[V6S-TM] {rt.cfg.symbol} cycle error: {exc!r}")
+                heartbeat.write(rt.cfg.heartbeat_file)
+            time.sleep(min(rt.cfg.poll_seconds for rt in runtimes))
+    finally:
+        broker.shutdown()
+
+
+if __name__ == "__main__":
+    main()

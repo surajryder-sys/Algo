@@ -90,7 +90,7 @@ import MetaTrader5 as mt5
 
 from v6_sentinel import broker, config, decision_log, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sl_manager, trade_manager
 from v6_sentinel.bridge_flip import m3_far_line
-from v6_sentinel.critical_alerts_telegram import send_message as _telegram_send
+from v6_sentinel.alerts import send_alert as _send_alert
 from v6_sentinel.reversal_config import RMSymbolConfig, load_symbol_config
 
 _DIR_LABEL = {1: "BUY", -1: "SELL"}
@@ -124,19 +124,6 @@ def _entry_comment(component: str, tag: str) -> str:
 
 def _action_comment(component: str, tag: str, action_code: str) -> str:
     return f"V6S-RM-{component}-{tag}-{action_code}"
-
-
-def _send_alert(text: str) -> None:
-    """Best-effort push to the shared alert bot -- never raises, a
-    Telegram outage should never take the trading loop down with it."""
-    token, chat_id = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        print(f"[V6S-RM-ALERT] (no bot configured) {text}")
-        return
-    try:
-        _telegram_send(token, chat_id, text)
-    except Exception as exc:  # noqa: BLE001 -- alerting must never break the loop
-        print(f"[V6S-RM-ALERT] send failed: {exc!r} -- message was: {text}")
 
 
 def _open_position(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, component: str, magic_number: int,

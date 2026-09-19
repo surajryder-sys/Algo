@@ -14,7 +14,9 @@ on one timeframe, the FARTHEST from entry wins (widest SL -- the user's
 explicit choice over nearest): the highest usable line for a SELL, the
 lowest for a BUY. There is deliberately NO maximum-distance cap here.
 
-M5 is tried first and M3 only if M5 has no usable line. Lines are
+Timeframes are tried in the order given (default M5 then M3, RM's rule;
+TM-STR passes M5 then M15) and a later one only if the earlier has no
+usable line. Lines are
 computed straight from copy_rates (rates.read_trail_series /
 rates.read_supertrend -- no chart or indicator needed) and cached in a
 caller-supplied dict so several signals in one cycle don't recompute
@@ -66,8 +68,9 @@ def line_values(symbol: str, tf_minutes: int, cache: dict) -> list[tuple[str, fl
     return values
 
 
-def _pick(symbol: str, direction: int, entry_price: float, cisd, cache: dict) -> Optional[tuple[float, str]]:
-    for tf_minutes in SL_LINE_TIMEFRAMES:
+def _pick(symbol: str, direction: int, entry_price: float, cisd, cache: dict,
+          timeframes: tuple[int, ...]) -> Optional[tuple[float, str]]:
+    for tf_minutes in timeframes:
         usable = [(label, v) for label, v in line_values(symbol, tf_minutes, cache)
                   if (v > entry_price if direction == -1 else v < entry_price)]
         if usable:
@@ -78,7 +81,8 @@ def _pick(symbol: str, direction: int, entry_price: float, cisd, cache: dict) ->
 
 
 def initial_sl_basis(symbol: str, direction: int, entry_price: float, cisd, cache: dict,
-                     sl_buffer: float = 0.0, must_beat_sl: Optional[float] = None) -> Optional[tuple[float, str]]:
+                     sl_buffer: float = 0.0, must_beat_sl: Optional[float] = None,
+                     timeframes: tuple[int, ...] = SL_LINE_TIMEFRAMES) -> Optional[tuple[float, str]]:
     """(basis price WITHOUT buffer, source label) or None if nothing is
     usable. Source label is "M5/ATR2", "M3/ST", ... for a line, or
     "SWING" for the CISD fallback (cisd_bridge.sl_basis(), the nearest
@@ -86,7 +90,7 @@ def initial_sl_basis(symbol: str, direction: int, entry_price: float, cisd, cach
     confirmed -- None if no active swing existed then). If must_beat_sl is
     given and the picked candidate's final SL (basis -/+ sl_buffer) is not
     strictly tighter than it, returns None -- see module docstring."""
-    resolved = _pick(symbol, direction, entry_price, cisd, cache)
+    resolved = _pick(symbol, direction, entry_price, cisd, cache, timeframes)
     if resolved is None or must_beat_sl is None:
         return resolved
     basis = resolved[0]
