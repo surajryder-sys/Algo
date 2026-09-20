@@ -83,12 +83,14 @@ independent of every other symbol's/component's own flag.
 from __future__ import annotations
 
 import os
+import dataclasses
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import broker, config, decision_log, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sl_manager, trade_manager
+from v6_sentinel import broker, config, decision_log, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sl_manager, trade_journal, trade_manager
 from v6_sentinel.bridge_flip import m3_far_line
 from v6_sentinel.alerts import send_alert as _send_alert
 from v6_sentinel.reversal_config import RMSymbolConfig, load_symbol_config
@@ -127,7 +129,8 @@ def _action_comment(component: str, tag: str, action_code: str) -> str:
 
 
 def _open_position(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, component: str, magic_number: int,
-                   direction: int, sl: float, tag: str, ref_desc: str) -> bool:
+                   direction: int, sl: float, tag: str, ref_desc: str,
+                   journal: Optional[trade_journal.TradeJournal] = None, logic: Optional[dict] = None) -> bool:
     """Returns True if the entry actually went through (filled, or
     enable_trading is False so it's decision-only and conceptually
     "accepted") -- False only on a genuine order rejection while live.
@@ -166,10 +169,13 @@ def _open_position(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, c
     print(f"[V6S-{component}-ENTRY] filled, ticket={result.ticket}")
     decision_log.log(cfg.decision_log_file, "entry_filled", component=component, direction=_DIR_LABEL[direction],
                      tag=tag, ref=ref_desc, sl=sl, ticket=result.ticket)
+    if journal is not None and result.ticket is not None:
+        journal.entry(result.ticket, _DIR_LABEL[direction], cfg.lots, sl, comment, logic or {})
     return True
 
 
-def _close_position(cfg: RMSymbolConfig, component: str, position, action_label: str, tag: str, action_code: str) -> bool:
+def _close_position(cfg: RMSymbolConfig, component: str, position, action_label: str, tag: str, action_code: str,
+                    journal: Optional[trade_journal.TradeJournal] = None, detail: Optional[dict] = None) -> bool:
     print(f"[V6S-{component}-EXIT] closing #{position.ticket} ({action_label}), volume={position.volume}")
     if not cfg.enable_trading:
         print(f"[V6S-{component}-EXIT] enable_trading is false -- decision only, no order sent")
@@ -183,11 +189,14 @@ def _close_position(cfg: RMSymbolConfig, component: str, position, action_label:
         return False
     decision_log.log(cfg.decision_log_file, "close_filled", component=component, ticket=position.ticket,
                      action=action_label, tag=tag)
+    if journal is not None:
+        journal.exit_requested(position.ticket, action_label, detail)
     return True
 
 
 def _run_sl_manager(cfg: RMSymbolConfig, component: str, mgr: sl_manager.SLManager,
-                    tm_mgr: trade_manager.TradeManager, position) -> None:
+                    tm_mgr: trade_manager.TradeManager, position,
+                    journal: Optional[trade_journal.TradeJournal] = None) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = bid if direction == 1 else ask
@@ -212,11 +221,14 @@ def _run_sl_manager(cfg: RMSymbolConfig, component: str, mgr: sl_manager.SLManag
     result = broker.modify_position_sl(cfg.symbol, position.ticket, proposed, tp=position.tp)
     if result.ok:
         mgr.confirm_applied(position.ticket, proposed)
+        if journal is not None:
+            journal.sl_move(position.ticket, current_sl, proposed, current_price)
     else:
         print(f"[V6S-{component}-SL] modify failed: retcode={result.retcode} comment={result.comment}")
 
 
-def _run_trade_manager(cfg: RMSymbolConfig, component: str, mgr: trade_manager.TradeManager, position) -> None:
+def _run_trade_manager(cfg: RMSymbolConfig, component: str, mgr: trade_manager.TradeManager, position,
+                       journal: Optional[trade_journal.TradeJournal] = None) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = bid if direction == 1 else ask
@@ -245,10 +257,13 @@ def _run_trade_manager(cfg: RMSymbolConfig, component: str, mgr: trade_manager.T
                                    comment=_action_comment(component, entry_tag, action_code))
     if not result.ok:
         print(f"[V6S-{component}-TM] partial close failed: retcode={result.retcode} comment={result.comment}")
+    elif journal is not None:
+        journal.partial(position.ticket, label, volume, current_price)
 
 
 def _process_signal(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, component: str, magic_number: int,
-                    direction: int, sl: float, tag: str, ref_desc: str, mark_traded, on_redundant) -> None:
+                    direction: int, sl: float, tag: str, ref_desc: str, mark_traded, on_redundant,
+                    journal: Optional[trade_journal.TradeJournal] = None, logic: Optional[dict] = None) -> None:
     """Acts on ONE signal against whatever position is ACTUALLY open right
     now on THIS component's own magic number (re-queried, so an earlier
     signal's own action this same cycle is visible here). Shared CODE
@@ -276,15 +291,17 @@ def _process_signal(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, 
     position = positions[0] if positions else None
 
     if position is None:
-        if _open_position(cfg, sticky, component, magic_number, direction, sl, tag, ref_desc):
+        if _open_position(cfg, sticky, component, magic_number, direction, sl, tag, ref_desc, journal, logic):
             mark_traded()
         return
 
     pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
 
     if direction != pos_direction:
-        if (_close_position(cfg, component, position, "SQOFF", tag, "SQ")
-                and _open_position(cfg, sticky, component, magic_number, direction, sl, tag, ref_desc)):
+        if (_close_position(cfg, component, position, "SQOFF", tag, "SQ", journal,
+                            {"rule": "opposite-direction reversal signal squared it off", "new_signal": tag,
+                             "new_direction": _DIR_LABEL[direction]})
+                and _open_position(cfg, sticky, component, magic_number, direction, sl, tag, ref_desc, journal, logic)):
             mark_traded()
     else:
         # SAME direction, whether still full-size or already partially
@@ -316,6 +333,8 @@ class _SymbolRuntime:
     store: htf_levels.LevelEligibilityStore
     ict_eligibility: reversal_ict.ICTEligibilityStore
     sticky: ict_guard.ICTGuardStickyStore
+    journal_str: Optional[trade_journal.TradeJournal] = None    # per-trade entry/exit logic, one per component
+    journal_ict: Optional[trade_journal.TradeJournal] = None
 
 
 def _build_runtime(symbol: str) -> _SymbolRuntime:
@@ -331,6 +350,8 @@ def _build_runtime(symbol: str) -> _SymbolRuntime:
         store=htf_levels.LevelEligibilityStore(cfg.levels_state_file),
         ict_eligibility=reversal_ict.ICTEligibilityStore(cfg.ict_eligibility_state_file),
         sticky=ict_guard.ICTGuardStickyStore(cfg.ict_guard_sticky_state_file),
+        journal_str=trade_journal.TradeJournal(cfg.str_trade_journal_file, "RM-STR", cfg.symbol),
+        journal_ict=trade_journal.TradeJournal(cfg.ict_trade_journal_file, "RM-ICT", cfg.symbol),
     )
 
 
@@ -375,9 +396,11 @@ def run_once(rt: _SymbolRuntime) -> None:
     # entirely independently -- see module docstring, this is not a
     # shared position slot.
     str_positions = broker.get_positions(cfg.symbol, cfg.magic_number)
+    rt.journal_str.reconcile({p.ticket for p in str_positions})
     rt.sl_mgr_str.prune({p.ticket for p in str_positions})
     rt.tm_mgr_str.prune({p.ticket for p in str_positions})
     ict_positions = broker.get_positions(cfg.symbol, cfg.ict_magic_number)
+    rt.journal_ict.reconcile({p.ticket for p in ict_positions})
     rt.sl_mgr_ict.prune({p.ticket for p in ict_positions})
     rt.tm_mgr_ict.prune({p.ticket for p in ict_positions})
 
@@ -393,13 +416,17 @@ def run_once(rt: _SymbolRuntime) -> None:
         _process_signal(cfg, rt.sticky, "STR", cfg.magic_number, sig.direction, sig.sl, _tag(sig),
                         f"level={sig.level_value:.3f}",
                         lambda tf=sig.timeframe_minutes, src=sig.source, d=sig.direction: rt.store.mark_traded(tf, src, d),
-                        lambda direction, tag, ref_desc, ticket: _on_redundant("STR", direction, tag, ref_desc, ticket))
+                        lambda direction, tag, ref_desc, ticket: _on_redundant("STR", direction, tag, ref_desc, ticket),
+                        rt.journal_str, {**dataclasses.asdict(sig), "rule": "HTF line touch + CISD",
+                                         "direction": _DIR_LABEL[sig.direction], "bid": bid, "ask": ask})
     for sig in ict_signals:
         _process_signal(cfg, rt.sticky, "ICT", cfg.ict_magic_number, sig.direction, sig.sl, _ict_tag(sig),
                         f"zone=[{sig.zone_btm:.3f}-{sig.zone_top:.3f}]",
                         lambda zid=sig.zone_id, top=sig.zone_top, btm=sig.zone_btm:
                             rt.ict_eligibility.mark_traded(zid, top, btm),
-                        lambda direction, tag, ref_desc, ticket: _on_redundant("ICT", direction, tag, ref_desc, ticket))
+                        lambda direction, tag, ref_desc, ticket: _on_redundant("ICT", direction, tag, ref_desc, ticket),
+                        rt.journal_ict, {**dataclasses.asdict(sig), "rule": "OB zone touch + CISD",
+                                         "direction": _DIR_LABEL[sig.direction], "bid": bid, "ask": ask})
 
     for component, entries in redundant.items():
         direction, first_tag, _first_ref, ticket = entries[0]
@@ -412,14 +439,14 @@ def run_once(rt: _SymbolRuntime) -> None:
     str_positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     str_position = str_positions[0] if str_positions else None
     if str_position is not None:
-        _run_sl_manager(cfg, "STR", rt.sl_mgr_str, rt.tm_mgr_str, str_position)
-        _run_trade_manager(cfg, "STR", rt.tm_mgr_str, str_position)
+        _run_sl_manager(cfg, "STR", rt.sl_mgr_str, rt.tm_mgr_str, str_position, rt.journal_str)
+        _run_trade_manager(cfg, "STR", rt.tm_mgr_str, str_position, rt.journal_str)
 
     ict_positions = broker.get_positions(cfg.symbol, cfg.ict_magic_number)
     ict_position = ict_positions[0] if ict_positions else None
     if ict_position is not None:
-        _run_sl_manager(cfg, "ICT", rt.sl_mgr_ict, rt.tm_mgr_ict, ict_position)
-        _run_trade_manager(cfg, "ICT", rt.tm_mgr_ict, ict_position)
+        _run_sl_manager(cfg, "ICT", rt.sl_mgr_ict, rt.tm_mgr_ict, ict_position, rt.journal_ict)
+        _run_trade_manager(cfg, "ICT", rt.tm_mgr_ict, ict_position, rt.journal_ict)
 
 
 def main() -> None:

@@ -74,6 +74,10 @@ Comments: "V6S-TM-STR-{trigger}" on entry (e.g. "V6S-TM-STR-M5CD"),
 "-P1"/"-P2"/"-BF"/"-MF"/"-SQ" appended for partials / bias-flip close / M5-flip
 close / square-off.
 
+TRADE JOURNAL -- every real trade is written to trade_journal.py's per-trade
+journal: the full entry logic when it opens, every partial and SL move, and
+why it ended (this bot's own exit reason, or the broker's: SL hit / manual).
+
 Safety: each symbol's own enable_trading (trend_config.py,
 V6S_TM_{SYMBOL}_ENABLE_TRADING) must be explicitly true for any order to
 be sent/modified/closed for THAT symbol.
@@ -81,12 +85,13 @@ be sent/modified/closed for THAT symbol.
 from __future__ import annotations
 
 import time
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import alerts, bridge, broker, config, decision_log, heartbeat, rates, sl_manager, trade_manager, trend_bias, trend_entry
+from v6_sentinel import alerts, bridge, broker, config, decision_log, heartbeat, rates, sl_manager, trade_journal, trade_manager, trend_bias, trend_entry
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.flip_state import far_near_line
 from v6_sentinel.trend_config import TMSymbolConfig, load_symbol_config
@@ -161,7 +166,8 @@ def _extract_tag(comment: str) -> str:
     return "UNK"
 
 
-def _open_position(cfg: TMSymbolConfig, direction: int, sl: float, tag: str, ref_desc: str) -> bool:
+def _open_position(cfg: TMSymbolConfig, direction: int, sl: float, tag: str, ref_desc: str,
+                   journal: Optional[trade_journal.TradeJournal] = None, logic: Optional[dict] = None) -> bool:
     """True if the entry went through (filled, or enable_trading is False
     so it's decision-only and conceptually accepted); False only on a
     genuine order rejection while live. The caller must NOT mark the
@@ -185,10 +191,13 @@ def _open_position(cfg: TMSymbolConfig, direction: int, sl: float, tag: str, ref
     print(f"[V6S-TM-ENTRY] filled, ticket={result.ticket}")
     decision_log.log(cfg.decision_log_file, "entry_filled", direction=_DIR_LABEL[direction], tag=tag,
                      ref=ref_desc, sl=sl, ticket=result.ticket)
+    if journal is not None and result.ticket is not None:
+        journal.entry(result.ticket, _DIR_LABEL[direction], cfg.lots, sl, comment, logic or {})
     return True
 
 
-def _close_position(cfg: TMSymbolConfig, position, action_label: str, tag: str, action_code: str) -> bool:
+def _close_position(cfg: TMSymbolConfig, position, action_label: str, tag: str, action_code: str,
+                    journal: Optional[trade_journal.TradeJournal] = None, detail: Optional[dict] = None) -> bool:
     print(f"[V6S-TM-EXIT] {cfg.symbol} closing #{position.ticket} ({action_label}), volume={position.volume}")
     if not cfg.enable_trading:
         print("[V6S-TM-EXIT] enable_trading is false -- decision only, no order sent")
@@ -202,6 +211,8 @@ def _close_position(cfg: TMSymbolConfig, position, action_label: str, tag: str, 
                          retcode=result.retcode)
         return False
     decision_log.log(cfg.decision_log_file, "close_filled", ticket=position.ticket, action=action_label, tag=tag)
+    if journal is not None:
+        journal.exit_requested(position.ticket, action_label, detail)
     return True
 
 
@@ -220,7 +231,8 @@ def _trailing_far_line(symbol: str, tf_minutes: int, direction: int) -> Optional
     return far
 
 
-def _run_sl_manager(cfg: TMSymbolConfig, mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager, position) -> None:
+def _run_sl_manager(cfg: TMSymbolConfig, mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager, position,
+                    journal: Optional[trade_journal.TradeJournal] = None) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = bid if direction == 1 else ask
@@ -241,11 +253,14 @@ def _run_sl_manager(cfg: TMSymbolConfig, mgr: sl_manager.SLManager, tm_mgr: trad
     result = broker.modify_position_sl(cfg.symbol, position.ticket, proposed, tp=position.tp)
     if result.ok:
         mgr.confirm_applied(position.ticket, proposed)
+        if journal is not None:
+            journal.sl_move(position.ticket, current_sl, proposed, current_price)
     else:
         print(f"[V6S-TM-SL] modify failed: retcode={result.retcode} comment={result.comment}")
 
 
-def _run_trade_manager(cfg: TMSymbolConfig, mgr: trade_manager.TradeManager, position) -> None:
+def _run_trade_manager(cfg: TMSymbolConfig, mgr: trade_manager.TradeManager, position,
+                       journal: Optional[trade_journal.TradeJournal] = None) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
     current_price = bid if direction == 1 else ask
@@ -270,6 +285,8 @@ def _run_trade_manager(cfg: TMSymbolConfig, mgr: trade_manager.TradeManager, pos
                                    comment=_action_comment(entry_tag, action_code))
     if not result.ok:
         print(f"[V6S-TM-TM] partial close failed: retcode={result.retcode} comment={result.comment}")
+    elif journal is not None:
+        journal.partial(position.ticket, label, volume, current_price)
 
 
 @dataclass
@@ -283,6 +300,7 @@ class _SymbolRuntime:
     tm_mgr: trade_manager.TradeManager
     feed_watch: BiasFeedWatch                  # the M15 bias feed: stale -> entries paused
     state_feed_watch: BiasFeedWatch = field(default_factory=BiasFeedWatch)   # the M5 state feed: stale -> square-off paused
+    journal: Optional[trade_journal.TradeJournal] = None                       # per-trade entry/exit logic
 
 
 def _build_runtime(symbol: str) -> _SymbolRuntime:
@@ -295,6 +313,7 @@ def _build_runtime(symbol: str) -> _SymbolRuntime:
         tm_mgr=trade_manager.TradeManager(cfg.state_file, cfg.partial1_trigger_points, cfg.partial1_fraction,
                                           cfg.partial2_trigger_points, cfg.partial2_fraction),
         feed_watch=BiasFeedWatch(),
+        journal=trade_journal.TradeJournal(cfg.trade_journal_file, "TM-STR", cfg.symbol),
     )
 
 
@@ -347,6 +366,8 @@ def run_once(rt: _SymbolRuntime) -> None:
         alerts.send_alert(msg)
 
     open_tickets = {p.ticket for p in broker.get_positions(cfg.symbol, cfg.magic_number)}
+    if rt.journal is not None:
+        rt.journal.reconcile(open_tickets)
     rt.sl_mgr.prune(open_tickets)
     rt.tm_mgr.prune(open_tickets)
     position = _current_position(cfg)
@@ -361,7 +382,9 @@ def run_once(rt: _SymbolRuntime) -> None:
             decision_log.log(cfg.decision_log_file, "bias_flip", ticket=position.ticket,
                              position=_DIR_LABEL[pos_direction], bias=_DIR_LABEL[bias.direction],
                              bias_source=bias.source, bias_event_time=bias.event_time)
-            _close_position(cfg, position, "BIASFLIP", tag, "BF")
+            _close_position(cfg, position, "BIASFLIP", tag, "BF", rt.journal,
+                            {"rule": "M15 bias flipped against the trade", "bias": _DIR_LABEL[bias.direction],
+                             "bias_source": bias.source, "bias_event_time": bias.event_time})
             position = _current_position(cfg)
 
     # 1b. The M5 state genuinely flipped against the trade after it opened -> close it at once.
@@ -375,7 +398,9 @@ def run_once(rt: _SymbolRuntime) -> None:
             decision_log.log(cfg.decision_log_file, "m5_flip_exit", ticket=position.ticket,
                              position=_DIR_LABEL[pos_direction], timeframe=cfg.squareoff_timeframe,
                              flip_to=flip.confirmed.name, flip_bar_time=flip.bar_time)
-            _close_position(cfg, position, "M5FLIP", tag, "MF")
+            _close_position(cfg, position, "M5FLIP", tag, "MF", rt.journal,
+                            {"rule": "M5 ATR state flipped against the trade", "flip_to": flip.confirmed.name,
+                             "flip_bar_time": flip.bar_time})
             position = _current_position(cfg)
 
     # 1c. Square-off: a fresh opposite M5 CISD that the M5 strong/weak state agrees with (see docstring).
@@ -390,7 +415,10 @@ def run_once(rt: _SymbolRuntime) -> None:
             decision_log.log(cfg.decision_log_file, "squareoff", ticket=position.ticket,
                              position=_DIR_LABEL[pos_direction], timeframe=cfg.squareoff_timeframe,
                              cisd=cisd.last_cisd, cisd_time=cisd.last_cisd_time, state=m5_state)
-            _close_position(cfg, position, "SQUAREOFF", tag, "SQ")
+            _close_position(cfg, position, "SQUAREOFF", tag, "SQ", rt.journal,
+                            {"rule": "opposite M5 CISD that the confirmed M5 state agrees with",
+                             "cisd": cisd.last_cisd, "cisd_time": cisd.last_cisd_time,
+                             "m5_state": "strong" if m5_state == 1 else "weak"})
             position = _current_position(cfg)
 
     # 2. Entry: fresh M5 CISD matching the M15 bias (paused while the bias feed is stale).
@@ -404,7 +432,10 @@ def run_once(rt: _SymbolRuntime) -> None:
                              sl=sig.sl, sl_source=sig.sl_source, bias_source=sig.bias_source,
                              bias_event_time=sig.bias_event_time)
             if position is None:
-                if _open_position(cfg, sig.direction, sig.sl, sig.trigger, ref):
+                logic = {**dataclasses.asdict(sig), "rule": "M15 bias + fresh M5 CISD",
+                         "direction": _DIR_LABEL[sig.direction], "bid": bid, "ask": ask,
+                         "m5_state": {1: "strong", -1: "weak"}.get(m5_state)}
+                if _open_position(cfg, sig.direction, sig.sl, sig.trigger, ref, rt.journal, logic):
                     rt.eligibility.mark_traded(sig.timeframe_minutes, sig.event_time)
             else:
                 pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
@@ -423,8 +454,8 @@ def run_once(rt: _SymbolRuntime) -> None:
     # 3. Manage whatever is open (independent of whether a bias exists right now).
     position = _current_position(cfg)
     if position is not None:
-        _run_sl_manager(cfg, rt.sl_mgr, rt.tm_mgr, position)
-        _run_trade_manager(cfg, rt.tm_mgr, position)
+        _run_sl_manager(cfg, rt.sl_mgr, rt.tm_mgr, position, rt.journal)
+        _run_trade_manager(cfg, rt.tm_mgr, position, rt.journal)
 
 
 def main() -> None:

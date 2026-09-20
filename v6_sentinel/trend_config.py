@@ -67,6 +67,7 @@ class TMSymbolConfig:
     bridge_bar_flip_state_file: str   # the M15 ATR-dual flip tracker
     heartbeat_file: str
     decision_log_file: str
+    trade_journal_file: str            # per-trade entry/exit logic, see trade_journal.py
 
     mt5_terminal_path: str | None
     mt5_login: int | None
@@ -129,6 +130,7 @@ def load_symbol_config(symbol: str) -> TMSymbolConfig:
         bridge_bar_flip_state_file=config.state_file_for("trend_manager_bridge_bar_flip_state", symbol),
         heartbeat_file=config.state_file_for("trend_manager_heartbeat", symbol),
         decision_log_file=config.state_file_for("trend_manager_decision_log", symbol, ext="jsonl"),
+        trade_journal_file=config.state_file_for("trend_manager_trade_journal", symbol, ext="jsonl"),
         mt5_terminal_path=config.MT5_TERMINAL_PATH,
         mt5_login=config.MT5_LOGIN,
         mt5_password=config.MT5_PASSWORD,

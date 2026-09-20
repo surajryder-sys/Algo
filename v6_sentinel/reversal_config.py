@@ -93,6 +93,8 @@ class RMSymbolConfig:
     ict_sl_override_points: float
 
     decision_log_file: str
+    str_trade_journal_file: str        # per-trade entry/exit logic, one per component -- see trade_journal.py
+    ict_trade_journal_file: str
 
     mt5_terminal_path: str | None
     mt5_login: int | None
@@ -163,6 +165,8 @@ def load_symbol_config(symbol: str) -> RMSymbolConfig:
         ict_guard_sticky_state_file=config.state_file_for("reversal_manager_ict_guard_sticky", symbol),
         ict_sl_override_points=float(os.getenv(prefix + "ICT_SL_OVERRIDE_POINTS", str(d["ict_sl_override_points"]))),
         decision_log_file=config.state_file_for("reversal_manager_decision_log", symbol, ext="jsonl"),
+        str_trade_journal_file=config.state_file_for("reversal_manager_str_trade_journal", symbol, ext="jsonl"),
+        ict_trade_journal_file=config.state_file_for("reversal_manager_ict_trade_journal", symbol, ext="jsonl"),
         mt5_terminal_path=config.MT5_TERMINAL_PATH,
         mt5_login=config.MT5_LOGIN,
         mt5_password=config.MT5_PASSWORD,
