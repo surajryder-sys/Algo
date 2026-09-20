@@ -92,6 +92,11 @@ v5s_tv_scraper_retest.json
 v5s_tv_scraper_live.json
 v5s_tv_scraper_mitigation_track.json
 v5s_tv_scraper_zone_history.jsonl
+
+# v6_sentinel/tv_scraper ("V6S Scraper") -- renamed/ported 2026-09-21 from
+# v5_sentinel/tv_scraper. Its .json/.jsonl state files are already covered by
+# the v6s_*.json / v6s_*.jsonl rules; only a local browser profile dir needs this.
+v6s_tv_scraper_profile/
 alert_manager_alerted_zones.json
 alert_manager_command_offset.json
 trend_manager_trade_state.json

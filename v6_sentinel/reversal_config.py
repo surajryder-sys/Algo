@@ -76,7 +76,7 @@ class RMSymbolConfig:
 
     # Shared NLB/NSB Block this symbol's RM reads (read-only) -- V6S's
     # own nlb_nsb_watcher, not V5S's (see nlb_nsb_block.py's own
-    # docstring; V6S's Block is seeded from V5S's tv_scraper output but
+    # docstring; V6S's Block is seeded from the V6S Scraper's output but
     # is its own separate, V6S-owned store/file).
     nlb_nsb_block_state_file: str
 

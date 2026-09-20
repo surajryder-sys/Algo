@@ -2,12 +2,10 @@
 v5_sentinel/nlb_nsb_watcher.py (2026-09-18), reshaped for V6S's
 multi-instrument design (one BlockStore + one zone_state_file per
 symbol, looped each poll -- see config.ACTIVE_SYMBOLS) and for the
-confirmed zone-data-source decision: `zone_state_file` below points at
-V5S's OWN tv_scraper output file, READ-ONLY (see
-project_v6_sentinel_architecture memory for the full reasoning -- avoids
-a second scraper/browser window; V6S accepts a runtime dependency on
-V5S's tv_scraper process staying alive as the trade-off). This module
-NEVER writes to that file.
+zone data source: `zone_state_file` below points at the V6S scraper's
+output file (v6_sentinel/tv_scraper, "V6S Scraper" -- renamed/ported from
+V5S's scraper 2026-09-21), READ-ONLY. V6S's watcher needs that scraper
+process to be running. This module NEVER writes to that file.
 
 This process's only job every cycle, per symbol:
   1. Pick up any newly-formed OB zone from the scraper's own store
@@ -22,7 +20,7 @@ This process's only job every cycle, per symbol:
 No MT5 orders are ever placed here -- this is a pure data-tracking
 process, same category as tv_scraper.scraper or a watchdog, not a
 trading bot. Read-only against the broker; only ever writes its own
-block/heartbeat state files (never V5S's zone file).
+block/heartbeat state files (never the scraper's zone file).
 
 Run with: python -m v6_sentinel.nlb_nsb_watcher
 """
@@ -40,16 +38,16 @@ from v6_sentinel.nlb_nsb_block import BlockStore
 
 load_dotenv()
 
-# V5-Sentinel's OWN tv_scraper output file -- read-only source, never
-# written here. Confirmed with the user 2026-09-18: reuse V5S's already-
-# running scraper rather than run a second browser window for V6S.
-_V5S_ZONE_STATE_FILE = os.getenv("V5S_TV_SCRAPER_ZONE_STATE_FILE", "v5s_tv_scraper_zones.json")
+# The V6S Scraper's output file (v6_sentinel/tv_scraper) -- read-only source,
+# never written here. (2026-09-18 this read V5S's scraper output instead;
+# renamed to V6S's own scraper 2026-09-21 so V5S can be retired.)
+_V6S_ZONE_STATE_FILE = os.getenv("V6S_TV_SCRAPER_ZONE_STATE_FILE", "v6s_tv_scraper_zones.json")
 
 
 @dataclass(frozen=True)
 class WatcherSymbolConfig:
     symbol: str
-    zone_state_file: str          # V5S's tv_scraper store -- read-only source
+    zone_state_file: str          # the V6S scraper's store -- read-only source
     block_state_file: str          # this module's own persisted BlockStore
     heartbeat_file: str
 
@@ -58,7 +56,7 @@ def load_symbol_configs() -> list[WatcherSymbolConfig]:
     return [
         WatcherSymbolConfig(
             symbol=symbol,
-            zone_state_file=_V5S_ZONE_STATE_FILE,
+            zone_state_file=_V6S_ZONE_STATE_FILE,
             block_state_file=config.state_file_for("nlb_nsb_block", symbol),
             heartbeat_file=config.state_file_for("nlb_nsb_watcher_heartbeat", symbol),
         )
@@ -88,7 +86,7 @@ def run_once(cfg: WatcherSymbolConfig, store: BlockStore) -> None:
 def main() -> None:
     symbol_configs = load_symbol_configs()
     print(f"[V6S-NLBNSB] starting -- symbols={[c.symbol for c in symbol_configs]} "
-          f"poll={config.POLL_SECONDS}s zone_source={_V5S_ZONE_STATE_FILE}")
+          f"poll={config.POLL_SECONDS}s zone_source={_V6S_ZONE_STATE_FILE}")
 
     if not mt5.initialize(path=config.MT5_TERMINAL_PATH):
         raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")

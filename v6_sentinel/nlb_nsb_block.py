@@ -7,12 +7,11 @@ NOT scoped to RM-ICT alone -- this is meant to serve every component
 that needs OB-zone data (TM-STR's/RM-STR's own ICT Guard safeguard,
 RM-ICT's own zone eligibility).
 
-Reads V5-Sentinel's OWN tv_scraper output file, read-only (confirmed
-with the user 2026-09-18 -- see project_v6_sentinel_architecture memory
-for the full reasoning: avoids a second scraper/browser window and the
-already-documented maximized-window/CDP-conflict risk; V6S accepts a
-runtime dependency on V5S's tv_scraper process staying alive as the
-trade-off). NEVER write to that file from this module or its caller.
+Reads the V6S Scraper's output file (v6_sentinel/tv_scraper), read-only.
+(Until 2026-09-21 this read V5S's scraper output; the scraper was renamed/
+ported to V6S so V5S can be retired.) V6S needs that scraper process
+running, with its TradingView window kept maximized. NEVER write to that
+file from this module or its caller.
 
 ob_levels.py's own read_all_zones()/read_reversal_zones() stay as a
 stateless, always-fresh READ of the scraper's own store -- this module
