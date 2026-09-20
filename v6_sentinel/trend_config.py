@@ -77,7 +77,7 @@ class TMSymbolConfig:
 
 _SYMBOL_DEFAULTS: dict[str, dict] = {
     "XAUUSD": dict(
-        lots=0.01,
+        lots=0.06,     # 0.06 (user, 2026-09-21): at 0.01 the 70%/15%/15% partial scheme degenerates -> 0.04/0.01/0.01
         deviation_points=30,
         sl_buffer=2.0,
         breakeven_trigger_points=10.0,
