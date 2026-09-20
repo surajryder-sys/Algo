@@ -91,7 +91,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import alerts, bridge, broker, config, decision_log, heartbeat, rates, sl_manager, trade_journal, trade_manager, trend_bias, trend_entry
+from v6_sentinel import alerts, bridge, bridge_flip, broker, config, decision_log, heartbeat, rates, sl_manager, trade_journal, trade_manager, trend_bias, trend_entry
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.flip_state import far_near_line
 from v6_sentinel.trend_config import TMSymbolConfig, load_symbol_config
@@ -218,9 +218,14 @@ def _close_position(cfg: TMSymbolConfig, position, action_label: str, tag: str, 
 
 def _trailing_far_line(symbol: str, tf_minutes: int, direction: int) -> Optional[float]:
     """The far ATR trail line of one timeframe for a trade's own
-    direction (the lower line for a BUY, the higher for a SELL), computed
-    natively from MT5 history -- no chart needed. None if unavailable, in
+    direction (the lower line for a BUY, the higher for a SELL). M1/M3/M5/M15
+    are read STRICTLY from the MT5 bridge (user, 2026-09-21); any other
+    timeframe is computed natively from MT5 history. None if unavailable, in
     which case that cycle's SL update is skipped rather than guessed at."""
+    if tf_minutes in bridge.BRIDGE_ONLY_TIMEFRAMES:
+        # M1/M3/M5/M15: straight from the MT5 bridge, never computed here (user, 2026-09-21).
+        result = bridge_flip.far_near(symbol, tf_minutes, direction)
+        return None if result is None else result[0]
     series = rates.read_trail_series(symbol, tf_minutes)
     if series is None:
         return None

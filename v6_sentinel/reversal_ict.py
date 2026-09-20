@@ -15,6 +15,16 @@ ENTRY RULE:
   substantially overlapped one already traded, see
   ICTEligibilityStore.overlaps_traded()).
 
+  TOUCH MUST BE LIVE AND RECENT (user, 2026-09-21, 30 minutes): the first
+  live session fired a BUY on an H4 zone that had been "retested" ~4 days
+  earlier (retested_source "seed" -- copied from the scraper's history, all
+  21 retested zones in the block were like that). So a touch only counts if
+  the watcher saw it itself (retested_source "live") AND it was at most
+  cfg.ict_touch_max_age_minutes ago (_touch_is_current()); after that the
+  zone is simply no longer a candidate. A zone the block already knew was
+  tested before we ever watched it can never be one (these are untested-zone
+  reversals -- a first touch only).
+
   Once touched, wait for a FRESH CISD confirmation in the MATCHING
   direction (bullish zone needs bullish CISD, bearish needs bearish),
   sourced from a timeframe pool that depends on the ZONE's OWN
@@ -85,6 +95,7 @@ direction -> NO-OP, just mark this zone traded. Credited under its own
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -216,8 +227,20 @@ def _check_zone(zone: BlockZone, symbol: str):
     return None
 
 
+def _touch_is_current(zone: BlockZone, max_age_minutes: float, now: float) -> bool:
+    """True only for a touch this component may act on: the watcher saw price
+    enter the zone LIVE (retested_source "live" -- a "seed" retest was copied
+    from the scraper's history, we never observed it) and it happened within
+    the last max_age_minutes. retested_at is wall-clock for live touches, so
+    it compares directly with time.time()."""
+    if not zone.retested or zone.retested_source != "live" or zone.retested_at is None:
+        return False
+    return 0 <= now - zone.retested_at <= max_age_minutes * 60
+
+
 def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibilityStore,
-                     sl_buffer: float, bid: float, ask: float, sl_override_points: float) -> list[ICTSignal]:
+                     sl_buffer: float, bid: float, ask: float, sl_override_points: float,
+                     touch_max_age_minutes: float, now: Optional[float] = None) -> list[ICTSignal]:
     """Every currently-valid (not invalidated -- an invalidated zone is
     already deleted from the Block outright), TOUCHED, untraded OB zone
     with a fresh matching-direction CISD confirmation this cycle -- see
@@ -228,9 +251,10 @@ def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibi
     store = BlockStore(block_state_file)
     signals: list[ICTSignal] = []
     cache: dict = {}
+    now = time.time() if now is None else now
 
     for zone in store.zones():
-        if not zone.retested:
+        if not _touch_is_current(zone, touch_max_age_minutes, now):
             continue
         if eligibility.is_traded(zone.zone_id):
             continue

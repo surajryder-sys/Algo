@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -85,6 +86,82 @@ def read_lines(symbol: str, tf_minutes: int) -> Optional[tuple[float, float]]:
 
     try:
         return float(raw["line1"]["trail_stop"]), float(raw["line2"]["trail_stop"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+# M1, M3, M5 and M15 ATR-dual and Supertrend data come STRICTLY from this bridge -- no
+# internal (copy_rates) computation for them anywhere in V6S (user, 2026-09-21). A stale or
+# missing bridge file means that source contributes nothing this cycle; there is deliberately
+# no native fallback. Other timeframes (M30 and up, M10) are still computed natively.
+BRIDGE_ONLY_TIMEFRAMES = (1, 3, 5, 15)
+
+
+@dataclass(frozen=True)
+class BridgeATR:
+    """Both ATR-dual trail lines of one timeframe, exactly as the MQL5 indicator publishes them
+    (trail value, that line's own trend, and when its trend last changed), plus the close and
+    bar_time of the bridge's last closed bar."""
+    line1: float
+    line1_trend: int
+    line1_event_time: int
+    line2: float
+    line2_trend: int
+    line2_event_time: int
+    close: float
+    bar_time: int
+
+
+@dataclass(frozen=True)
+class BridgeSupertrend:
+    supertrend: float
+    trend: int
+    event_time: int
+    close: float
+    bar_time: int
+
+
+def _read_fresh(filename: str, symbol: str, tf_minutes: int) -> Optional[dict]:
+    """The parsed bridge file, or None if it is missing, unreadable or stale -- the same two
+    freshness tests read_lines() uses (file touched recently AND bar_time keeping pace)."""
+    try:
+        raw = json.loads((_bridge_root() / filename).read_text())
+    except (OSError, json.JSONDecodeError, KeyError):
+        return None
+    if time.time() - raw.get("updated", 0) > MAX_AGE_SECONDS:
+        return None
+    if _bar_time_stale(raw, tf_minutes, symbol):
+        return None
+    return raw
+
+
+def read_atr_dual(symbol: str, tf_minutes: int) -> Optional[BridgeATR]:
+    """Both ATR-dual lines with their trend/event data from ATRSTATE_DUAL_<sym>_<tf>.json. None
+    if the file is missing/stale/incomplete. Deliberately ignores the bundled "structure" field
+    (see the module docstring)."""
+    raw = _read_fresh(f"ATRSTATE_DUAL_{symbol}_{tf_minutes}.json", symbol, tf_minutes)
+    if raw is None:
+        return None
+    try:
+        l1, l2 = raw["line1"], raw["line2"]
+        return BridgeATR(
+            line1=float(l1["trail_stop"]), line1_trend=int(l1["trend"]), line1_event_time=int(l1["event_time"]),
+            line2=float(l2["trail_stop"]), line2_trend=int(l2["trend"]), line2_event_time=int(l2["event_time"]),
+            close=float(raw["close"]), bar_time=int(raw["bar_time"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def read_supertrend(symbol: str, tf_minutes: int) -> Optional[BridgeSupertrend]:
+    """The Supertrend line from SUPERTREND_<sym>_<tf>.json (published by the MQL5 Supertrend
+    indicator). None if the file is missing/stale/incomplete."""
+    raw = _read_fresh(f"SUPERTREND_{symbol}_{tf_minutes}.json", symbol, tf_minutes)
+    if raw is None:
+        return None
+    try:
+        return BridgeSupertrend(supertrend=float(raw["supertrend"]), trend=int(raw["trend"]),
+                                event_time=int(raw["event_time"]), close=float(raw["close"]),
+                                bar_time=int(raw["bar_time"]))
     except (KeyError, TypeError, ValueError):
         return None
 

@@ -7,20 +7,24 @@ case, so the two components can't drift apart.
 
 USABLE (confirmed with the user): a line is usable only if it sits
 strictly on the correct side of the live entry price -- ABOVE it for a
-SELL (direction -1), BELOW it for a BUY (direction 1). A line on the
-wrong side (e.g. every line below price as support during a bearish-CISD
-SELL) can't be a stop. Any single line is enough. If several are usable
+SELL (direction -1), BELOW it for a BUY (direction 1) -- AND of the last
+CLOSED candle's close on that timeframe (added 2026-09-21: the first live
+BUY took its stop from an M3 line that was resistance on every closed
+candle and only counted as "below entry" because the ask had spiked past
+it). A line on the wrong side (e.g. every line below price as support
+during a bearish-CISD SELL) can't be a stop. Any single line is enough. If several are usable
 on one timeframe, the FARTHEST from entry wins (widest SL -- the user's
 explicit choice over nearest): the highest usable line for a SELL, the
 lowest for a BUY. There is deliberately NO maximum-distance cap here.
 
 Timeframes are tried in the order given (default M5 then M3, RM's rule;
 TM-STR passes M5 then M15) and a later one only if the earlier has no
-usable line. Lines are
-computed straight from copy_rates (rates.read_trail_series /
-rates.read_supertrend -- no chart or indicator needed) and cached in a
-caller-supplied dict so several signals in one cycle don't recompute
-them.
+usable line. M1/M3/M5/M15 lines are read
+STRICTLY from the MT5 bridge (bridge.read_atr_dual / read_supertrend, user
+2026-09-21 -- no internal computation for those; a stale file just
+contributes nothing); any other timeframe is still computed from copy_rates
+(rates.read_trail_series / read_supertrend). Cached in a caller-supplied
+dict so several signals in one cycle don't re-read them.
 
 The returned basis is WITHOUT buffer -- the caller applies it (minus for
 a BUY, plus for a SELL).
@@ -44,7 +48,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from v6_sentinel import cisd_bridge, rates
+from v6_sentinel import bridge, cisd_bridge, rates
 
 SL_LINE_TIMEFRAMES = (5, 3)  # preference order: M5 first, M3 only if M5 has none usable
 
@@ -56,23 +60,61 @@ def line_values(symbol: str, tf_minutes: int, cache: dict) -> list[tuple[str, fl
     if tf_minutes in cache:
         return cache[tf_minutes]
     values: list[tuple[str, float]] = []
-    series = rates.read_trail_series(symbol, tf_minutes)
-    if series is not None:
-        for label, v in (("ATR1", series.trail1[-1]), ("ATR2", series.trail2[-1])):
-            if v is not None:
-                values.append((label, v))
-    st = rates.read_supertrend(symbol, tf_minutes)
-    if st is not None:
-        values.append(("ST", st.supertrend))
+    if tf_minutes in bridge.BRIDGE_ONLY_TIMEFRAMES:
+        # M1/M3/M5/M15: straight from the MT5 bridge, never computed here (user, 2026-09-21).
+        atr = bridge.read_atr_dual(symbol, tf_minutes)
+        if atr is not None:
+            values.extend((("ATR1", atr.line1), ("ATR2", atr.line2)))
+        bst = bridge.read_supertrend(symbol, tf_minutes)
+        if bst is not None:
+            values.append(("ST", bst.supertrend))
+    else:
+        series = rates.read_trail_series(symbol, tf_minutes)
+        if series is not None:
+            for label, v in (("ATR1", series.trail1[-1]), ("ATR2", series.trail2[-1])):
+                if v is not None:
+                    values.append((label, v))
+        st = rates.read_supertrend(symbol, tf_minutes)
+        if st is not None:
+            values.append(("ST", st.supertrend))
     cache[tf_minutes] = values
     return values
+
+
+def _closed_close(symbol: str, tf_minutes: int, cache: dict) -> Optional[float]:
+    """Close of this timeframe's last CLOSED candle (the bridge publishes it next to the lines;
+    only timeframes outside bridge.BRIDGE_ONLY_TIMEFRAMES fall back to copy_rates). None if
+    unavailable -- then no line of that timeframe is usable."""
+    key = ("closed_close", tf_minutes)
+    if key in cache:
+        return cache[key]
+    close: Optional[float] = None
+    if tf_minutes in bridge.BRIDGE_ONLY_TIMEFRAMES:
+        atr = bridge.read_atr_dual(symbol, tf_minutes)
+        if atr is not None:
+            close = atr.close
+        else:
+            bst = bridge.read_supertrend(symbol, tf_minutes)
+            close = bst.close if bst is not None else None
+    else:
+        series = rates.read_trail_series(symbol, tf_minutes)
+        close = series.closes[-1] if series is not None else None
+    cache[key] = close
+    return close
 
 
 def _pick(symbol: str, direction: int, entry_price: float, cisd, cache: dict,
           timeframes: tuple[int, ...]) -> Optional[tuple[float, str]]:
     for tf_minutes in timeframes:
+        closed = _closed_close(symbol, tf_minutes, cache)
+        if closed is None:
+            continue
+        # Usable = on the correct side of the live entry price AND of the last CLOSED candle's
+        # close (user, 2026-09-21: a line is support/resistance by candle closes, never because the
+        # live price briefly spiked past it -- the 03:35 BUY used a resistance line that the ask had
+        # spiked 0.9 above while every closed candle sat below it).
         usable = [(label, v) for label, v in line_values(symbol, tf_minutes, cache)
-                  if (v > entry_price if direction == -1 else v < entry_price)]
+                  if (v > entry_price and v > closed if direction == -1 else v < entry_price and v < closed)]
         if usable:
             label, v = max(usable, key=lambda x: x[1]) if direction == -1 else min(usable, key=lambda x: x[1])
             return v, f"M{tf_minutes}/{label}"

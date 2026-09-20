@@ -2,9 +2,10 @@
 2026-09-19 for RM-STR's own full redesign (confirmed with the user,
 "big changes in RM STR"): this module now builds THREE independent
 levels per timeframe -- the ATR dual-trail's own two lines (unchanged)
-PLUS a native Supertrend line (rates.read_supertrend(), no chart/
-indicator needed -- see that function's own fidelity caveat) -- instead
-of just the ATR pair. Touch detection, LTF confirmation (M3/M5 CISD),
+PLUS a Supertrend line (native via rates.read_supertrend() -- see that
+function's own fidelity caveat -- except M15/M5, which come STRICTLY from
+the MT5 bridge since 2026-09-21, see _compute_htf_state_from_bridge) --
+instead of just the ATR pair. Touch detection, LTF confirmation (M3/M5 CISD),
 and trade execution are separate pieces (reversal_entry.py).
 
 TIMEFRAME LIST REVISED 2026-09-19: D1, H4, H2, H1, M30, M15, M10, M5 --
@@ -67,7 +68,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from v6_sentinel import flip_state, rates
+from typing import TYPE_CHECKING
+
+from v6_sentinel import bridge, flip_state, rates
+
+if TYPE_CHECKING:
+    from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 
 # D1, H4, H2, H1, M30, M15, M10, M5 -- RM-STR's own scope, in this order.
 HTF_TIMEFRAMES_MINUTES = [1440, 240, 120, 60, 30, 15, 10, 5]
@@ -119,11 +125,64 @@ def _atr_character_event_time(fs: "flip_state.FlipStateResult") -> int:
     return fs.last_event.bar_time if fs.last_event is not None else fs.confirmed_since_time
 
 
-def compute_htf_state(symbol: str, tf_minutes: int, **kwargs) -> Optional[HTFState]:
+def _compute_htf_state_from_bridge(symbol: str, tf_minutes: int,
+                                   tracker: "BridgeBarFlipTracker") -> Optional[HTFState]:
+    """M15/M5 (bridge.BRIDGE_ONLY_TIMEFRAMES): the same HTFState built ENTIRELY from the MT5
+    bridge -- no internal ATR/Supertrend computation (user, 2026-09-21):
+      - the line values and the Supertrend value/trend/event time are the bridge's own;
+      - support/resistance is decided against the bridge's last CLOSED bar close (same
+        "closed candle" side test as before);
+      - the ATR character (strong/weak/trap) and its event time come from the persisted,
+        bar-close-gated BridgeBarFlipTracker that runs on the bridge's line values.
+    None if any of those is unavailable this cycle (stale bridge file, no tracker baseline)."""
+    atr = bridge.read_atr_dual(symbol, tf_minutes)
+    st = bridge.read_supertrend(symbol, tf_minutes)
+    fs = tracker.update(symbol, tf_minutes) if tracker is not None else None
+    if atr is None or st is None or fs is None:
+        return None
+
+    atr_character_event_time = _atr_character_event_time(fs)
+    levels = [
+        HTFLevel(
+            timeframe_minutes=tf_minutes,
+            value=value,
+            role="RESISTANCE" if value > atr.close else "SUPPORT",
+            source=_SOURCE_ATR,
+            line_no=line_no,
+            character_event_time=atr_character_event_time,
+        )
+        for line_no, value in ((1, atr.line1), (2, atr.line2))
+    ]
+    levels.append(HTFLevel(
+        timeframe_minutes=tf_minutes,
+        value=st.supertrend,
+        role="RESISTANCE" if st.supertrend > atr.close else "SUPPORT",
+        source=_SOURCE_SUPERTREND,
+        line_no=1,
+        character_event_time=st.event_time,
+    ))
+    return HTFState(
+        timeframe_minutes=tf_minutes,
+        atr_character=_atr_character(fs),
+        atr_character_event_time=atr_character_event_time,
+        supertrend_character="BULLISH" if st.trend == 1 else "BEARISH",
+        supertrend_character_event_time=st.event_time,
+        levels=tuple(levels),
+        last_close=atr.close,
+        last_time=atr.bar_time,
+    )
+
+
+def compute_htf_state(symbol: str, tf_minutes: int, tracker: "Optional[BridgeBarFlipTracker]" = None,
+                      **kwargs) -> Optional[HTFState]:
     """One timeframe's current ATR + Supertrend character + levels. None
-    if EITHER source doesn't have enough bar history yet (same contract
-    as rates.read_atr_dual/read_supertrend) -- no partial states, matches
-    this project's usual "no fallback, no guess" convention."""
+    if EITHER source doesn't have enough data yet -- no partial states,
+    matches this project's usual "no fallback, no guess" convention.
+    M15/M5 are read strictly from the MT5 bridge (needs `tracker`, this
+    symbol's own BridgeBarFlipTracker); every other timeframe is still
+    computed natively from copy_rates."""
+    if tf_minutes in bridge.BRIDGE_ONLY_TIMEFRAMES:
+        return _compute_htf_state_from_bridge(symbol, tf_minutes, tracker)
     series = rates.read_trail_series(symbol, tf_minutes, **kwargs)
     if series is None:
         return None
@@ -170,11 +229,12 @@ def compute_htf_state(symbol: str, tf_minutes: int, **kwargs) -> Optional[HTFSta
     )
 
 
-def compute_all_htf_states(symbol: str, **kwargs) -> dict[int, Optional[HTFState]]:
+def compute_all_htf_states(symbol: str, tracker: "Optional[BridgeBarFlipTracker]" = None,
+                           **kwargs) -> dict[int, Optional[HTFState]]:
     """All 8 HTF timeframes at once, keyed by timeframe_minutes. A None
-    value means that one didn't have enough bar history yet -- other
-    timeframes are unaffected."""
-    return {tf: compute_htf_state(symbol, tf, **kwargs) for tf in HTF_TIMEFRAMES_MINUTES}
+    value means that one didn't have enough data yet -- other timeframes
+    are unaffected. `tracker` feeds the bridge-sourced timeframes (M15/M5)."""
+    return {tf: compute_htf_state(symbol, tf, tracker, **kwargs) for tf in HTF_TIMEFRAMES_MINUTES}
 
 
 class LevelEligibilityStore:

@@ -63,6 +63,7 @@ class RMSymbolConfig:
     state_file: str
     sl_state_file: str
     levels_state_file: str
+    bridge_bar_flip_state_file: str   # persisted ATR flip tracker for the bridge-sourced HTFs (M15/M5)
     heartbeat_file: str
 
     # RM-ICT component (OB-zone-based, reversal_ict.py) -- FULLY
@@ -91,6 +92,12 @@ class RMSymbolConfig:
     # M5/M3 lines (or CISD swing) instead -- see reversal_ict.py. Zone
     # size is not a condition. XAUUSD points; deliberately per-symbol config.
     ict_sl_override_points: float
+
+    # RM-ICT touch validity (user, 2026-09-21, after a live trade fired on an H4 zone
+    # touched ~4 days earlier): a zone only counts as touched if the watcher saw price
+    # enter it LIVE and that was at most this many minutes ago (30, same as V3's fix
+    # for the same stale-retest bug). Seed-copied retests never count. See reversal_ict.py.
+    ict_touch_max_age_minutes: float
 
     decision_log_file: str
     str_trade_journal_file: str        # per-trade entry/exit logic, one per component -- see trade_journal.py
@@ -121,6 +128,7 @@ _SYMBOL_DEFAULTS: dict[str, dict] = {
         ict_magic_number=26091802,
         ict_guard_buffer_points=5.0,
         ict_sl_override_points=15.0,
+        ict_touch_max_age_minutes=30.0,
     ),
 }
 
@@ -155,6 +163,7 @@ def load_symbol_config(symbol: str) -> RMSymbolConfig:
         state_file=config.state_file_for("reversal_manager_state", symbol),
         sl_state_file=config.state_file_for("reversal_manager_sl_state", symbol),
         levels_state_file=config.state_file_for("reversal_manager_levels_state", symbol),
+        bridge_bar_flip_state_file=config.state_file_for("reversal_manager_bridge_bar_flip_state", symbol),
         heartbeat_file=config.state_file_for("reversal_manager_heartbeat", symbol),
         ict_magic_number=int(os.getenv(prefix + "ICT_MAGIC_NUMBER", str(d["ict_magic_number"]))),
         ict_state_file=config.state_file_for("reversal_manager_ict_state", symbol),
@@ -164,6 +173,7 @@ def load_symbol_config(symbol: str) -> RMSymbolConfig:
         ict_guard_buffer_points=float(os.getenv(prefix + "ICT_GUARD_BUFFER_POINTS", str(d["ict_guard_buffer_points"]))),
         ict_guard_sticky_state_file=config.state_file_for("reversal_manager_ict_guard_sticky", symbol),
         ict_sl_override_points=float(os.getenv(prefix + "ICT_SL_OVERRIDE_POINTS", str(d["ict_sl_override_points"]))),
+        ict_touch_max_age_minutes=float(os.getenv(prefix + "ICT_TOUCH_MAX_AGE_MINUTES", str(d["ict_touch_max_age_minutes"]))),
         decision_log_file=config.state_file_for("reversal_manager_decision_log", symbol, ext="jsonl"),
         str_trade_journal_file=config.state_file_for("reversal_manager_str_trade_journal", symbol, ext="jsonl"),
         ict_trade_journal_file=config.state_file_for("reversal_manager_ict_trade_journal", symbol, ext="jsonl"),

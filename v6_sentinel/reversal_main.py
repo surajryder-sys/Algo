@@ -29,13 +29,14 @@ Run with: python -m v6_sentinel.reversal_main
 Summary of the STR component's own full rule set (FULL REDESIGN,
 2026-09-19 -- see reversal_entry.py's own docstring for the complete
 design; no longer the M15-Primary-Structure-gated system this used to
-be, and no longer depends on the live ATR-dual bridge AT ALL for its entry
-logic):
+be):
   - 8 HTF timeframes (D1, H4, H2, H1, M30, M15, M10, M5), each with
     THREE independently-tracked lines: the ATR dual-trail's own two
-    lines (STRONG/WEAK/TRAP via flip_state, pure copy_rates recompute)
-    PLUS a native Supertrend line (rates.read_supertrend(), also pure
-    copy_rates -- no chart/indicator needed for either source now).
+    lines (STRONG/WEAK/TRAP) PLUS a Supertrend line. M15 and M5 are read
+    STRICTLY from the MT5 bridge (user, 2026-09-21 -- no internal
+    computation for M1/M3/M5/M15; the flip state comes from a persisted
+    BridgeBarFlipTracker on the bridge's own line values); the other
+    timeframes are still computed natively from copy_rates.
   - A level is ARMED the moment LIVE price (bid for support, ask for
     resistance) touches it, and stays armed across cycles until traded or
     that SPECIFIC source's own character changes (ATR and Supertrend
@@ -91,6 +92,7 @@ from typing import Optional
 import MetaTrader5 as mt5
 
 from v6_sentinel import broker, config, decision_log, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sl_manager, trade_journal, trade_manager
+from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.bridge_flip import m3_far_line
 from v6_sentinel.alerts import send_alert as _send_alert
 from v6_sentinel.reversal_config import RMSymbolConfig, load_symbol_config
@@ -333,6 +335,7 @@ class _SymbolRuntime:
     store: htf_levels.LevelEligibilityStore
     ict_eligibility: reversal_ict.ICTEligibilityStore
     sticky: ict_guard.ICTGuardStickyStore
+    tracker: Optional[BridgeBarFlipTracker] = None    # ATR flip state for the bridge-sourced M15/M5 levels
     journal_str: Optional[trade_journal.TradeJournal] = None    # per-trade entry/exit logic, one per component
     journal_ict: Optional[trade_journal.TradeJournal] = None
 
@@ -350,6 +353,7 @@ def _build_runtime(symbol: str) -> _SymbolRuntime:
         store=htf_levels.LevelEligibilityStore(cfg.levels_state_file),
         ict_eligibility=reversal_ict.ICTEligibilityStore(cfg.ict_eligibility_state_file),
         sticky=ict_guard.ICTGuardStickyStore(cfg.ict_guard_sticky_state_file),
+        tracker=BridgeBarFlipTracker(cfg.bridge_bar_flip_state_file),
         journal_str=trade_journal.TradeJournal(cfg.str_trade_journal_file, "RM-STR", cfg.symbol),
         journal_ict=trade_journal.TradeJournal(cfg.ict_trade_journal_file, "RM-ICT", cfg.symbol),
     )
@@ -357,7 +361,7 @@ def _build_runtime(symbol: str) -> _SymbolRuntime:
 
 def run_once(rt: _SymbolRuntime) -> None:
     cfg = rt.cfg
-    htf_states = htf_levels.compute_all_htf_states(cfg.symbol)
+    htf_states = htf_levels.compute_all_htf_states(cfg.symbol, rt.tracker)
     bid, ask = broker.get_tick_price(cfg.symbol)
     # Touch arming stays LIVE-tick (bid/ask against HTF levels) -- only
     # the CISD confirmation itself is bar-close-gated.
@@ -370,7 +374,8 @@ def run_once(rt: _SymbolRuntime) -> None:
     # full entry rule (a complete redesign, 2026-09-18 -- no longer the
     # M15-Primary-Structure-gated system).
     ict_signals = reversal_ict.find_ict_signals(cfg.symbol, cfg.nlb_nsb_block_state_file, rt.ict_eligibility,
-                                                cfg.sl_buffer, bid, ask, cfg.ict_sl_override_points)
+                                                cfg.sl_buffer, bid, ask, cfg.ict_sl_override_points,
+                                                cfg.ict_touch_max_age_minutes)
 
     # Logged BEFORE _process_signal acts on them, listing EVERY qualifying
     # signal this cycle (not just the one that becomes a real position) --
