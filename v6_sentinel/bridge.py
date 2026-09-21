@@ -32,11 +32,19 @@ MAX_AGE_SECONDS = 30.0  # indicator republishes every ~2s; well past that means 
 # closes keeps re-touching the file with the SAME old computed values.
 # "updated" only proves the FILE was touched recently, not that the DATA
 # inside kept pace with actual bar closes -- bar_time is what actually
-# tracks that. Under normal operation `now - bar_time` cycles between 0
-# and one bar's length; allowing up to 2 full bar-lengths gives a full
-# bar's buffer for ordinary publish latency before treating it as
-# genuinely stale.
+# tracks that. bar_time is the OPEN time of the last CLOSED bar, so under
+# normal operation `now - bar_time` cycles between ONE and TWO bar
+# lengths -- and hits exactly TWO the instant a bar closes, until the
+# indicator republishes with the newly closed bar. Allowing only 2 bar
+# lengths therefore made EVERY reader (ATR lines, Supertrend, CISD) return
+# "stale" for ~0.45 s at every bar boundary (measured 2026-09-21 at the
+# M5 boundary: both feeds None from +0.02 s to +0.47 s). That closed two TM
+# trades on false M15 bias flips (07:15:00 and 14:45:00: the standing M15
+# CISD read as missing, so the older ATR event won the bias). The grace
+# below covers the republish latency; it only delays declaring a feed dead
+# by that much.
 BAR_STALENESS_MULTIPLIER = 2.0
+BAR_STALENESS_GRACE_SECONDS = 30.0
 
 
 def _bridge_root() -> Path:
@@ -56,7 +64,7 @@ def _bar_time_stale(raw: dict, tf_minutes: int, symbol: str) -> bool:
     if bar_time is None:
         return False
     bar_age = time.time() - bar_time
-    max_bar_age = tf_minutes * 60 * BAR_STALENESS_MULTIPLIER
+    max_bar_age = tf_minutes * 60 * BAR_STALENESS_MULTIPLIER + BAR_STALENESS_GRACE_SECONDS
     if bar_age > max_bar_age:
         print(f"[V6S-BRIDGE] {symbol} M{tf_minutes}: bar_time is {bar_age:.0f}s old "
               f"(max {max_bar_age:.0f}s) despite the file looking freshly updated -- "
