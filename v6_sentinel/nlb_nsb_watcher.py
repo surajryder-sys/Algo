@@ -11,10 +11,13 @@ This process's only job every cycle, per symbol:
   1. Pick up any newly-formed OB zone from the scraper's own store
      (BlockStore.sync_from_scraper() -- a cheap JSON read, never
      overwrites a zone this block has already seeded).
-  2. Read one live MT5 tick (bid/ask) -- no bar/candle involved at all,
-     this is deliberately NOT bar-close-gated -- retest and mitigation
-     both need to react to a single tick.
-  3. Feed that tick to BlockStore.update_live(), which marks any newly-
+  2. Read one live MT5 tick (bid/ask) PLUS the lowest bid / highest ask of
+     every tick since the previous cycle (broker.price_extremes_since) --
+     no bar/candle involved at all, this is deliberately NOT bar-close-gated.
+     The extremes mean a wick shorter than the poll interval is still seen
+     (2026-09-21: a 0.11 s wick through an H1 support was missed by plain
+     once-a-second sampling).
+  3. Feed those to BlockStore.update_live(), which marks any newly-
      retested zone and deletes any newly-invalidated one.
 
 No MT5 orders are ever placed here -- this is a pure data-tracking
@@ -33,7 +36,7 @@ from dataclasses import dataclass
 import MetaTrader5 as mt5
 from dotenv import load_dotenv
 
-from v6_sentinel import config, heartbeat
+from v6_sentinel import broker, config, heartbeat
 from v6_sentinel.nlb_nsb_block import BlockStore
 
 load_dotenv()
@@ -64,6 +67,9 @@ def load_symbol_configs() -> list[WatcherSymbolConfig]:
     ]
 
 
+_last_tick_msc: dict[str, int] = {}   # per symbol: time_msc of the newest tick already looked at
+
+
 def run_once(cfg: WatcherSymbolConfig, store: BlockStore) -> None:
     added, pruned = store.sync_from_scraper(cfg.zone_state_file, cfg.symbol)
     if added:
@@ -76,7 +82,16 @@ def run_once(cfg: WatcherSymbolConfig, store: BlockStore) -> None:
         print(f"[V6S-NLBNSB] {cfg.symbol} no live tick available -- skipping this cycle")
         return
 
-    retested, invalidated = store.update_live(tick.bid, tick.ask)
+    bid_low = ask_high = None
+    since = _last_tick_msc.get(cfg.symbol)
+    if since:
+        lo, hi, newest = broker.price_extremes_since(cfg.symbol, since)
+        if lo is not None:
+            bid_low, ask_high = lo, hi
+        _last_tick_msc[cfg.symbol] = max(since, newest)
+    else:                                              # first cycle: look from now, never from history
+        _last_tick_msc[cfg.symbol] = int(tick.time_msc)
+    retested, invalidated = store.update_live(tick.bid, tick.ask, bid_low=bid_low, ask_high=ask_high)
     for zid in retested:
         print(f"[V6S-NLBNSB] {cfg.symbol} RETESTED (live) -- {zid}")
     for zid in invalidated:

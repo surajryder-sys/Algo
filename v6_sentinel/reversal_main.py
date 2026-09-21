@@ -350,6 +350,7 @@ class _SymbolRuntime:
     ict_eligibility: reversal_ict.ICTEligibilityStore
     sticky: ict_guard.ICTGuardStickyStore
     tracker: Optional[BridgeBarFlipTracker] = None    # ATR flip state for the bridge-sourced M15/M5 levels
+    last_tick_msc: int = 0                             # time_msc of the newest tick already looked at (touch extremes)
     journal_str: Optional[trade_journal.TradeJournal] = None    # per-trade entry/exit logic, one per component
     journal_ict: Optional[trade_journal.TradeJournal] = None
 
@@ -379,7 +380,16 @@ def run_once(rt: _SymbolRuntime) -> None:
     bid, ask = broker.get_tick_price(cfg.symbol)
     # Touch arming stays LIVE-tick (bid/ask against HTF levels) -- only
     # the CISD confirmation itself is bar-close-gated.
-    reversal_entry.scan_touches(htf_states, rt.store, bid, ask)
+    bid_low, ask_high = bid, ask
+    if rt.last_tick_msc:
+        lo, hi, newest = broker.price_extremes_since(cfg.symbol, rt.last_tick_msc)
+        if lo is not None:
+            bid_low, ask_high = min(bid, lo), max(ask, hi)
+        rt.last_tick_msc = max(rt.last_tick_msc, newest)
+    else:                                              # first cycle: start looking from now, never from history
+        tick = mt5.symbol_info_tick(cfg.symbol)
+        rt.last_tick_msc = int(tick.time_msc) if tick is not None else 0
+    reversal_entry.scan_touches(htf_states, rt.store, bid, ask, bid_low, ask_high)
 
     str_signals = reversal_entry.find_signals(cfg.symbol, htf_states, rt.store, cfg.sl_buffer, bid, ask)
     # RM-ICT (second component) -- OB-zone (NLB/NSB Block) touch +

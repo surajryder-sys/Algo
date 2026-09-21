@@ -15,6 +15,7 @@ symbol-parametrized.
 """
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass
 from typing import Optional
 
@@ -46,6 +47,24 @@ def get_tick_price(symbol: str) -> tuple[float, float]:
     if tick is None:
         raise RuntimeError(f"No tick for {symbol}: {mt5.last_error()}")
     return tick.bid, tick.ask
+
+
+def price_extremes_since(symbol: str, since_msc: int) -> tuple[Optional[float], Optional[float], int]:
+    """(lowest bid, highest ask, newest tick time_msc) over every tick AFTER since_msc. Touch detection
+    polls about once a second, so a wick that lives for a fraction of a second falls between two
+    polls; looking at the extremes of every tick since the previous look means no touch is missed
+    (2026-09-21: a 0.11 s wick to 0.1 point through the H1 ATR support was never seen). Nothing OLDER
+    than the previous look is included, so it can never arm a level retroactively. (None, None,
+    since_msc) if there is no newer tick."""
+    start = dt.datetime.fromtimestamp(since_msc / 1000.0 - 1.0, dt.timezone.utc)
+    end = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=5)
+    ticks = mt5.copy_ticks_range(symbol, start, end, mt5.COPY_TICKS_ALL)
+    if ticks is None or len(ticks) == 0:
+        return None, None, since_msc
+    fresh = ticks[(ticks["time_msc"] > since_msc) & (ticks["bid"] > 0) & (ticks["ask"] > 0)]
+    if len(fresh) == 0:
+        return None, None, since_msc
+    return float(fresh["bid"].min()), float(fresh["ask"].max()), int(fresh["time_msc"].max())
 
 
 def get_positions(symbol: str, magic: int):

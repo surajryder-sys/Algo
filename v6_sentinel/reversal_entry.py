@@ -102,11 +102,15 @@ class ReversalSignal:
 
 
 def scan_touches(htf_states: dict[int, Optional[HTFState]], store: LevelEligibilityStore,
-                 bid: float, ask: float) -> None:
+                 bid: float, ask: float, bid_low: Optional[float] = None, ask_high: Optional[float] = None) -> None:
     """Live-price touch arming. Call every cycle, before find_signals() --
     this is also where each (timeframe, source) pair's store.sync()
     happens (character-change detection), so confirmation checks always
     see this cycle's freshest eligibility state."""
+    # bid_low / ask_high are the lowest bid / highest ask of every tick since the previous cycle, so a
+    # wick shorter than the poll interval still counts as a touch (broker.price_extremes_since).
+    low = bid if bid_low is None else min(bid, bid_low)
+    high = ask if ask_high is None else max(ask, ask_high)
     for tf, state in htf_states.items():
         if state is None:
             continue
@@ -115,7 +119,7 @@ def scan_touches(htf_states: dict[int, Optional[HTFState]], store: LevelEligibil
             direction = 1 if level.role == "SUPPORT" else -1
             if store.is_traded(tf, level.source, direction):
                 continue
-            touch_price = bid if level.role == "SUPPORT" else ask
+            touch_price = low if level.role == "SUPPORT" else high
             reached = (touch_price <= level.value) if level.role == "SUPPORT" else (touch_price >= level.value)
             if reached:
                 store.mark_touched(tf, level.source, level.line_no, level.value, level.role)

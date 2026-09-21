@@ -432,13 +432,18 @@ class BlockStore:
             self._save()
         return added, pruned
 
-    def update_live(self, bid: float, ask: float, now: Optional[int] = None) -> tuple[list[str], list[str]]:
+    def update_live(self, bid: float, ask: float, now: Optional[int] = None,
+                    bid_low: Optional[float] = None, ask_high: Optional[float] = None) -> tuple[list[str], list[str]]:
         """One live-tick pass over every zone currently in the block.
         Invalidation is checked BEFORE retest for the same zone (if a
         single tick jumps clean through the whole range, there's nothing
         meaningful left to mark "retested" on a zone about to be
         deleted). Returns (newly_retested_zone_ids, invalidated_zone_ids)."""
         now = now if now is not None else int(time.time())
+        # Lowest bid / highest ask of every tick since the previous pass (broker.price_extremes_since), so a
+        # wick shorter than the poll interval still touches/invalidates a zone; plain bid/ask if not given.
+        bid = bid if bid_low is None else min(bid, bid_low)
+        ask = ask if ask_high is None else max(ask, ask_high)
         newly_retested: list[str] = []
         invalidated: list[str] = []
         changed = False
