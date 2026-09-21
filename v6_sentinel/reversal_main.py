@@ -265,7 +265,8 @@ def _run_trade_manager(cfg: RMSymbolConfig, component: str, mgr: trade_manager.T
 
 def _process_signal(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, component: str, magic_number: int,
                     direction: int, sl: float, tag: str, ref_desc: str, mark_traded, on_redundant,
-                    journal: Optional[trade_journal.TradeJournal] = None, logic: Optional[dict] = None) -> None:
+                    journal: Optional[trade_journal.TradeJournal] = None, logic: Optional[dict] = None,
+                    signal_tf: Optional[int] = None) -> None:
     """Acts on ONE signal against whatever position is ACTUALLY open right
     now on THIS component's own magic number (re-queried, so an earlier
     signal's own action this same cycle is visible here). Shared CODE
@@ -290,30 +291,43 @@ def _process_signal(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, 
     still gets one line per signal for full audit granularity, only the
     Telegram side is collapsed."""
     positions = broker.get_positions(cfg.symbol, magic_number)
-    position = positions[0] if positions else None
+    want_type = mt5.POSITION_TYPE_BUY if direction == 1 else mt5.POSITION_TYPE_SELL
+    same = [p for p in positions if p.type == want_type]
+    opposite = [p for p in positions if p.type != want_type]
 
-    if position is None:
-        if _open_position(cfg, sticky, component, magic_number, direction, sl, tag, ref_desc, journal, logic):
-            mark_traded()
-        return
+    # TIMEFRAME HIERARCHY (user, 2026-09-21: "m3/m1 doesnt have access to close the htf trade"): an
+    # opposite signal squares off this component's own opposite position ONLY if the signal's timeframe
+    # is the same or HIGHER than that position's. A smaller-timeframe signal leaves the higher-timeframe
+    # trade alone and still opens its own trade, so both are open at once -- which is why a component can
+    # now hold one position per direction and every open position is managed (see run_once).
+    for position in opposite:
+        position_tf = journal.timeframe_minutes(position.ticket) if journal is not None else None
+        if signal_tf is not None and position_tf is not None and signal_tf < position_tf:
+            print(f"[V6S-{component}] {tag} (M{signal_tf}) does not close the higher-timeframe "
+                  f"{_DIR_LABEL[-direction]} #{position.ticket} (M{position_tf}) -- both stay open")
+            decision_log.log(cfg.decision_log_file, "squareoff_blocked_by_timeframe", component=component,
+                             ticket=position.ticket, position_tf=position_tf, signal_tf=signal_tf, tag=tag)
+            continue
+        if not _close_position(cfg, component, position, "SQOFF", tag, "SQ", journal,
+                               {"rule": "opposite-direction reversal signal (same or higher timeframe) squared it off",
+                                "new_signal": tag, "new_direction": _DIR_LABEL[direction],
+                                "signal_tf": signal_tf, "position_tf": position_tf}):
+            return      # could not close it -> do not open and do not consume this setup
 
-    pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
-
-    if direction != pos_direction:
-        if (_close_position(cfg, component, position, "SQOFF", tag, "SQ", journal,
-                            {"rule": "opposite-direction reversal signal squared it off", "new_signal": tag,
-                             "new_direction": _DIR_LABEL[direction]})
-                and _open_position(cfg, sticky, component, magic_number, direction, sl, tag, ref_desc, journal, logic)):
-            mark_traded()
-    else:
-        # SAME direction, whether still full-size or already partially
-        # cut -- NO-OP: no closing leftover and entering full qty again.
+    if same:
+        # SAME direction already open, whether still full-size or already partially cut -- NO-OP: no
+        # closing leftover and entering full qty again.
+        position = same[0]
         mark_traded()
-        print(f"[V6S-{component}] {tag} qualifies ({_DIR_LABEL[direction]}) but a {_DIR_LABEL[pos_direction]} "
+        print(f"[V6S-{component}] {tag} qualifies ({_DIR_LABEL[direction]}) but a {_DIR_LABEL[direction]} "
               f"position is already open on #{position.ticket} -- marked traded, no new entry")
         decision_log.log(cfg.decision_log_file, "redundant_signal", component=component,
                          direction=_DIR_LABEL[direction], tag=tag, ref=ref_desc, existing_ticket=position.ticket)
         on_redundant(direction, tag, ref_desc, position.ticket)
+        return
+
+    if _open_position(cfg, sticky, component, magic_number, direction, sl, tag, ref_desc, journal, logic):
+        mark_traded()
 
 
 @dataclass
@@ -423,7 +437,8 @@ def run_once(rt: _SymbolRuntime) -> None:
                         lambda tf=sig.timeframe_minutes, src=sig.source, d=sig.direction: rt.store.mark_traded(tf, src, d),
                         lambda direction, tag, ref_desc, ticket: _on_redundant("STR", direction, tag, ref_desc, ticket),
                         rt.journal_str, {**dataclasses.asdict(sig), "rule": "HTF line touch + CISD",
-                                         "direction": _DIR_LABEL[sig.direction], "bid": bid, "ask": ask})
+                                         "direction": _DIR_LABEL[sig.direction], "bid": bid, "ask": ask},
+                        sig.timeframe_minutes)
     for sig in ict_signals:
         _process_signal(cfg, rt.sticky, "ICT", cfg.ict_magic_number, sig.direction, sig.sl, _ict_tag(sig),
                         f"zone=[{sig.zone_btm:.3f}-{sig.zone_top:.3f}]",
@@ -431,7 +446,8 @@ def run_once(rt: _SymbolRuntime) -> None:
                             rt.ict_eligibility.mark_traded(zid, top, btm),
                         lambda direction, tag, ref_desc, ticket: _on_redundant("ICT", direction, tag, ref_desc, ticket),
                         rt.journal_ict, {**dataclasses.asdict(sig), "rule": "OB zone touch + CISD",
-                                         "direction": _DIR_LABEL[sig.direction], "bid": bid, "ask": ask})
+                                         "direction": _DIR_LABEL[sig.direction], "bid": bid, "ask": ask},
+                        trade_journal.timeframe_of_logic({"zone_id": sig.zone_id, "timeframe_name": sig.timeframe_name}))
 
     for component, entries in redundant.items():
         direction, first_tag, _first_ref, ticket = entries[0]
@@ -441,15 +457,13 @@ def run_once(rt: _SymbolRuntime) -> None:
         print(msg)
         _send_alert(msg)
 
-    str_positions = broker.get_positions(cfg.symbol, cfg.magic_number)
-    str_position = str_positions[0] if str_positions else None
-    if str_position is not None:
+    # EVERY open position of each component is managed (SL trailing + partials), not just the first: with
+    # the timeframe hierarchy a component can hold an HTF trade and an opposite LTF trade at once.
+    for str_position in broker.get_positions(cfg.symbol, cfg.magic_number):
         _run_sl_manager(cfg, "STR", rt.sl_mgr_str, rt.tm_mgr_str, str_position, rt.journal_str)
         _run_trade_manager(cfg, "STR", rt.tm_mgr_str, str_position, rt.journal_str)
 
-    ict_positions = broker.get_positions(cfg.symbol, cfg.ict_magic_number)
-    ict_position = ict_positions[0] if ict_positions else None
-    if ict_position is not None:
+    for ict_position in broker.get_positions(cfg.symbol, cfg.ict_magic_number):
         _run_sl_manager(cfg, "ICT", rt.sl_mgr_ict, rt.tm_mgr_ict, ict_position, rt.journal_ict)
         _run_trade_manager(cfg, "ICT", rt.tm_mgr_ict, ict_position, rt.journal_ict)
 

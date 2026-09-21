@@ -59,6 +59,27 @@ _DEAL_REASON_LABEL = {
 }
 
 
+_TF_NAME_MINUTES = {"D1": 1440, "H4": 240, "H2": 120, "H1": 60, "M30": 30, "M15": 15, "M10": 10,
+                    "M5": 5, "M3": 3, "M1": 1}
+
+
+def timeframe_of_logic(logic: dict) -> Optional[int]:
+    """Timeframe rank in minutes of one trade, from its entry "logic": RM-STR records the level's
+    timeframe_minutes, RM-ICT the zone id ("XAUUSD|240|bull|<start>") and a timeframe name. Used
+    by the RM's own opposite-signal rule and by the Exit Manager, so both rank trades identically.
+    None if the logic carries no timeframe."""
+    tf = logic.get("timeframe_minutes")
+    if tf is not None:
+        return int(tf)
+    zone_id = logic.get("zone_id")
+    if zone_id:
+        try:
+            return int(str(zone_id).split("|")[1])
+        except (IndexError, ValueError):
+            pass
+    return _TF_NAME_MINUTES.get(str(logic.get("timeframe_name")))
+
+
 def _ist_now() -> str:
     return dt.datetime.now(_IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
@@ -129,6 +150,27 @@ class TradeJournal:
         if ticket in self._open:
             self._open[ticket]["pending_exit"] = rec
 
+    def timeframe_minutes(self, ticket: int) -> Optional[int]:
+        """Timeframe rank of an OPEN journaled trade (None if unknown / not journaled)."""
+        info = self._open.get(ticket)
+        return timeframe_of_logic(info["entry"].get("logic") or {}) if info else None
+
+    def _pending_from_file(self, ticket: int) -> Optional[dict]:
+        """An exit_requested line for this ticket written by ANOTHER process (the Exit Manager
+        closes trades it does not own and records why here), newest first."""
+        try:
+            lines = self._path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        for line in reversed(lines):
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("event") == "exit_requested" and rec.get("ticket") == ticket:
+                return rec
+        return None
+
     def reconcile(self, open_tickets: Iterable[int]) -> None:
         """Call every cycle with the tickets currently open for this
         component. Writes the "exit" line for any journaled trade that is
@@ -145,7 +187,7 @@ class TradeJournal:
             if summary is None:
                 continue          # not (yet) provably closed -- try again later
             info = self._open[ticket]
-            pending = info["pending_exit"]
+            pending = info["pending_exit"] or self._pending_from_file(ticket)
             if pending is not None:
                 reason, detail = pending.get("reason", "?"), pending.get("detail", {})
             else:
