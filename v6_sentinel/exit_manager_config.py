@@ -4,8 +4,13 @@ files can never drift out of sync with the bots that own them.
 
 WATCHED COMPONENTS (per symbol): TM-STR, RM-STR, RM-ICT. Each is a WatchedSource: its name
 (the "component" string its trade journal uses), its magic number, and its trade journal file
-(trade_journal.py). TM-ICT is not built yet; when it is, it is one more entry in
-_sources_for().
+(trade_journal.py) -- used by exit_manager_bias.py to know which journal to write a closed
+trade's "why" into. TM-ICT is not built yet; when it is, it is one more entry in _sources_for().
+
+Rebuilt 2026-09-21 (user: "lets re build the exit manager from the beginning") for
+exit_manager_bias.py's Bias Exit Manager (component 1). No per-source ranking/timeframe
+field any more -- that belonged to the earlier entry-watching design and no longer applies;
+see exit_manager_bias.py's own docstring for the current rule.
 
 Safety: enable_trading must be explicitly set true (V6S_EM_{SYMBOL}_ENABLE_TRADING) for any
 close to actually be sent -- independent of every other component's own flag. Left unset
@@ -15,7 +20,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -36,10 +40,6 @@ class WatchedSource:
     name: str              # the "component" string in that bot's trade journal, e.g. "RM-ICT"
     magic_number: int
     journal_file: str
-    # A component whose trades all share one rank (TM-STR: its M15 bias/primary-structure timeframe)
-    # sets it here; None means each trade's own timeframe is read from its journal entry (RM-STR: the
-    # level's timeframe, RM-ICT: the zone's timeframe).
-    fixed_timeframe_minutes: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,6 @@ class ExitManagerSymbolConfig:
     enable_trading: bool
     sources: tuple[WatchedSource, ...]
 
-    state_file: str
     heartbeat_file: str
     decision_log_file: str
 
@@ -64,7 +63,7 @@ def _sources_for(symbol: str) -> tuple[WatchedSource, ...]:
     tm = trend_config.load_symbol_config(symbol)
     rm = reversal_config.load_symbol_config(symbol)
     return (
-        WatchedSource("TM-STR", tm.magic_number, tm.trade_journal_file, fixed_timeframe_minutes=tm.bias_timeframe),
+        WatchedSource("TM-STR", tm.magic_number, tm.trade_journal_file),
         WatchedSource("RM-STR", rm.magic_number, rm.str_trade_journal_file),
         WatchedSource("RM-ICT", rm.ict_magic_number, rm.ict_trade_journal_file),
     )
@@ -78,7 +77,6 @@ def load_symbol_config(symbol: str) -> ExitManagerSymbolConfig:
         deviation_points=int(os.getenv(prefix + "DEVIATION_POINTS", "30")),
         enable_trading=_env_bool(prefix + "ENABLE_TRADING", False),
         sources=_sources_for(symbol),
-        state_file=config.state_file_for("exit_manager_state", symbol),
         heartbeat_file=config.state_file_for("exit_manager_heartbeat", symbol),
         decision_log_file=config.state_file_for("exit_manager_decision_log", symbol, ext="jsonl"),
         mt5_terminal_path=config.MT5_TERMINAL_PATH,
