@@ -13,13 +13,17 @@ dropped entirely (was never actually useful as a reversal-zone source
 and its own grid-alignment offset couldn't be confidently validated
 anyway), H2 and M3 newly added now that the scraper actually tracks
 them and real zone data exists to confirm their own grid-alignment
-offsets (see nlb_nsb_block.py's _TIMEFRAME_OFFSET). M1 keeps getting
-scraped/stored (the chart still shows it, and dropping the pane would
-break the grid) but is deliberately EXCLUDED from this module's own
-TIMEFRAMES -- "we dont trade M1 zones for reversals" -- so M1 boxes
-never even enter the NLB/NSB Block; M1's own CISD DATA (a completely
-separate bridge) is still used as a confirmation source for M3/M5
-zones, that's unrelated to whether M1 OB zones themselves get seeded.
+offsets (see nlb_nsb_block.py's _TIMEFRAME_OFFSET).
+
+M3 REMOVED 2026-09-22 (user: "remove m3 zones for reversals, lets keep
+it from all HTF to M5") -- scope is now H4, H2, H1, M30, M15, M5. M1
+keeps getting scraped/stored (the chart still shows it, and dropping
+the pane would break the grid) but is deliberately EXCLUDED from this
+module's own TIMEFRAMES -- "we dont trade M1 zones for reversals" --
+so M1 boxes never even enter the NLB/NSB Block; M1's own CISD DATA (a
+completely separate bridge) is still used as a confirmation source for
+M5 zones, that's unrelated to whether M1 OB zones themselves get
+seeded.
 
 Role naming: a bearish OB is a "no long buffer" -- a level price should
 not be bought through/above (supply/resistance); a bullish OB is a
@@ -45,10 +49,10 @@ from typing import Optional
 
 # Scraper's own raw timeframe keys (as read off each pane's Data Window
 # header), highest to lowest.
-TIMEFRAMES = ("240", "120", "60", "30", "15", "5", "3")
+TIMEFRAMES = ("240", "120", "60", "30", "15", "5")
 
 TIMEFRAME_NAMES = {
-    "240": "H4", "120": "H2", "60": "H1", "30": "M30", "15": "M15", "5": "M5", "3": "M3",
+    "240": "H4", "120": "H2", "60": "H1", "30": "M30", "15": "M15", "5": "M5",
 }
 
 _ROLE_BULL = "no_short_buffer"   # bullish OB -- demand/support, don't sell through it

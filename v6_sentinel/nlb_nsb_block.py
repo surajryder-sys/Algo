@@ -78,8 +78,9 @@ no candle-close wait, no sustain requirement, a single tick is enough.
 An invalidated zone is DELETED from the block outright (not merely
 flagged).
 
-SCOPE: same 7 timeframes as ob_levels.py (H4, H2, H1, M30, M15, M5, M3)
--- reuses its TIMEFRAMES/TIMEFRAME_NAMES/_role_for() directly rather than
+SCOPE: same 6 timeframes as ob_levels.py (H4, H2, H1, M30, M15, M5 --
+M3 zones removed 2026-09-22, see that module's own docstring) -- reuses
+its TIMEFRAMES/TIMEFRAME_NAMES/_role_for() directly rather than
 duplicating them, and reads the scraper's own raw zone store the same
 way ob_levels.read_all_zones() does (same "symbol|timeframe|direction"
 keying tv_scraper/zone_store.py already uses, so a zone's identity here
@@ -125,8 +126,8 @@ from v6_sentinel import ob_levels
 # this module's own scope (see ob_levels.py) -- its own remainder
 # distribution never showed a clear plurality, so it's no longer
 # relevant to keep an entry for.
-_TIMEFRAME_SECONDS = {"240": 14400, "120": 7200, "60": 3600, "30": 1800, "15": 900, "5": 300, "3": 180}
-_TIMEFRAME_OFFSET = {"240": 3600, "120": 3600, "60": 0, "30": 0, "15": 0, "5": 0, "3": 0}
+_TIMEFRAME_SECONDS = {"240": 14400, "120": 7200, "60": 3600, "30": 1800, "15": 900, "5": 300}
+_TIMEFRAME_OFFSET = {"240": 3600, "120": 3600, "60": 0, "30": 0, "15": 0, "5": 0}
 # A start_time exactly ONE SECOND past the expected offset is a known,
 # benign, unexplained-but-consistent variant seen throughout V5S's own
 # real zones (paired entries like ...1786082400/...1786082401) -- NOT

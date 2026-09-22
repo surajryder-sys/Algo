@@ -11,9 +11,10 @@ reversal_ict.py):
   - CISD confirmation is the ENTRY TRIGGER for both Reversal Manager
     components: a fresh confirmation (fresh_cisd()) in the matching
     direction after a level/zone touch. RM-STR listens on M3 or M5;
-    RM-ICT's pool depends on the touched zone's timeframe (M3/M5, or
-    M1/M3 for M3 zones, M1/M3/M5 for M5 zones). Trigger tags are
-    "M1CD"/"M3CD"/"M5CD" ("CD" = CISD).
+    RM-ICT's pool depends on the touched zone's timeframe (M3/M5 for
+    H4/H2/H1/M30/M15 zones, M1/M3/M5 for M5 zones -- M3 zones
+    themselves were removed 2026-09-22, see ob_levels.py). Trigger tags
+    are "M1CD"/"M3CD"/"M5CD" ("CD" = CISD).
   - There is no M15 Primary Structure gate and no other trigger type any
     more -- the older ST1F/M3F/ST3F/M5F triggers are gone.
 

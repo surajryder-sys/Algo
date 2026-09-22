@@ -30,13 +30,17 @@ ENTRY RULE:
   sourced from a timeframe pool that depends on the ZONE's OWN
   timeframe (_ZONE_CISD_POOLS below):
     - H4/H2/H1/M30/M15 zones -> M3 or M5 CISD, whichever fires first.
-    - M3 zones (own exception) -> M1 or M3's own CISD, whichever fires
-      first.
     - M5 zones (own exception) -> M1, M3, or M5's own CISD, whichever
       fires first.
   Every pool is checked every cycle -- "whichever gives faster
   confirmation" falls out naturally from checking all of them each poll
   and acting the instant any one fires, no explicit race/timer needed.
+
+  M3 ZONES REMOVED (2026-09-22, user: "remove m3 zones for reversals,
+  lets keep it from all HTF to M5") -- RM-ICT's own candidate zones now
+  span H4 down to M5 only (see ob_levels.TIMEFRAMES); M3 stays fully in
+  use as a CONFIRMATION timeframe (both pools above), only M3-FORMED OB
+  zones are no longer candidates.
 
   SEQUENCING -- the critical rule, user's own words: "if m3 is already
   in bullish, we dont do anything, we wait an event to occur post the
@@ -112,8 +116,8 @@ _ZONE_CISD_POOLS: dict[str, tuple[int, ...]] = {
     "60": (3, 5),    # H1
     "30": (3, 5),    # M30
     "15": (3, 5),    # M15
-    "3": (1, 3),     # M3 -- own exception, also accepts M1
     "5": (1, 3, 5),  # M5 -- own exception, also accepts M1/M3
+    # no "3" entry -- M3 zones removed 2026-09-22, see module docstring
 }
 
 _CISD_TAG = {1: "M1CD", 3: "M3CD", 5: "M5CD"}
