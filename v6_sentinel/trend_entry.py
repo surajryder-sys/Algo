@@ -57,6 +57,7 @@ from typing import Optional
 
 from v6_sentinel import cisd_bridge, sl_basis
 from v6_sentinel.flip_state import EventType, FlipEvent, FlipStateResult
+from v6_sentinel.sideways_trapper import SidewaysTrapper
 from v6_sentinel.trend_bias import M15Gate
 
 # Which timeframes' lines may supply the initial SL, in order, per
@@ -71,6 +72,15 @@ _SL_LINE_TIMEFRAMES: dict[int, tuple[int, ...]] = {
 # with the CISD's direction (not merely "allowed"), same convention as
 # elsewhere in this file for "which timeframes need a tighter rule."
 _STRICT_GATE_TIMEFRAMES = frozenset({3})
+
+# Sideways Trapper applies to BOTH M5 and M3 (user, 2026-09-22: "sideways trap
+# to be followed by m3 as well", then confirmed "in both m3 and m5") -- only
+# ever consulted right after a genuine SL hit has been recorded for that
+# direction; with nothing recorded (or once it's cleared/beaten) trading
+# proceeds completely normally on both timeframes. Same
+# sideways_trapper.SidewaysTrapper class RM-STR uses, its own separate
+# instance/state file (trend_main.py builds it).
+_TRAPPED_TIMEFRAMES = frozenset({5, 3})
 
 
 @dataclass(frozen=True)
@@ -173,7 +183,9 @@ def find_squareoff(symbol: str, position_direction: int, timeframe: int,
 
 def find_signal(symbol: str, gate: M15Gate, execution_timeframes: tuple[int, ...],
                 eligibility: TrendEligibilityStore, sl_buffer: float,
-                bid: float, ask: float, m5_state: Optional[int] = None) -> Optional[TrendSignal]:
+                bid: float, ask: float, m5_state: Optional[int] = None,
+                trapper: Optional[SidewaysTrapper] = None, trap_min_distance: Optional[float] = None,
+                ) -> Optional[TrendSignal]:
     """The first execution timeframe with a fresh, untraded CISD whose
     direction is in the M15 gate's allowed set, AND a usable initial SL --
     None otherwise. `direction` is simply the CISD's own direction (a BUY on
@@ -185,7 +197,13 @@ def find_signal(symbol: str, gate: M15Gate, execution_timeframes: tuple[int, ...
     square-off) is only consulted for timeframes in _STRICT_GATE_TIMEFRAMES
     (M3): there, the M15 gate must be in STRICT agreement with the CISD's
     direction (not merely "allowed" -- see module docstring) AND m5_state
-    must also match it, or that timeframe is skipped this cycle."""
+    must also match it, or that timeframe is skipped this cycle.
+
+    trapper/trap_min_distance (sideways_trapper.SidewaysTrapper, added
+    2026-09-22): consulted for _TRAPPED_TIMEFRAMES (both M5 and M3) -- a
+    direction whose entry price would land too close to that direction's
+    last SL-hit price is skipped, same rule RM-STR's own M5/M3/...
+    scan uses, see that module's own docstring."""
     cache: dict = {}
     for tf in execution_timeframes:
         sl_timeframes = _SL_LINE_TIMEFRAMES.get(tf)
@@ -203,6 +221,9 @@ def find_signal(symbol: str, gate: M15Gate, execution_timeframes: tuple[int, ...
         if eligibility.is_traded(tf, cisd.last_cisd_time):
             continue
         entry_price = ask if direction == 1 else bid
+        if (tf in _TRAPPED_TIMEFRAMES and trapper is not None and trap_min_distance is not None
+                and trapper.blocks(direction, entry_price, trap_min_distance, gate.structure)):
+            continue
         resolved = sl_basis.initial_sl_basis(symbol, direction, entry_price, cisd, cache,
                                              timeframes=sl_timeframes)
         if resolved is None:

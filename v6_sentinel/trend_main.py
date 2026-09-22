@@ -101,7 +101,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import alerts, bridge, bridge_flip, broker, cisd_bridge, config, decision_log, heartbeat, rates, sl_manager, trade_journal, trade_manager, trend_bias, trend_entry
+from v6_sentinel import alerts, bridge, bridge_flip, broker, cisd_bridge, config, decision_log, heartbeat, rates, sideways_trapper, sl_manager, trade_journal, trade_manager, trend_bias, trend_entry
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.flip_state import far_near_line
 from v6_sentinel.trend_config import TMSymbolConfig, load_symbol_config
@@ -316,6 +316,7 @@ class _SymbolRuntime:
     feed_watch: BiasFeedWatch                  # the M15 bias feed: stale -> entries paused
     state_feed_watch: BiasFeedWatch = field(default_factory=BiasFeedWatch)   # the M5 state feed: stale -> square-off paused
     journal: Optional[trade_journal.TradeJournal] = None                       # per-trade entry/exit logic
+    trapper: Optional[sideways_trapper.SidewaysTrapper] = None                   # Sideways Trapper, M5+M3
 
 
 def _build_runtime(symbol: str) -> _SymbolRuntime:
@@ -329,6 +330,7 @@ def _build_runtime(symbol: str) -> _SymbolRuntime:
                                           cfg.partial2_trigger_points, cfg.partial2_fraction),
         feed_watch=BiasFeedWatch(),
         journal=trade_journal.TradeJournal(cfg.trade_journal_file, "TM-STR", cfg.symbol),
+        trapper=sideways_trapper.SidewaysTrapper(cfg.sideways_trapper_state_file),
     )
 
 
@@ -384,7 +386,15 @@ def run_once(rt: _SymbolRuntime) -> None:
 
     open_tickets = {p.ticket for p in broker.get_positions(cfg.symbol, cfg.magic_number)}
     if rt.journal is not None:
-        rt.journal.reconcile(open_tickets)
+        tm_exits = rt.journal.reconcile(open_tickets)
+        for exit_rec in tm_exits:
+            if exit_rec.get("exit_reason") == "SL_HIT" and rt.trapper is not None:
+                exit_direction = 1 if exit_rec.get("direction") == "BUY" else -1
+                m15_structure_now = gate.structure if gate is not None else None
+                rt.trapper.record_sl_hit(exit_direction, exit_rec["entry_price"], m15_structure_now)
+                print(f"[V6S-TM] Sideways Trapper recorded {exit_rec['direction']} SL-hit @ "
+                      f"{exit_rec['entry_price']:.3f} -- next M5/M3 {exit_rec['direction']} needs to be "
+                      f"{cfg.sideways_trap_min_distance_points:.1f}+ points away")
     rt.sl_mgr.prune(open_tickets)
     rt.tm_mgr.prune(open_tickets)
     position = _current_position(cfg)
@@ -427,7 +437,8 @@ def run_once(rt: _SymbolRuntime) -> None:
     #    rule, see trend_entry.py); paused while the bias feed is stale.
     if gate is not None and not entries_blocked:
         sig = trend_entry.find_signal(cfg.symbol, gate, cfg.execution_timeframes, rt.eligibility,
-                                      cfg.sl_buffer, bid, ask, m5_state)
+                                      cfg.sl_buffer, bid, ask, m5_state,
+                                      rt.trapper, cfg.sideways_trap_min_distance_points)
         if sig is not None:
             ref = (f"cisd@{sig.event_time} m15_structure={'strong' if gate.structure == 1 else 'weak'} "
                   f"m15_cisd={'bullish' if gate.cisd == 1 else 'bearish'} sl={sig.sl_source}")

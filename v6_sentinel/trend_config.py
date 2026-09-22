@@ -61,6 +61,13 @@ class TMSymbolConfig:
     trailing_timeframe: int                 # whose far ATR line the post-breakeven SL follows
     squareoff_timeframe: int                 # whose CISD + ATR strong/weak state can square off an open trade
 
+    # Sideways Trapper, both M5 and M3 (user, 2026-09-22: "sideways trap to be followed by m3
+    # as well", then "in both m3 and m5") -- after a SL_HIT, the next signal in that same
+    # direction is skipped unless its own entry price is at least this many points away; see
+    # sideways_trapper.py.
+    sideways_trap_min_distance_points: float
+    sideways_trapper_state_file: str
+
     state_file: str                # TradeManager (partial booking) state
     sl_state_file: str              # SLManager state
     eligibility_state_file: str      # one-trade-per-CISD-event memory
@@ -90,6 +97,7 @@ _SYMBOL_DEFAULTS: dict[str, dict] = {
         execution_timeframes=(5, 3),   # M3 added 2026-09-22, its own stricter rule -- see trend_entry.py
         trailing_timeframe=5,
         squareoff_timeframe=5,
+        sideways_trap_min_distance_points=5.0,
     ),
 }
 
@@ -124,6 +132,9 @@ def load_symbol_config(symbol: str) -> TMSymbolConfig:
         execution_timeframes=d["execution_timeframes"],
         trailing_timeframe=d["trailing_timeframe"],
         squareoff_timeframe=d["squareoff_timeframe"],
+        sideways_trap_min_distance_points=float(os.getenv(prefix + "SIDEWAYS_TRAP_MIN_DISTANCE_POINTS",
+                                                          str(d["sideways_trap_min_distance_points"]))),
+        sideways_trapper_state_file=config.state_file_for("trend_manager_sideways_trapper", symbol),
         state_file=config.state_file_for("trend_manager_state", symbol),
         sl_state_file=config.state_file_for("trend_manager_sl_state", symbol),
         eligibility_state_file=config.state_file_for("trend_manager_eligibility", symbol),
