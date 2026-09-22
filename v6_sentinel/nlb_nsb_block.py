@@ -39,21 +39,23 @@ sync_from_scraper()):
     re-seeded or overwritten from the scraper again -- once a zone is
     ours, our own top/btm/retested state governs for its entire life
     here, independent of whatever the scraper's own copy's FIELDS do
-    afterward. ITS CONTINUED EXISTENCE is a different matter, though --
-    see PRUNING below: this store's own copy is deleted once the scraper
-    stops reporting the zone AT ALL, even though its own fields stay
-    un-re-read the whole time it does exist.
+    afterward, AND independent of whether the scraper keeps reporting it
+    at all (see NO MORE PRUNING-BY-ABSENCE below) -- the only way it
+    ever leaves this block is update_live() finding it genuinely
+    invalidated by real price.
 
-PRUNING (also sync_from_scraper()): every zone this block is holding
-that the scraper no longer reports at all gets removed, EVEN one
-currently holding a sticky ICT Guard block (ict_guard.py's own
-ICTGuardStickyStore.prune() already clears a standing block the moment
-its zone leaves the Block, by design). Already-traded eligibility
-(ICTEligibilityStore) is UNAFFECTED by pruning -- it stores its own
-top/btm range independently at trade time, not a live reference into
-this store. Live invalidation (price trading through a zone, via MT5's
-own live bid/ask -- see update_live() below) stays completely separate
-and unchanged by this.
+NO MORE PRUNING-BY-ABSENCE (reversed 2026-09-21 -- see
+sync_from_scraper()'s own docstring for the full story and the user's
+own words): a zone the scraper stops reporting is NOT treated as
+invalidated any more. The scraper only ever reports its own current
+top-4-per-side view, so a real, still-untested zone routinely gets
+pushed out of that view by a newer one forming elsewhere -- that used to
+delete it here too, right as it was being touched and waiting for a CISD
+confirmation. A zone now leaves this block for exactly ONE reason: LIVE
+MT5 price genuinely trading through its far edge (update_live() below).
+Already-traded eligibility (ICTEligibilityStore) was and is unaffected
+either way -- it stores its own top/btm range independently at trade
+time, not a live reference into this store.
   - A zone whose own "formed_time_confirmed" reads False is NEVER seeded
     at all -- a real V5S incident: a zone with this flag False had its
     top edge already above live price the instant it was seeded,
@@ -296,39 +298,38 @@ class BlockStore:
 
     def sync_from_scraper(self, zone_state_file: str, symbol: str = "XAUUSD") -> tuple[int, int]:
         """Seeds every zone the scraper currently reports that this block
-        has never seen before (by its own stable id), THEN prunes every
-        zone this block is holding that the scraper no longer reports at
-        all. Returns (added, pruned).
+        has never seen before (by its own stable id). Returns (added, pruned)
+        -- pruned is always 0 now, kept only so callers don't need to change
+        (see PRUNING REMOVED below).
 
-        PRUNING -- a genuine architecture change from V5S's original
-        design, not a bug fix: "at any point of given time, scraper
-        should give us the data of only 4 bullish ob's and 4 bearish
-        ob's from the all timeframes... no other zones should be kept
-        with neither scraper nor the python memory." Before this,
-        seeding was one-way and permanent -- once a zone was copied in
-        here, NOTHING ever removed it again except live invalidation
-        (price trading through it). tv_scraper's own ZoneStore already
-        deletes a zone once it's genuinely missing from the Data Window
-        for 2 consecutive polls -- this block just never re-checked
-        against that ongoing truth after its own initial copy, so it
-        kept accumulating zones tv_scraper itself had already deleted
-        (confirmed live in V5S: 232 zones held here against a handful
-        ever actually visible on chart at once).
+        PRUNING REMOVED (2026-09-21, reversing the 2026-09-18 change below --
+        user's own words: "we will delete zones when the zones are invalidated
+        from scraper, a newer zone in tv_scraper could make a zone not appear
+        in chart, that doesnt mean the invalidation, its because the indicator
+        we have set only 4 bullish and 4 bearish ob's to show on chart").
+        Confirmed live: this Block used to delete a zone the instant the
+        scraper's raw dict stopped including it, which is display churn, NOT
+        invalidation -- the indicator only ever reports its own top-4-per-side
+        view, so a real, still-untested zone routinely gets pushed out of that
+        view by a newer one forming elsewhere. That was deleting zones RIGHT
+        as they were touched and waiting for a CISD confirmation (confirmed:
+        one M30 zone alone flickered through 819 seed/invalidate cycles this
+        way, three real touches, zero trades). A zone now leaves this Block
+        for exactly ONE reason: LIVE MT5 price genuinely trading through its
+        far edge (update_live() below) -- the scraper's own view of what's
+        "currently on chart" no longer has any say in it. (Previous design,
+        2026-09-18: "at any point of given time, scraper should give us the
+        data of only 4 bullish ob's and 4 bearish ob's... no other zones
+        should be kept" -- prompted by V5S holding 232 stale zones against a
+        handful ever visible; that V5S problem doesn't recur here because a
+        zone still only ever gets ADDED once and still only ever gets removed
+        by a real, live invalidation, never re-accumulating duplicates.)
 
-        Deliberately prunes EVEN a zone currently holding a sticky ICT
-        Guard block -- ict_guard.py's own ICTGuardStickyStore.prune()
-        already clears a standing block the moment its zone leaves the
-        Block, by design, so this is that existing mechanism finally
-        being exercised as intended rather than dead code.
-        Already-traded eligibility (ICTEligibilityStore) is UNAFFECTED
-        -- it stores its own top/btm range independently at trade time,
-        not a live reference into this store, so pruning a zone here
-        never weakens overlaps_traded()'s own protection against
-        re-trading the same real zone if it later flickers back under a
-        new start_time."""
+        Already-traded eligibility (ICTEligibilityStore) is unaffected either
+        way -- it stores its own top/btm range independently at trade time,
+        not a live reference into this store."""
         raw = ob_levels._load_zone_store(zone_state_file)
         added = 0
-        live_zone_ids: set[str] = set()
         for tf in ob_levels.TIMEFRAMES:
             for direction in ("bull", "bear"):
                 key = f"{symbol}|{tf}|{direction}"
@@ -361,15 +362,6 @@ class BlockStore:
                             f"candle boundary, provably not a genuine zone for this timeframe")
                         continue
                     zid = _zone_id(symbol, tf, direction, start_time)
-                    # Counts as "currently live" for pruning purposes
-                    # regardless of what happens below -- a genuinely
-                    # aligned zone the scraper is STILL reporting must
-                    # never be pruned, even if it turns out to be a
-                    # near/cross-timeframe duplicate of something else
-                    # (that only stops it being SEEDED again, not
-                    # ongoing existence for whichever entry already
-                    # legitimately owns this exact zone_id).
-                    live_zone_ids.add(zid)
                     if zid in self._zones:
                         continue  # already ours -- our own state governs from here, not the scraper's
                     top = float(z["top"])
@@ -415,22 +407,9 @@ class BlockStore:
                     )
                     added += 1
 
-        # Scoped to THIS symbol only -- live_zone_ids only ever reflects
-        # what was just read for `symbol`, so a zone belonging to some
-        # OTHER symbol (this store now genuinely CAN hold more than one,
-        # if a caller ever shares one instance across symbols against
-        # this module's own one-instance-per-symbol convention) must
-        # never be judged against it.
-        stale = [zid for zid, z in self._zones.items() if z.symbol == symbol and zid not in live_zone_ids]
-        for zid in stale:
-            z = self._zones.pop(zid)
-            print(f"[V6S-BLOCK] zone {zid} [{z.btm:.3f}-{z.top:.3f}] PRUNED -- "
-                  f"scraper no longer reports it (not on chart anymore)")
-        pruned = len(stale)
-
-        if added or pruned:
+        if added:
             self._save()
-        return added, pruned
+        return added, 0
 
     def update_live(self, bid: float, ask: float, now: Optional[int] = None,
                     bid_low: Optional[float] = None, ask_high: Optional[float] = None) -> tuple[list[str], list[str]]:

@@ -71,11 +71,14 @@ _last_tick_msc: dict[str, int] = {}   # per symbol: time_msc of the newest tick 
 
 
 def run_once(cfg: WatcherSymbolConfig, store: BlockStore) -> None:
-    added, pruned = store.sync_from_scraper(cfg.zone_state_file, cfg.symbol)
+    # sync_from_scraper() only ever ADDS now (2026-09-21) -- a zone the scraper stops
+    # reporting is display churn (its own top-4-per-side view), not invalidation, so it
+    # is never pruned for that reason any more; see BlockStore.sync_from_scraper's own
+    # docstring. The only way a zone leaves the Block is update_live() below finding it
+    # genuinely invalidated by real price.
+    added, _pruned = store.sync_from_scraper(cfg.zone_state_file, cfg.symbol)
     if added:
         print(f"[V6S-NLBNSB] {cfg.symbol} seeded {added} new zone(s) from scraper")
-    if pruned:
-        print(f"[V6S-NLBNSB] {cfg.symbol} pruned {pruned} zone(s) no longer reported by scraper")
 
     tick = mt5.symbol_info_tick(cfg.symbol)
     if tick is None:
