@@ -101,7 +101,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import alerts, bridge, bridge_flip, broker, cisd_bridge, config, decision_log, heartbeat, rates, sideways_trapper, sl_manager, trade_journal, trade_manager, trend_bias, trend_entry
+from v6_sentinel import alerts, bridge, bridge_flip, broker, cisd_bridge, config, decision_log, flip_state, heartbeat, rates, sideways_trapper, sl_manager, trade_journal, trade_manager, trend_bias, trend_entry
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.flip_state import far_near_line
 from v6_sentinel.trend_config import TMSymbolConfig, load_symbol_config
@@ -247,6 +247,7 @@ def _trailing_far_line(symbol: str, tf_minutes: int, direction: int) -> Optional
 
 
 def _run_sl_manager(cfg: TMSymbolConfig, mgr: sl_manager.SLManager, tm_mgr: trade_manager.TradeManager, position,
+                    tracker: Optional[BridgeBarFlipTracker] = None,
                     journal: Optional[trade_journal.TradeJournal] = None) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
@@ -257,8 +258,12 @@ def _run_sl_manager(cfg: TMSymbolConfig, mgr: sl_manager.SLManager, tm_mgr: trad
         return
     current_sl = position.sl if position.sl else None
 
+    # Pre-breakeven flip check (2026-09-22) -- see sl_manager.py's own docstring.
+    trailing_fs = tracker.update(cfg.symbol, cfg.trailing_timeframe) if tracker is not None else None
+    with_flip = flip_state.with_direction_flip_after(trailing_fs, direction, cfg.trailing_timeframe, position.time)
+
     proposed = mgr.compute(position.ticket, direction, position.price_open, current_price, current_sl, far,
-                           tm_mgr.is_partially_cut(position.ticket))
+                           tm_mgr.is_partially_cut(position.ticket), with_direction_flip_after_entry=with_flip)
     if proposed is None:
         return
     print(f"[V6S-TM-SL] #{position.ticket} -> {proposed:.3f}")
@@ -469,7 +474,7 @@ def run_once(rt: _SymbolRuntime) -> None:
     # 4. Manage whatever is open (independent of whether a gate exists right now).
     position = _current_position(cfg)
     if position is not None:
-        _run_sl_manager(cfg, rt.sl_mgr, rt.tm_mgr, position, rt.journal)
+        _run_sl_manager(cfg, rt.sl_mgr, rt.tm_mgr, position, rt.tracker, rt.journal)
         _run_trade_manager(cfg, rt.tm_mgr, position, rt.journal)
 
 

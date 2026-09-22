@@ -41,6 +41,25 @@ Rule:
   - This pause/resume cycle repeats indefinitely for the life of one
     trade -- change it again, it pauses again; clear it again, it
     resumes and re-protects again.
+
+  - PRE-BREAKEVEN FLIP CHECK (added 2026-09-22, user: "sl manager needs
+    to check if any new lines available to trail from initial sl... when
+    there's a flip in m3, sl manager can actually check and trail if
+    there's a new qualifying sl, rest of the rules remain same" -- "flip
+    means a bearish flip for sell trade and a bullish flip for a buy
+    trade"): before this, once the INITIAL SL was set at entry, this
+    manager never looked at it again until breakeven activated -- even if
+    the trailing timeframe's own far line later moved to a genuinely
+    tighter, valid position. Now, PRE-breakeven, if a fresh WITH-
+    direction flip (flip_state.with_direction_flip_after()) has occurred
+    on the trailing timeframe SINCE the position opened, this manager
+    also checks the current far line for a tighter SL, using the exact
+    same tighten-only comparison the post-breakeven trail already uses --
+    just without the breakeven-price floor (not earned yet pre-
+    breakeven). The caller computes and passes in this one boolean
+    (with_direction_flip_after_entry) each cycle -- this module stays
+    agnostic to which bridge/tracker/timeframe that flip came from, same
+    as it already is for far_line itself.
 """
 from __future__ import annotations
 
@@ -107,7 +126,8 @@ class SLManager:
             self._save()
 
     def compute(self, ticket: int, direction: int, entry_price: float, current_price: float,
-               current_broker_sl: Optional[float], far_line: float, partial_booked: bool) -> Optional[float]:
+               current_broker_sl: Optional[float], far_line: float, partial_booked: bool,
+               with_direction_flip_after_entry: bool = False) -> Optional[float]:
         """Returns a new SL to apply this cycle, or None if nothing should
         change. Does NOT assume the caller actually applied the returned
         value -- call confirm_applied() only after the broker call
@@ -118,7 +138,13 @@ class SLManager:
         standalone points-in-favor check to decide whether breakeven is
         active, see module docstring for why both. Passed in rather than
         computed here since Trade Manager, not SL Manager, owns that
-        bookkeeping."""
+        bookkeeping.
+
+        with_direction_flip_after_entry: see module docstring's own
+        PRE-BREAKEVEN FLIP CHECK section -- True unlocks a one-condition
+        pre-breakeven re-check of the far line (same tighten-only rule as
+        post-breakeven), computed by the caller from its own flip-state
+        tracker."""
         state = self._state.get(ticket)
 
         if state is None:
@@ -160,6 +186,19 @@ class SLManager:
                 # same initial-SL formula fresh off the current far line
                 # rather than leaving it bare until breakeven activates.
                 proposed = far_line - self._sl_buffer if direction == 1 else far_line + self._sl_buffer
+                self._save()
+                return proposed
+            if with_direction_flip_after_entry:
+                # PRE-BREAKEVEN FLIP CHECK (see module docstring) -- same
+                # tighten-only comparison post-breakeven uses, just without
+                # the breakeven-price floor (not earned yet).
+                proposed = far_line - self._sl_buffer if direction == 1 else far_line + self._sl_buffer
+                if direction == 1 and proposed <= current_broker_sl + _MIN_SL_IMPROVEMENT:
+                    self._save()
+                    return None
+                if direction == -1 and proposed >= current_broker_sl - _MIN_SL_IMPROVEMENT:
+                    self._save()
+                    return None
                 self._save()
                 return proposed
             self._save()

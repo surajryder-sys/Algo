@@ -199,3 +199,27 @@ def compute(series: TrailSeries) -> Optional[FlipStateResult]:
         last_close=closes[-1],
         last_time=times[-1],
     )
+
+
+def with_direction_flip_after(state: Optional[FlipStateResult], direction: int, tf_minutes: int,
+                              position_open_time: int) -> bool:
+    """True if this timeframe's own confirmed state genuinely FLIPPED to
+    match `direction` (Confirmed.BULL for a BUY, Confirmed.BEAR for a
+    SELL) on a bar that closed AFTER position_open_time. Added 2026-09-22
+    for sl_manager.py's own pre-breakeven improvement check (user: "when
+    there's a flip in m3, sl manager can actually check and trail if
+    there's a new qualifying sl" -- "flip means a bearish flip for sell
+    trade and a bullish flip for a buy trade"). Mirrors
+    trend_entry.find_flip_exit's own "only after entry, event not a state
+    comparison" contract exactly -- just the OPPOSITE match condition
+    (WITH the trade's own direction here, AGAINST it for an exit): a
+    TRAP_RESOLVED (snap-back to the side it was already on) is not a
+    flip and doesn't count, same as there."""
+    if state is None or state.last_event is None:
+        return False
+    event = state.last_event
+    if event.event_type != EventType.FLIP:
+        return False
+    if event.confirmed.value != direction:
+        return False
+    return event.bar_time + tf_minutes * 60 > position_open_time

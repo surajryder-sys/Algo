@@ -8,17 +8,25 @@ the main loop cycles through all of them each poll. XAUUSD is the only
 active symbol today; adding another means adding a deliberately-tuned
 entry to reversal_config._SYMBOL_DEFAULTS -- no change to this file.
 
-INDEPENDENCE (unchanged from V5S's own confirmed design, "no keep them
-both seperate... no interference"): STR and ICT do NOT share a magic
-number or a position slot -- each has its own
-(RMSymbolConfig.magic_number/ict_magic_number), own SL Manager/Trade
-Manager state files, and runs its own entirely separate position
-lifecycle. They can both be open on the same symbol at the same time, in
-the same or opposite directions, without ever squaring each other off.
-"Square off on opposite side" describes EACH component's own internal
-lifecycle (an opposite signal from the SAME component squares off ITS
-OWN prior position), never the two components squaring off against each
-other.
+INDEPENDENCE (V5S's own original confirmed design, "no keep them both
+seperate... no interference"): STR and ICT do NOT share a magic number or
+a position slot -- each has its own (RMSymbolConfig.magic_number/
+ict_magic_number), own SL Manager/Trade Manager state files, and runs its
+own entirely separate ENTRY/eligibility lifecycle. They can both be open
+on the same symbol at the same time, in the same or opposite directions.
+
+CROSS-COMPONENT SQUARE-OFF -- PARTIAL EXCEPTION (added 2026-09-22, a real
+live incident: RM-ICT held a SELL open through an RM-STR BUY qualifying,
+with no mechanism to close it until the user did so manually). "Square
+off on opposite side" still primarily describes EACH component's own
+internal lifecycle (an opposite signal from the SAME component squares
+off ITS OWN prior position) -- but a qualifying signal on EITHER
+component now ALSO squares off the OTHER component's own opposite-
+direction position (_process_signal's own other_component/
+other_magic_number/other_journal parameters), tagged "SQOFF-CROSS"/"SQX"
+to stay distinguishable from a component's own internal square-off
+("SQOFF"/"SQ"). Entry, eligibility, SL, and TP remain fully independent
+otherwise -- this is the ONE place STR and ICT now interact.
 
 MAGIC NUMBERS -- 26091801 (STR) / 26091802 (ICT), deliberately DIFFERENT
 from V5-Sentinel's own 26090701/26090702 (see reversal_config.py's own
@@ -91,7 +99,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import broker, config, decision_log, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sideways_trapper, sl_manager, trade_journal, trade_manager
+from v6_sentinel import broker, config, decision_log, flip_state, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sideways_trapper, sl_manager, trade_journal, trade_manager
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.bridge_flip import m3_far_line
 from v6_sentinel.alerts import send_alert as _send_alert
@@ -198,6 +206,7 @@ def _close_position(cfg: RMSymbolConfig, component: str, position, action_label:
 
 def _run_sl_manager(cfg: RMSymbolConfig, component: str, mgr: sl_manager.SLManager,
                     tm_mgr: trade_manager.TradeManager, position,
+                    tracker: Optional[BridgeBarFlipTracker] = None,
                     journal: Optional[trade_journal.TradeJournal] = None) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
@@ -208,12 +217,17 @@ def _run_sl_manager(cfg: RMSymbolConfig, component: str, mgr: sl_manager.SLManag
         return
     current_sl = position.sl if position.sl else None
 
+    # Pre-breakeven flip check (2026-09-22) -- see sl_manager.py's own docstring.
+    # M3 always, matching m3_far_line's own hardcoded trailing timeframe above.
+    m3_fs = tracker.update(cfg.symbol, 3) if tracker is not None else None
+    with_flip = flip_state.with_direction_flip_after(m3_fs, direction, 3, position.time)
+
     # Breakeven gates on Trade Manager's own partial-booking progress OR
     # a standalone points-in-favor check -- see sl_manager.py's own
     # docstring. Applies to both STR and ICT (whichever tm_mgr the caller
     # passes in for this SAME ticket).
     proposed = mgr.compute(position.ticket, direction, position.price_open, current_price, current_sl, far,
-                           tm_mgr.is_partially_cut(position.ticket))
+                           tm_mgr.is_partially_cut(position.ticket), with_direction_flip_after_entry=with_flip)
     if proposed is None:
         return
     print(f"[V6S-{component}-SL] #{position.ticket} -> {proposed:.3f}")
@@ -266,14 +280,16 @@ def _run_trade_manager(cfg: RMSymbolConfig, component: str, mgr: trade_manager.T
 def _process_signal(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, component: str, magic_number: int,
                     direction: int, sl: float, tag: str, ref_desc: str, mark_traded, on_redundant,
                     journal: Optional[trade_journal.TradeJournal] = None, logic: Optional[dict] = None,
-                    signal_tf: Optional[int] = None) -> None:
+                    signal_tf: Optional[int] = None, other_component: Optional[str] = None,
+                    other_magic_number: Optional[int] = None,
+                    other_journal: Optional[trade_journal.TradeJournal] = None) -> None:
     """Acts on ONE signal against whatever position is ACTUALLY open right
     now on THIS component's own magic number (re-queried, so an earlier
     signal's own action this same cycle is visible here). Shared CODE
     between both Reversal Manager components (STR and ICT), but each call
-    is scoped entirely to its own magic_number -- they never see or touch
-    each other's position, see module docstring for why (independent, not
-    shared). mark_traded is a zero-arg callback (STR's own
+    is scoped entirely to its own magic_number for entry/eligibility --
+    they never share those (see module docstring's own INDEPENDENCE
+    section). mark_traded is a zero-arg callback (STR's own
     store.mark_traded(tf, direction) or ICT's own
     eligibility.mark_traded(zone_id), bound by the caller) so this
     function stays agnostic to which component's own eligibility scheme
@@ -289,7 +305,24 @@ def _process_signal(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, 
     instead of one per matching zone/level (a single trigger event can
     legitimately match dozens of zones/levels at once); decision_log
     still gets one line per signal for full audit granularity, only the
-    Telegram side is collapsed."""
+    Telegram side is collapsed.
+
+    other_component/other_magic_number/other_journal: CROSS-COMPONENT
+    SQUARE-OFF (added 2026-09-22, a real live incident: RM-ICT held a SELL
+    open through an RM-STR BUY qualifying -- STR and ICT's own magic
+    numbers meant STR's square-off never even looked at ICT's position,
+    so it sat open until the user closed it manually). This PARTIALLY
+    REVERSES the module docstring's own INDEPENDENCE design (confirmed
+    2026-09-19, "no keep them both seperate... no interference") --
+    ONLY for this one thing: a qualifying signal on either component now
+    ALSO squares off the OTHER component's own opposite-direction
+    position, tagged "SQOFF-CROSS"/"SQX" to stay distinguishable from a
+    component's own internal square-off ("SQOFF"/"SQ") in logs/journal/
+    comment. Entry, eligibility, SL, and TP for each component otherwise
+    remain fully independent -- unlike the own-component square-off
+    above, a failed cross-close does NOT block this signal's own entry
+    (the two trades are still nominally independent; only prints/logs the
+    failure)."""
     positions = broker.get_positions(cfg.symbol, magic_number)
     want_type = mt5.POSITION_TYPE_BUY if direction == 1 else mt5.POSITION_TYPE_SELL
     same = [p for p in positions if p.type == want_type]
@@ -306,6 +339,14 @@ def _process_signal(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, 
                                 "new_signal": tag, "new_direction": _DIR_LABEL[direction],
                                 "signal_tf": signal_tf, "position_tf": position_tf}):
             return      # could not close it -> do not open and do not consume this setup
+
+    if other_magic_number is not None:
+        for position in broker.get_positions(cfg.symbol, other_magic_number):
+            if position.type == want_type:
+                continue   # same direction as this signal -- not opposite, leave it alone
+            _close_position(cfg, other_component, position, "SQOFF-CROSS", tag, "SQX", other_journal,
+                            {"rule": f"opposite-direction {component} reversal signal squared it off (cross-component)",
+                             "new_signal": tag, "new_direction": _DIR_LABEL[direction], "signal_tf": signal_tf})
 
     if same:
         # SAME direction already open, whether still full-size or already partially cut -- NO-OP: no
@@ -463,7 +504,8 @@ def run_once(rt: _SymbolRuntime) -> None:
                         lambda direction, tag, ref_desc, ticket: _on_redundant("STR", direction, tag, ref_desc, ticket),
                         rt.journal_str, {**dataclasses.asdict(sig), "rule": "HTF line touch + CISD",
                                          "direction": _DIR_LABEL[sig.direction], "bid": bid, "ask": ask},
-                        sig.timeframe_minutes)
+                        sig.timeframe_minutes, other_component="ICT", other_magic_number=cfg.ict_magic_number,
+                        other_journal=rt.journal_ict)
     for sig in ict_signals:
         _process_signal(cfg, rt.sticky, "ICT", cfg.ict_magic_number, sig.direction, sig.sl, _ict_tag(sig),
                         f"zone=[{sig.zone_btm:.3f}-{sig.zone_top:.3f}]",
@@ -472,7 +514,8 @@ def run_once(rt: _SymbolRuntime) -> None:
                         lambda direction, tag, ref_desc, ticket: _on_redundant("ICT", direction, tag, ref_desc, ticket),
                         rt.journal_ict, {**dataclasses.asdict(sig), "rule": "OB zone touch + CISD",
                                          "direction": _DIR_LABEL[sig.direction], "bid": bid, "ask": ask},
-                        trade_journal.timeframe_of_logic({"zone_id": sig.zone_id, "timeframe_name": sig.timeframe_name}))
+                        trade_journal.timeframe_of_logic({"zone_id": sig.zone_id, "timeframe_name": sig.timeframe_name}),
+                        other_component="STR", other_magic_number=cfg.magic_number, other_journal=rt.journal_str)
 
     for component, entries in redundant.items():
         direction, first_tag, _first_ref, ticket = entries[0]
@@ -486,11 +529,11 @@ def run_once(rt: _SymbolRuntime) -> None:
     # normally at most one per component now that any opposite signal squares off the other one again,
     # but this still covers the transient case where a square-off's own close failed and both are open.
     for str_position in broker.get_positions(cfg.symbol, cfg.magic_number):
-        _run_sl_manager(cfg, "STR", rt.sl_mgr_str, rt.tm_mgr_str, str_position, rt.journal_str)
+        _run_sl_manager(cfg, "STR", rt.sl_mgr_str, rt.tm_mgr_str, str_position, rt.tracker, rt.journal_str)
         _run_trade_manager(cfg, "STR", rt.tm_mgr_str, str_position, rt.journal_str)
 
     for ict_position in broker.get_positions(cfg.symbol, cfg.ict_magic_number):
-        _run_sl_manager(cfg, "ICT", rt.sl_mgr_ict, rt.tm_mgr_ict, ict_position, rt.journal_ict)
+        _run_sl_manager(cfg, "ICT", rt.sl_mgr_ict, rt.tm_mgr_ict, ict_position, rt.tracker, rt.journal_ict)
         _run_trade_manager(cfg, "ICT", rt.tm_mgr_ict, ict_position, rt.journal_ict)
 
 
