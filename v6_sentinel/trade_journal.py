@@ -171,10 +171,13 @@ class TradeJournal:
                 return rec
         return None
 
-    def reconcile(self, open_tickets: Iterable[int]) -> None:
+    def reconcile(self, open_tickets: Iterable[int]) -> list[dict]:
         """Call every cycle with the tickets currently open for this
         component. Writes the "exit" line for any journaled trade that is
-        gone and whose closing shows in the broker's deal history."""
+        gone and whose closing shows in the broker's deal history. Returns
+        the exit records written THIS call (empty list if none) -- e.g.
+        reversal_main.py's SL-distance guard reads these for SL_HIT."""
+        written: list[dict] = []
         open_set = set(open_tickets)
         now = time.time()
         for ticket in list(self._open):
@@ -195,7 +198,7 @@ class TradeJournal:
             if reason == "SL_HIT":
                 detail = {**detail, "sl_stage": "moved" if info["sl_moves"] else "initial",
                           "sl_at_close": info["sl_moves"][-1]["new_sl"] if info["sl_moves"] else info["entry"].get("sl")}
-            self._write("exit", ticket, exit_reason=reason, exit_detail=detail,
+            rec = self._write("exit", ticket, exit_reason=reason, exit_detail=detail,
                         entry_price=summary["entry_price"], exit_price=summary["exit_price"],
                         volume=summary["volume"], profit_net=summary["profit_net"],
                         duration_s=summary["duration_s"], deal_reason=summary["deal_reason"],
@@ -203,8 +206,10 @@ class TradeJournal:
                         sl_moves=len(info["sl_moves"]),
                         direction=info["entry"].get("direction"), entry_time_ist=info["entry"].get("time_ist"),
                         entered_by=info["entry"].get("logic"))
+            written.append(rec)
             del self._open[ticket]
             self._last_try.pop(ticket, None)
+        return written
 
 
 def _closing_summary(ticket: int) -> Optional[dict]:

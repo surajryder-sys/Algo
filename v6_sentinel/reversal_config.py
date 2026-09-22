@@ -99,6 +99,14 @@ class RMSymbolConfig:
     # for the same stale-retest bug). Seed-copied retests never count. See reversal_ict.py.
     ict_touch_max_age_minutes: float
 
+    # Sideways Trapper (user, 2026-09-22, after a real M5-chop loss cluster -- see
+    # sideways_trapper.py's own docstring): RM-STR only. After a SL_HIT in one direction,
+    # the next qualifying trade in THAT SAME direction is skipped unless its own entry price
+    # is at least this many points away from the one that just got stopped -- cleared early
+    # by a genuine M15 structure flip, otherwise it just stands until it's beaten.
+    sideways_trap_min_distance_points: float
+    sideways_trapper_state_file: str
+
     decision_log_file: str
     str_trade_journal_file: str        # per-trade entry/exit logic, one per component -- see trade_journal.py
     ict_trade_journal_file: str
@@ -129,6 +137,7 @@ _SYMBOL_DEFAULTS: dict[str, dict] = {
         ict_guard_buffer_points=5.0,
         ict_sl_override_points=15.0,
         ict_touch_max_age_minutes=30.0,
+        sideways_trap_min_distance_points=5.0,
     ),
 }
 
@@ -174,6 +183,9 @@ def load_symbol_config(symbol: str) -> RMSymbolConfig:
         ict_guard_sticky_state_file=config.state_file_for("reversal_manager_ict_guard_sticky", symbol),
         ict_sl_override_points=float(os.getenv(prefix + "ICT_SL_OVERRIDE_POINTS", str(d["ict_sl_override_points"]))),
         ict_touch_max_age_minutes=float(os.getenv(prefix + "ICT_TOUCH_MAX_AGE_MINUTES", str(d["ict_touch_max_age_minutes"]))),
+        sideways_trap_min_distance_points=float(os.getenv(prefix + "SIDEWAYS_TRAP_MIN_DISTANCE_POINTS",
+                                                          str(d["sideways_trap_min_distance_points"]))),
+        sideways_trapper_state_file=config.state_file_for("reversal_manager_sideways_trapper", symbol),
         decision_log_file=config.state_file_for("reversal_manager_decision_log", symbol, ext="jsonl"),
         str_trade_journal_file=config.state_file_for("reversal_manager_str_trade_journal", symbol, ext="jsonl"),
         ict_trade_journal_file=config.state_file_for("reversal_manager_ict_trade_journal", symbol, ext="jsonl"),

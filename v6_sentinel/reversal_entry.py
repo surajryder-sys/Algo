@@ -83,6 +83,7 @@ from typing import Optional
 
 from v6_sentinel import cisd_bridge, sl_basis
 from v6_sentinel.htf_levels import HTFState, LevelEligibilityStore
+from v6_sentinel.sideways_trapper import SidewaysTrapper
 
 _CISD_POOL = (3, 5)  # M3, M5 -- uniform across every HTF timeframe here, whichever confirms first
 _CISD_TAG = {3: "M3CD", 5: "M5CD"}
@@ -126,7 +127,9 @@ def scan_touches(htf_states: dict[int, Optional[HTFState]], store: LevelEligibil
 
 
 def _check_level(store: LevelEligibilityStore, symbol: str, tf: int, level, sl_buffer: float,
-                 bid: float, ask: float, cache: dict) -> Optional[ReversalSignal]:
+                 bid: float, ask: float, cache: dict, trapper: Optional[SidewaysTrapper] = None,
+                 trap_min_distance: Optional[float] = None,
+                 m15_structure: Optional[int] = None) -> Optional[ReversalSignal]:
     """A single ReversalSignal if this TOUCHED, untraded level has a
     fresh, matching-direction CISD confirmation THIS cycle from either
     M3 or M5 (checked in that order -- an arbitrary but deterministic
@@ -134,12 +137,20 @@ def _check_level(store: LevelEligibilityStore, symbol: str, tf: int, level, sl_b
     usable initial SL exists (see sl_basis.initial_sl_basis()) -- None
     otherwise. Entry price for the "correct side" test is the live ask
     for a BUY, the live bid for a SELL -- what the market order would
-    actually fill at."""
+    actually fill at.
+
+    trapper (sideways_trapper.SidewaysTrapper, optional): if given, a
+    direction whose entry price would land too close to that direction's
+    last SL-hit price is skipped here too -- see that module's own
+    docstring for the full rule."""
     direction = 1 if level.role == "SUPPORT" else -1
     if store.is_traded(tf, level.source, direction) or not store.is_touched(
             tf, level.source, level.line_no, level.value, level.role):
         return None
     entry_price = ask if direction == 1 else bid
+    if (trapper is not None and trap_min_distance is not None
+            and trapper.blocks(direction, entry_price, trap_min_distance, m15_structure)):
+        return None
     for tf_minutes in _CISD_POOL:
         cisd = cisd_bridge.fresh_cisd(symbol, tf_minutes)
         if cisd is None or cisd_bridge.direction_of(cisd) != direction:
@@ -156,18 +167,22 @@ def _check_level(store: LevelEligibilityStore, symbol: str, tf: int, level, sl_b
 
 
 def find_signals(symbol: str, htf_states: dict[int, Optional[HTFState]], store: LevelEligibilityStore,
-                 sl_buffer: float, bid: float, ask: float) -> list[ReversalSignal]:
+                 sl_buffer: float, bid: float, ask: float, trapper: Optional[SidewaysTrapper] = None,
+                 trap_min_distance: Optional[float] = None,
+                 m15_structure: Optional[int] = None) -> list[ReversalSignal]:
     """Every armed (touched), untraded HTF level (ATR dual-trail or
     Supertrend, any of the 8 timeframes) with a fresh matching-direction
     CISD confirmation this cycle and a usable initial SL -- see module
-    docstring for the full design."""
+    docstring for the full design. trapper/trap_min_distance/m15_structure:
+    see _check_level's own docstring (the Sideways Trapper guard)."""
     signals: list[ReversalSignal] = []
     cache: dict = {}
     for tf, state in htf_states.items():
         if state is None:
             continue
         for level in state.levels:
-            sig = _check_level(store, symbol, tf, level, sl_buffer, bid, ask, cache)
+            sig = _check_level(store, symbol, tf, level, sl_buffer, bid, ask, cache,
+                               trapper, trap_min_distance, m15_structure)
             if sig is not None:
                 signals.append(sig)
     return signals

@@ -91,7 +91,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import broker, config, decision_log, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sl_manager, trade_journal, trade_manager
+from v6_sentinel import broker, config, decision_log, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sideways_trapper, sl_manager, trade_journal, trade_manager
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.bridge_flip import m3_far_line
 from v6_sentinel.alerts import send_alert as _send_alert
@@ -295,21 +295,14 @@ def _process_signal(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, 
     same = [p for p in positions if p.type == want_type]
     opposite = [p for p in positions if p.type != want_type]
 
-    # TIMEFRAME HIERARCHY (user, 2026-09-21: "m3/m1 doesnt have access to close the htf trade"): an
-    # opposite signal squares off this component's own opposite position ONLY if the signal's timeframe
-    # is the same or HIGHER than that position's. A smaller-timeframe signal leaves the higher-timeframe
-    # trade alone and still opens its own trade, so both are open at once -- which is why a component can
-    # now hold one position per direction and every open position is managed (see run_once).
+    # TIMEFRAME HIERARCHY REVERTED (user, 2026-09-22, after seeing RM-STR hold an M15 BUY and an M10
+    # SELL open at once for ~39 minutes on real data -- confirmed live 2026-09-21: "m3/m1 doesnt have
+    # access to close the htf trade"): back to the original rule -- ANY qualifying opposite-direction
+    # signal squares off this component's own opposite position, regardless of relative timeframe.
     for position in opposite:
         position_tf = journal.timeframe_minutes(position.ticket) if journal is not None else None
-        if signal_tf is not None and position_tf is not None and signal_tf < position_tf:
-            print(f"[V6S-{component}] {tag} (M{signal_tf}) does not close the higher-timeframe "
-                  f"{_DIR_LABEL[-direction]} #{position.ticket} (M{position_tf}) -- both stay open")
-            decision_log.log(cfg.decision_log_file, "squareoff_blocked_by_timeframe", component=component,
-                             ticket=position.ticket, position_tf=position_tf, signal_tf=signal_tf, tag=tag)
-            continue
         if not _close_position(cfg, component, position, "SQOFF", tag, "SQ", journal,
-                               {"rule": "opposite-direction reversal signal (same or higher timeframe) squared it off",
+                               {"rule": "opposite-direction reversal signal squared it off",
                                 "new_signal": tag, "new_direction": _DIR_LABEL[direction],
                                 "signal_tf": signal_tf, "position_tf": position_tf}):
             return      # could not close it -> do not open and do not consume this setup
@@ -353,6 +346,7 @@ class _SymbolRuntime:
     last_tick_msc: int = 0                             # time_msc of the newest tick already looked at (touch extremes)
     journal_str: Optional[trade_journal.TradeJournal] = None    # per-trade entry/exit logic, one per component
     journal_ict: Optional[trade_journal.TradeJournal] = None
+    trapper_str: Optional[sideways_trapper.SidewaysTrapper] = None   # RM-STR only, see sideways_trapper.py
 
 
 def _build_runtime(symbol: str) -> _SymbolRuntime:
@@ -371,6 +365,7 @@ def _build_runtime(symbol: str) -> _SymbolRuntime:
         tracker=BridgeBarFlipTracker(cfg.bridge_bar_flip_state_file),
         journal_str=trade_journal.TradeJournal(cfg.str_trade_journal_file, "RM-STR", cfg.symbol),
         journal_ict=trade_journal.TradeJournal(cfg.ict_trade_journal_file, "RM-ICT", cfg.symbol),
+        trapper_str=sideways_trapper.SidewaysTrapper(cfg.sideways_trapper_state_file),
     )
 
 
@@ -391,7 +386,13 @@ def run_once(rt: _SymbolRuntime) -> None:
         rt.last_tick_msc = int(tick.time_msc) if tick is not None else 0
     reversal_entry.scan_touches(htf_states, rt.store, bid, ask, bid_low, ask_high)
 
-    str_signals = reversal_entry.find_signals(cfg.symbol, htf_states, rt.store, cfg.sl_buffer, bid, ask)
+    # M15 structure (ATR-dual confirmed direction) -- read purely for the Sideways Trapper's own reset
+    # condition (sideways_trapper.py); RM-STR's own entry/touch logic never uses M15 for anything else.
+    m15_fs = rt.tracker.update(cfg.symbol, 15) if rt.tracker is not None else None
+    m15_structure = m15_fs.confirmed.value if m15_fs is not None else None
+
+    str_signals = reversal_entry.find_signals(cfg.symbol, htf_states, rt.store, cfg.sl_buffer, bid, ask,
+                                              rt.trapper_str, cfg.sideways_trap_min_distance_points, m15_structure)
     # RM-ICT (second component) -- OB-zone (NLB/NSB Block) touch +
     # post-touch CISD confirmation, fully independent of the M15/tracker
     # machinery STR uses. See reversal_ict.py's own docstring for the
@@ -425,7 +426,14 @@ def run_once(rt: _SymbolRuntime) -> None:
     # entirely independently -- see module docstring, this is not a
     # shared position slot.
     str_positions = broker.get_positions(cfg.symbol, cfg.magic_number)
-    rt.journal_str.reconcile({p.ticket for p in str_positions})
+    str_exits = rt.journal_str.reconcile({p.ticket for p in str_positions})
+    for exit_rec in str_exits:
+        if exit_rec.get("exit_reason") == "SL_HIT" and rt.trapper_str is not None:
+            exit_direction = 1 if exit_rec.get("direction") == "BUY" else -1
+            rt.trapper_str.record_sl_hit(exit_direction, exit_rec["entry_price"], m15_structure)
+            print(f"[V6S-STR] Sideways Trapper recorded {exit_rec['direction']} SL-hit @ "
+                  f"{exit_rec['entry_price']:.3f} -- next {exit_rec['direction']} needs to be "
+                  f"{cfg.sideways_trap_min_distance_points:.1f}+ points away")
     rt.sl_mgr_str.prune({p.ticket for p in str_positions})
     rt.tm_mgr_str.prune({p.ticket for p in str_positions})
     ict_positions = broker.get_positions(cfg.symbol, cfg.ict_magic_number)
@@ -467,8 +475,9 @@ def run_once(rt: _SymbolRuntime) -> None:
         print(msg)
         _send_alert(msg)
 
-    # EVERY open position of each component is managed (SL trailing + partials), not just the first: with
-    # the timeframe hierarchy a component can hold an HTF trade and an opposite LTF trade at once.
+    # EVERY open position of each component is managed (SL trailing + partials), not just the first --
+    # normally at most one per component now that any opposite signal squares off the other one again,
+    # but this still covers the transient case where a square-off's own close failed and both are open.
     for str_position in broker.get_positions(cfg.symbol, cfg.magic_number):
         _run_sl_manager(cfg, "STR", rt.sl_mgr_str, rt.tm_mgr_str, str_position, rt.journal_str)
         _run_trade_manager(cfg, "STR", rt.tm_mgr_str, str_position, rt.journal_str)
