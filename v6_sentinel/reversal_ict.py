@@ -29,7 +29,7 @@ ENTRY RULE:
   direction (bullish zone needs bullish CISD, bearish needs bearish),
   sourced from a timeframe pool that depends on the ZONE's OWN
   timeframe (_ZONE_CISD_POOLS below):
-    - H4/H2/H1/M30/M15 zones -> M3 or M5 CISD, whichever fires first.
+    - H4/H2/H1/M30/M15/M10 zones -> M3 or M5 CISD, whichever fires first.
     - M5 zones (own exception) -> M1, M3, or M5's own CISD, whichever
       fires first.
   Every pool is checked every cycle -- "whichever gives faster
@@ -41,6 +41,13 @@ ENTRY RULE:
   span H4 down to M5 only (see ob_levels.TIMEFRAMES); M3 stays fully in
   use as a CONFIRMATION timeframe (both pools above), only M3-FORMED OB
   zones are no longer candidates.
+
+  M1 REPLACED BY M10 (2026-09-22, same scraper grid change, see
+  ob_levels.py's own docstring) -- M10 is a brand-new zone timeframe
+  here, given the same (3, 5) confirmation pool as every other HTF zone
+  (H4/H2/H1/M30/M15); M1 was never a zone timeframe in this module to
+  begin with (it only ever showed up as a CONFIRMATION pool entry for M5
+  zones above), so nothing about the M5 exception pool changes.
 
   SEQUENCING -- the critical rule, user's own words: "if m3 is already
   in bullish, we dont do anything, we wait an event to occur post the
@@ -116,6 +123,7 @@ _ZONE_CISD_POOLS: dict[str, tuple[int, ...]] = {
     "60": (3, 5),    # H1
     "30": (3, 5),    # M30
     "15": (3, 5),    # M15
+    "10": (3, 5),    # M10 -- new 2026-09-22, replaces M1 in the scraper grid
     "5": (1, 3, 5),  # M5 -- own exception, also accepts M1/M3
     # no "3" entry -- M3 zones removed 2026-09-22, see module docstring
 }

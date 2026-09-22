@@ -125,9 +125,18 @@ from v6_sentinel import ob_levels
 # (same as every other <=H1 timeframe here). D1 dropped entirely from
 # this module's own scope (see ob_levels.py) -- its own remainder
 # distribution never showed a clear plurality, so it's no longer
-# relevant to keep an entry for.
-_TIMEFRAME_SECONDS = {"240": 14400, "120": 7200, "60": 3600, "30": 1800, "15": 900, "5": 300}
-_TIMEFRAME_OFFSET = {"240": 3600, "120": 3600, "60": 0, "30": 0, "15": 0, "5": 0}
+# relevant to keep an entry for. M3's own entry was later removed again
+# (2026-09-22, "remove m3 zones") -- no M3 zone can be seeded any more
+# (ob_levels.TIMEFRAMES no longer includes it) to ever need this.
+#
+# M10 ADDED 2026-09-22 (user: "m10 becomes eligible to store zone datas
+# and even act on reversal trades", replacing M1 in the scraper's own
+# 8-pane grid -- see ob_levels.py's own docstring). remainder=0 is an
+# ASSUMPTION (matching every other <=H1 timeframe's own derived value) --
+# M10 has never been a zone timeframe before, so there is no real sample
+# to derive it from yet; revisit once real M10 zones exist to check.
+_TIMEFRAME_SECONDS = {"240": 14400, "120": 7200, "60": 3600, "30": 1800, "15": 900, "10": 600, "5": 300}
+_TIMEFRAME_OFFSET = {"240": 3600, "120": 3600, "60": 0, "30": 0, "15": 0, "10": 0, "5": 0}
 # A start_time exactly ONE SECOND past the expected offset is a known,
 # benign, unexplained-but-consistent variant seen throughout V5S's own
 # real zones (paired entries like ...1786082400/...1786082401) -- NOT
@@ -148,8 +157,10 @@ def _is_aligned_to_timeframe(start_time: int, timeframe: str) -> bool:
     the Block sails straight through it. This check rejects a false zone
     on its own FIRST and only seeding attempt, no duplicate required.
 
-    NOT applied to "1D" or M1/M3 (M1/M3 aren't in ob_levels.TIMEFRAMES
-    at all, never seeded here) -- D1's own remainder distribution showed
+    NOT applied to "1D" or M1/M3 (none of "1D"/"1"/"3" are in
+    ob_levels.TIMEFRAMES, never seeded here -- M10 replaced M1 in the
+    scraper's own grid 2026-09-22 but that's a scraper-pane change only,
+    it doesn't add "1" as a zone timeframe) -- D1's own remainder distribution showed
     NO single clear plurality in V5S's own data (several comparably-
     sized clusters, spread over many months), unlike every other
     timeframe, which each had one dominant value. Not enough confidence

@@ -16,14 +16,32 @@ them and real zone data exists to confirm their own grid-alignment
 offsets (see nlb_nsb_block.py's _TIMEFRAME_OFFSET).
 
 M3 REMOVED 2026-09-22 (user: "remove m3 zones for reversals, lets keep
-it from all HTF to M5") -- scope is now H4, H2, H1, M30, M15, M5. M1
-keeps getting scraped/stored (the chart still shows it, and dropping
-the pane would break the grid) but is deliberately EXCLUDED from this
-module's own TIMEFRAMES -- "we dont trade M1 zones for reversals" --
-so M1 boxes never even enter the NLB/NSB Block; M1's own CISD DATA (a
-completely separate bridge) is still used as a confirmation source for
-M5 zones, that's unrelated to whether M1 OB zones themselves get
-seeded.
+it from all HTF to M5") -- scope was H4, H2, H1, M30, M15, M5.
+
+M1 REPLACED BY M10 2026-09-22 (user: "we have a major change in Scraper,
+timeframes updated to H4, H2, H1, M30 top / M15, M10, M5, M3 bottom, no
+more m1, we have nothing to do with m1 scraper data... now m10 becomes
+eligible to store zone datas and even act on reversal trades"). The
+scraper's own 8-pane grid no longer has an M1 chart at all -- that pane
+now shows M10 instead (a TradingView-side layout change, no scraper CODE
+change needed: scraper.py already reads each pane's timeframe live off
+its own Data Window text, never a hardcoded per-pane assignment). M1 was
+already excluded from this module's own TIMEFRAMES before this change
+(so nothing here changes for M1 -- it simply stops being scraped at
+all, which V6S was already indifferent to). M10 is NEW: it now gets
+seeded/tracked/traded as a full reversal-zone candidate, same as every
+other HTF here (see nlb_nsb_block.py's _TIMEFRAME_SECONDS/_OFFSET and
+reversal_ict.py's _ZONE_CISD_POOLS for its own entries -- M10's own
+grid-alignment offset is an ASSUMPTION (0, matching every other
+<=H1 timeframe) until real M10 zone data can confirm it, same caveat
+this module's own offset-derivation process always carries for a newly
+added timeframe).
+
+Current scope: H4, H2, H1, M30, M15, M10, M5. M3 stays excluded from
+zones (unchanged from the removal above) but M3's own CISD DATA is
+still very much a live confirmation source for other zones' pools --
+unrelated to whether M3 OB zones themselves get seeded, same distinction
+M1 always had.
 
 Role naming: a bearish OB is a "no long buffer" -- a level price should
 not be bought through/above (supply/resistance); a bullish OB is a
@@ -49,10 +67,10 @@ from typing import Optional
 
 # Scraper's own raw timeframe keys (as read off each pane's Data Window
 # header), highest to lowest.
-TIMEFRAMES = ("240", "120", "60", "30", "15", "5")
+TIMEFRAMES = ("240", "120", "60", "30", "15", "10", "5")
 
 TIMEFRAME_NAMES = {
-    "240": "H4", "120": "H2", "60": "H1", "30": "M30", "15": "M15", "5": "M5",
+    "240": "H4", "120": "H2", "60": "H1", "30": "M30", "15": "M15", "10": "M10", "5": "M5",
 }
 
 _ROLE_BULL = "no_short_buffer"   # bullish OB -- demand/support, don't sell through it
