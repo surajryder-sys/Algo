@@ -222,13 +222,16 @@ class ICTEligibilityStore:
 
 def _check_zone(zone: BlockZone, symbol: str, m5_structure: Optional[int] = None,
                 m15_structure: Optional[int] = None):
-    """(direction, trigger_tag, cisd) if this TOUCHED, otherwise-eligible
-    zone has a fresh, matching-direction CISD confirmation THIS cycle
-    from its own timeframe's pool -- None if not (wrong/no fresh CISD
-    yet, or an unrecognized zone timeframe, e.g. M1, which
-    _ZONE_CISD_POOLS deliberately has no entry for -- see module
+    """(direction, trigger_tag, cisd, direct_fire) if this TOUCHED,
+    otherwise-eligible zone has a fresh, matching-direction CISD
+    confirmation THIS cycle from its own timeframe's pool -- None if not
+    (wrong/no fresh CISD yet, or an unrecognized zone timeframe, e.g. M1,
+    which _ZONE_CISD_POOLS deliberately has no entry for -- see module
     docstring). The confirming CISD object is returned too, since the
     SL-distance override may need its swing as the last-resort basis.
+    direct_fire (see M1 DIRECT FIRE below) tells the caller to skip the
+    SL-distance override entirely and use the plain zone edge, always
+    False for every other path.
 
     M1 GATE (2026-09-22, user's own words: "to get into a trade based on
     m1 cisd, lets say sell trade, m5 or m15 should be bearish or weak"):
@@ -240,7 +243,27 @@ def _check_zone(zone: BlockZone, symbol: str, m5_structure: Optional[int] = None
     already use). If neither agrees, M1 is skipped for this touch (NOT a
     hard fail -- the pool keeps checking M3/M5 normally, exactly as
     before this change). M3/M5 confirmations are never gated by this --
-    only M1's own, stricter case."""
+    only M1's own, stricter case.
+
+    M1 DIRECT FIRE (2026-09-22, M5 zones only, user's own words: "sometime
+    the cisd is already bullish to fire on m1 cisd on bullish ob...
+    similarly the cisd on m1 is already bearish to fire on m1 cisd on
+    bearish ob, in such cases we can use direct fire on zone edge"): the
+    fresh-CISD loop above only ever fires on a NEW confirmation event
+    AFTER the touch (fresh_cisd()'s own one-shot contract) -- a CISD that
+    was ALREADY sitting in the matching direction at touch time (or ever
+    since) never re-confirms and so could never fire M1 for this zone at
+    all under that rule alone, potentially missing a genuinely good entry
+    indefinitely. This is a SEPARATE, ADDITIONAL path, checked only when
+    the fresh-CISD loop found nothing: if M1's STANDING CISD
+    (cisd_bridge.read_cisd() -- the current, not-necessarily-fresh state)
+    already matches this zone's own direction, AND the same M5/M15
+    structure agreement the fresh-M1 gate requires also holds, fire
+    immediately using the zone's own edge as SL, skipping the normal
+    SL-distance override search entirely (tagged "M1CD-DIRECT" to stay
+    distinguishable from a genuine fresh-event "M1CD" fire in logs/
+    journal). M5 zones only -- M1 is never offered to any other zone
+    timeframe's pool to begin with."""
     direction = 1 if zone.role == "no_short_buffer" else -1  # bullish OB -> BUY, bearish OB -> SELL
     pool = _ZONE_CISD_POOLS.get(zone.timeframe)
     if pool is None:
@@ -251,7 +274,14 @@ def _check_zone(zone: BlockZone, symbol: str, m5_structure: Optional[int] = None
             continue
         if tf_minutes == 1 and m5_structure != direction and m15_structure != direction:
             continue   # M1 needs M5 or M15 structure agreement -- keep checking the rest of the pool
-        return direction, _CISD_TAG[tf_minutes], cisd
+        return direction, _CISD_TAG[tf_minutes], cisd, False
+
+    if zone.timeframe == "5":
+        standing = cisd_bridge.read_cisd(symbol, 1)
+        if (standing is not None and cisd_bridge.direction_of(standing) == direction
+                and (m5_structure == direction or m15_structure == direction)):
+            return direction, "M1CD-DIRECT", standing, True
+
     return None
 
 
@@ -297,14 +327,16 @@ def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibi
         result = _check_zone(zone, symbol, m5_structure, m15_structure)
         if result is None:
             continue
-        direction, trigger, cisd = result
+        direction, trigger, cisd, direct_fire = result
 
         sl = zone.btm - sl_buffer if direction == 1 else zone.top + sl_buffer
         sl_source = "ZONE"
         entry_price = ask if direction == 1 else bid
-        if abs(entry_price - sl) > sl_override_points:
+        if not direct_fire and abs(entry_price - sl) > sl_override_points:
             # Only a strictly TIGHTER SL replaces it (must_beat_sl) -- None means
-            # nothing would reduce risk, so the zone-edge SL stays as-is.
+            # nothing would reduce risk, so the zone-edge SL stays as-is. Skipped
+            # entirely for a direct-fire signal (M1CD-DIRECT) -- always the plain
+            # zone edge, see _check_zone()'s own M1 DIRECT FIRE docstring.
             resolved = sl_basis.initial_sl_basis(symbol, direction, entry_price, cisd, cache,
                                                  sl_buffer=sl_buffer, must_beat_sl=sl)
             if resolved is not None:
