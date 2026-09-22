@@ -1,13 +1,28 @@
-"""TM-STR entry engine. Confirmed with the user 2026-09-20:
+"""TM-STR entry engine.
 
-  ENTRY: "buy on bullish m5 cisd - if m15 favours; sell on bearish m5
-  cisd - if m15 favours." Execution timeframe = M5 (M3 to be added
-  later). ONLY a fresh M5 CISD triggers an entry -- an M5 ATR flip is NOT
-  a trigger (asked and answered explicitly). Uses cisd_bridge.fresh_cisd()
-  (the "privileged, momentary, only non-None the EXACT bar it confirmed"
-  contract), so a CISD that is merely still standing from earlier never
-  fires, and the M15 bias (trend_bias.py) must currently agree with the
-  CISD's direction.
+  ENTRY -- M5 (primary): ONLY a fresh M5 CISD triggers an entry -- an M5 ATR
+  flip is NOT a trigger (asked and answered explicitly). Uses
+  cisd_bridge.fresh_cisd() (the "privileged, momentary, only non-None the
+  EXACT bar it confirmed" contract), so a CISD that is merely still standing
+  from earlier never fires, and its direction must be in the M15 gate's
+  currently allowed set (trend_bias.compute_gate() -- structure and CISD
+  agree -> only that one direction; they disagree -> both directions
+  allowed). M5's OWN ATR state is NOT consulted at all for this.
+
+  ENTRY -- M3 (added 2026-09-22, its own STRICTER rule, user's own words:
+  "if m5 bullish, m15 bullish, m3 can fire trade on cisd event" / mirrored
+  for bearish): a fresh M3 CISD only fires when BOTH of these hold, not just
+  "in gate.allowed" --
+    1. the M15 gate is in STRICT agreement with the CISD's direction (the
+       AGREE case specifically -- structure AND CISD both point that way;
+       the DISAGREE/both-allowed case does NOT qualify M3, confirmed with
+       the user explicitly, even though it's permissive enough for M5), and
+    2. M5's OWN confirmed ATR state (1 strong/up, -1 weak/down, from the
+       same persisted tracker TM already reads for its M5 flip-exit/
+       square-off) also matches that direction.
+  So M3 needs M5-state + M15-structure + M15-CISD + M3-CISD all pointing the
+  same way -- a much higher-conviction, all-timeframes-aligned bar than M5's
+  own entry, which only ever checks the M15 gate.
 
   ELIGIBILITY: "one trade per m5 flip or cisd change" -> each M5 CISD is
   its own event and gets at most one trade. TrendEligibilityStore
@@ -42,13 +57,20 @@ from typing import Optional
 
 from v6_sentinel import cisd_bridge, sl_basis
 from v6_sentinel.flip_state import EventType, FlipEvent, FlipStateResult
-from v6_sentinel.trend_bias import Bias
+from v6_sentinel.trend_bias import M15Gate
 
 # Which timeframes' lines may supply the initial SL, in order, per
-# execution timeframe. M3 gets its own entry here when it is added.
+# execution timeframe -- trigger's own timeframe first, then the next
+# higher one(s), same farthest-usable-line search sl_basis.py always uses.
 _SL_LINE_TIMEFRAMES: dict[int, tuple[int, ...]] = {
     5: (5, 15),
+    3: (3, 5, 15),   # M3 added 2026-09-22 -- assumption: extends M5's own (5, 15) chain by one step
 }
+
+# M3's own extra gate (2026-09-22): the M15 gate must be in STRICT agreement
+# with the CISD's direction (not merely "allowed"), same convention as
+# elsewhere in this file for "which timeframes need a tighter rule."
+_STRICT_GATE_TIMEFRAMES = frozenset({3})
 
 
 @dataclass(frozen=True)
@@ -59,8 +81,8 @@ class TrendSignal:
     event_time: int                  # that CISD's confirmation bar_time -- the eligibility key
     sl: float
     sl_source: str                    # "M5/ATR2", "M15/ST", "SWING", ...
-    bias_source: str                   # "ATR" | "CISD" -- what set the M15 bias
-    bias_event_time: int
+    m15_structure: int                 # 1 strong/up, -1 weak/down -- the gate's own inputs, for logging
+    m15_cisd: int                       # 1 bullish, -1 bearish
 
 
 class TrendEligibilityStore:
@@ -149,22 +171,37 @@ def find_squareoff(symbol: str, position_direction: int, timeframe: int,
     return cisd
 
 
-def find_signal(symbol: str, bias: Bias, execution_timeframes: tuple[int, ...],
+def find_signal(symbol: str, gate: M15Gate, execution_timeframes: tuple[int, ...],
                 eligibility: TrendEligibilityStore, sl_buffer: float,
-                bid: float, ask: float) -> Optional[TrendSignal]:
-    """The first execution timeframe with a fresh, untraded CISD matching
-    the M15 bias AND a usable initial SL -- None otherwise."""
+                bid: float, ask: float, m5_state: Optional[int] = None) -> Optional[TrendSignal]:
+    """The first execution timeframe with a fresh, untraded CISD whose
+    direction is in the M15 gate's allowed set, AND a usable initial SL --
+    None otherwise. `direction` is simply the CISD's own direction (a BUY on
+    a bullish M5 CISD, a SELL on a bearish one) -- the gate only ever
+    permits or blocks it, never dictates it.
+
+    m5_state (1 strong/up, -1 weak/down, None unknown -- the same persisted
+    M5 ATR-dual confirmed state TM already tracks for its flip-exit/
+    square-off) is only consulted for timeframes in _STRICT_GATE_TIMEFRAMES
+    (M3): there, the M15 gate must be in STRICT agreement with the CISD's
+    direction (not merely "allowed" -- see module docstring) AND m5_state
+    must also match it, or that timeframe is skipped this cycle."""
     cache: dict = {}
     for tf in execution_timeframes:
         sl_timeframes = _SL_LINE_TIMEFRAMES.get(tf)
         if sl_timeframes is None:
             continue
         cisd = cisd_bridge.fresh_cisd(symbol, tf)
-        if cisd is None or cisd_bridge.direction_of(cisd) != bias.direction:
+        if cisd is None:
             continue
+        direction = cisd_bridge.direction_of(cisd)
+        if direction not in gate.allowed:
+            continue
+        if tf in _STRICT_GATE_TIMEFRAMES:
+            if gate.allowed != frozenset({direction}) or m5_state != direction:
+                continue
         if eligibility.is_traded(tf, cisd.last_cisd_time):
             continue
-        direction = bias.direction
         entry_price = ask if direction == 1 else bid
         resolved = sl_basis.initial_sl_basis(symbol, direction, entry_price, cisd, cache,
                                              timeframes=sl_timeframes)
@@ -174,5 +211,5 @@ def find_signal(symbol: str, bias: Bias, execution_timeframes: tuple[int, ...],
         sl = basis - sl_buffer if direction == 1 else basis + sl_buffer
         return TrendSignal(direction=direction, timeframe_minutes=tf, trigger=f"M{tf}CD",
                            event_time=cisd.last_cisd_time, sl=sl, sl_source=sl_source,
-                           bias_source=bias.source, bias_event_time=bias.event_time)
+                           m15_structure=gate.structure, m15_cisd=gate.cisd)
     return None

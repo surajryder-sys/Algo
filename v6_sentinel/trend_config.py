@@ -10,11 +10,11 @@ and from V5-Sentinel's (TM-STR there was 26090201). V5S is still running
 live on the same MT5 account, so V6S must never share a magic number
 with it (see reversal_config.py's own docstring for why).
 
-TIMEFRAMES (confirmed with the user 2026-09-20): M15 is the primary
-structure and bias, M5 is the execution timeframe, M3 is a SECOND
-execution timeframe to be added later -- execution_timeframes is a tuple
-so that is a config change ((5,) -> (5, 3)) plus an SL-timeframe entry in
-trend_entry.py, not a rewrite.
+TIMEFRAMES: M15 is the primary structure/gate, M5 the primary execution
+timeframe. M3 ADDED 2026-09-22 as a second execution timeframe with its
+own, STRICTER rule than M5's (see trend_entry.find_signal's own
+docstring) -- M5's confirmed ATR state and the M15 gate must both be in
+strict agreement with the direction before an M3 CISD may fire.
 
 Safety: enable_trading must be explicitly set true (per-symbol env var)
 for any order to actually be sent/modified/closed. Left unset (default
@@ -57,7 +57,7 @@ class TMSymbolConfig:
 
     magic_number: int
     bias_timeframe: int                    # M15
-    execution_timeframes: tuple[int, ...]   # (5,) now; (5, 3) once M3 is added
+    execution_timeframes: tuple[int, ...]   # (5, 3) -- checked in this order each cycle
     trailing_timeframe: int                 # whose far ATR line the post-breakeven SL follows
     squareoff_timeframe: int                 # whose CISD + ATR strong/weak state can square off an open trade
 
@@ -87,7 +87,7 @@ _SYMBOL_DEFAULTS: dict[str, dict] = {
         partial2_fraction=0.15,
         magic_number=26091803,
         bias_timeframe=15,
-        execution_timeframes=(5,),
+        execution_timeframes=(5, 3),   # M3 added 2026-09-22, its own stricter rule -- see trend_entry.py
         trailing_timeframe=5,
         squareoff_timeframe=5,
     ),

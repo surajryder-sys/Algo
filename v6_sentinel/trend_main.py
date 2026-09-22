@@ -6,17 +6,26 @@ multi-instrument shape as reversal_main.py.
 
 Run with: python -m v6_sentinel.trend_main
 
-THE RULES (all confirmed with the user):
+THE RULES:
 
-  BIAS -- M15 primary structure (trend_bias.py): the M15 ATR-dual flip
-  (strong = up, weak = down, a trap keeps the previous direction) and the
-  M15 CISD (bullish = up, bearish = down); whichever event is most recent
-  decides. ATR comes from the live MQL5 bridge via the persisted flip
-  tracker.
+  M15 GATE -- REDESIGNED 2026-09-22 (user: "m15 parenting change, now its
+  not recency, its structure and cisd" -- see trend_bias.py's own docstring
+  for the full 4-case table). M15 structure (ATR-dual confirmed direction)
+  and the M15 standing CISD are read TOGETHER, never one overriding the
+  other by recency: if they AGREE, only an M5 CISD in that same direction
+  may fire; if they DISAGREE, both directions are allowed and M5 decides
+  freely. No gate at all (no entries either way) if either signal is
+  unavailable.
 
-  ENTRY -- M5 execution (trend_entry.py): a FRESH M5 CISD in the same
-  direction as the M15 bias. Nothing else triggers an entry. One trade per
-  M5 CISD event. M3 is a second execution timeframe to be added later.
+  ENTRY -- M5 execution (trend_entry.py): a FRESH M5 CISD whose direction is
+  in the M15 gate's currently allowed set. Nothing else triggers an entry.
+  One trade per M5 CISD event.
+
+  ENTRY -- M3 execution (added 2026-09-22, trend_entry.py): a STRICTER
+  second entry path -- a fresh M3 CISD only fires when the M15 gate is in
+  STRICT agreement with it (not merely "allowed") AND M5's own confirmed
+  ATR state also agrees. One trade per M3 CISD event, tracked separately
+  from M5's own eligibility.
 
   INITIAL SL -- farthest usable M5 line (ATR dual / Supertrend), else the
   same on M15, else the CISD's swing, else no trade; plus buffer.
@@ -27,11 +36,14 @@ THE RULES (all confirmed with the user):
   buffer. The SL only tightens and a manual SL edit pauses trailing
   (sl_manager.py / trade_manager.py, reused unchanged).
 
-  LIFECYCLE -- when the M15 bias flips AGAINST an open trade, the trade
-  is CLOSED IMMEDIATELY (confirmed; chosen over V5S's "only when an
-  opposite entry fires"). A new trade in the new direction then needs the
-  next matching M5 CISD. A same-direction signal while a trade is open is
-  ignored (its event is marked handled so it can't fire later).
+  LIFECYCLE -- a same-direction signal while a trade is open is ignored
+  (its event is marked handled so it can't fire later). NO M15-bias-flip
+  close any more (removed 2026-09-22, user: "we have added m5 cisd exit so
+  we can remove m15 bias exit logic" -- there is no longer a single M15
+  "bias direction" to compare an open trade against, since the gate can
+  allow both directions at once). TM-STR itself now closes a trade only via
+  the M5 flip exit or the square-off below; the SL; or the separate Exit
+  Manager process (exit_manager.py), which is not part of this file.
 
   M5 FLIP EXIT (user, 2026-09-20: "the M5 flip itself closes the SELL
   straight away") -- when the M5 ATR-dual state genuinely FLIPS against an
@@ -42,37 +54,35 @@ THE RULES (all confirmed with the user):
   snap-back is not a flip. Everything is on CLOSED candles -- live price never
   matters ("candle close always").
 
-  SQUARE-OFF (user, 2026-09-20) -- the third and last way a trade closes:
-  a fresh M5 CISD in the OPPOSITE direction that qualifies on its own, i.e.
-  the M5 ATR-dual CONFIRMED state (as of the last closed candle -- even while
+  SQUARE-OFF (user, 2026-09-20) -- the other way a trade closes: a fresh M5
+  CISD in the OPPOSITE direction that qualifies on its own, i.e. the M5
+  ATR-dual CONFIRMED state (as of the last closed candle -- even while
   price sits between the lines) already agrees with it
   (trend_entry.find_squareoff).
-  E.g. SELL entered on M15 bearish + M5 bearish CISD while M5 price is above
-  both ATR lines (strong); a bullish M5 CISD now arrives with M5 still
-  strong -> it qualifies a buy by itself -> the SELL is squared off (no buy
-  follows unless the M15 bias also allows one). Mirror for a BUY. An opposite
-  CISD that the M5 state does NOT agree with closes nothing -- the trade
-  waits for the structure to shift. The M5 state is NOT an entry gate.
+  E.g. SELL entered on M5 bearish CISD while M5 price is above both ATR
+  lines (strong); a bullish M5 CISD now arrives with M5 still strong -> it
+  qualifies a buy by itself -> the SELL is squared off (no buy follows
+  unless the M15 gate also allows one). Mirror for a BUY. An opposite CISD
+  that the M5 state does NOT agree with closes nothing -- the trade waits
+  for the structure to shift. The M5 state is NOT an entry gate.
 
-  BIAS FEED WATCH -- the M15 ATR bias comes from a file the MQL5 indicator
-  rewrites every couple of seconds. If that indicator/chart stops, the
-  tracker just keeps the last state and the bias would silently FREEZE.
-  BiasFeedWatch below notices that: when the file has been stale for
-  STALE_FEED_SECONDS while prices are still ticking, it sends ONE alert
-  and PAUSES NEW ENTRIES until the feed is fresh again (open trades are
-  still managed, and a bias-flip close still works). It only counts as a
-  fault while ticks are actually arriving -- a closed market makes the file
-  stale too, and that must not alarm or block anything. The M5 ATR feed
-  (which the flip exit and the square-off read) gets its own watch: when it
-  is stale both are PAUSED (a frozen "strong/weak" must not close a trade)
-  and one alert is sent; entries are unaffected.
+  BIAS FEED WATCH -- the M15 gate needs BOTH the ATR bridge and the CISD
+  bridge; either one going stale means no gate. BiasFeedWatch below watches
+  both together: when either file has been stale for STALE_FEED_SECONDS
+  while prices are still ticking, it sends ONE alert and PAUSES NEW ENTRIES
+  until both are fresh again (open trades are still managed). It only
+  counts as a fault while ticks are actually arriving -- a closed market
+  makes the files stale too, and that must not alarm or block anything.
+  The M5 ATR feed (which the flip exit and the square-off read) gets its
+  own separate watch: when it is stale both are PAUSED (a frozen
+  "strong/weak" must not close a trade) and one alert is sent; entries are
+  unaffected.
 
   ICT GUARD -- not applied (assumed to match RM's "no guard as of now";
   not separately confirmed for TM).
 
 Comments: "V6S-TM-STR-{trigger}" on entry (e.g. "V6S-TM-STR-M5CD"),
-"-P1"/"-P2"/"-BF"/"-MF"/"-SQ" appended for partials / bias-flip close / M5-flip
-close / square-off.
+"-P1"/"-P2"/"-MF"/"-SQ" appended for partials / M5-flip close / square-off.
 
 TRADE JOURNAL -- every real trade is written to trade_journal.py's per-trade
 journal: the full entry logic when it opens, every partial and SL move, and
@@ -91,7 +101,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import alerts, bridge, bridge_flip, broker, config, decision_log, heartbeat, rates, sl_manager, trade_journal, trade_manager, trend_bias, trend_entry
+from v6_sentinel import alerts, bridge, bridge_flip, broker, cisd_bridge, config, decision_log, heartbeat, rates, sl_manager, trade_journal, trade_manager, trend_bias, trend_entry
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.flip_state import far_near_line
 from v6_sentinel.trend_config import TMSymbolConfig, load_symbol_config
@@ -330,21 +340,23 @@ def _current_position(cfg: TMSymbolConfig):
 def run_once(rt: _SymbolRuntime) -> None:
     cfg = rt.cfg
     bid, ask = broker.get_tick_price(cfg.symbol)
-    bias = trend_bias.compute_bias(rt.tracker, cfg.symbol, cfg.bias_timeframe)
+    gate = trend_bias.compute_gate(rt.tracker, cfg.symbol, cfg.bias_timeframe)
 
     tick = mt5.symbol_info_tick(cfg.symbol)
-    feed_ok = bridge.read_lines(cfg.symbol, cfg.bias_timeframe) is not None
+    # The gate needs BOTH the ATR bridge and the standing CISD -- either one stale means no gate.
+    feed_ok = (bridge.read_lines(cfg.symbol, cfg.bias_timeframe) is not None
+              and cisd_bridge.read_cisd(cfg.symbol, cfg.bias_timeframe) is not None)
     entries_blocked, feed_event = rt.feed_watch.update(time.time(), tick.time if tick is not None else None, feed_ok)
     if feed_event == "stale":
-        msg = (f"[V6S-TM] {cfg.symbol} M{cfg.bias_timeframe} ATR bridge has been stale for over "
-               f"{STALE_FEED_SECONDS:.0f}s while prices are still ticking -- the bias may be frozen. New "
+        msg = (f"[V6S-TM] {cfg.symbol} M{cfg.bias_timeframe} ATR/CISD bridge has been stale for over "
+               f"{STALE_FEED_SECONDS:.0f}s while prices are still ticking -- the M15 gate may be frozen. New "
                f"entries are PAUSED until it recovers; open trades are still managed. Check the "
                f"M{cfg.bias_timeframe} chart/indicator.")
         print(msg)
         decision_log.log(cfg.decision_log_file, "bias_feed_stale", bias_timeframe=cfg.bias_timeframe)
         alerts.send_alert(msg)
     elif feed_event == "recovered":
-        msg = f"[V6S-TM] {cfg.symbol} M{cfg.bias_timeframe} ATR bridge is fresh again -- new entries resumed."
+        msg = f"[V6S-TM] {cfg.symbol} M{cfg.bias_timeframe} ATR/CISD bridge is fresh again -- new entries resumed."
         print(msg)
         decision_log.log(cfg.decision_log_file, "bias_feed_recovered", bias_timeframe=cfg.bias_timeframe)
         alerts.send_alert(msg)
@@ -377,22 +389,7 @@ def run_once(rt: _SymbolRuntime) -> None:
     rt.tm_mgr.prune(open_tickets)
     position = _current_position(cfg)
 
-    # 1. Bias flipped AGAINST an open trade -> close it now (confirmed).
-    if position is not None and bias is not None:
-        pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
-        if bias.direction != pos_direction:
-            tag = _extract_tag(rt.tm_mgr.get_entry_comment(position.ticket) or position.comment or "")
-            print(f"[V6S-TM] {cfg.symbol} M{cfg.bias_timeframe} bias is now {_DIR_LABEL[bias.direction]} "
-                  f"({bias.source}) against the open {_DIR_LABEL[pos_direction]} #{position.ticket}")
-            decision_log.log(cfg.decision_log_file, "bias_flip", ticket=position.ticket,
-                             position=_DIR_LABEL[pos_direction], bias=_DIR_LABEL[bias.direction],
-                             bias_source=bias.source, bias_event_time=bias.event_time)
-            _close_position(cfg, position, "BIASFLIP", tag, "BF", rt.journal,
-                            {"rule": "M15 bias flipped against the trade", "bias": _DIR_LABEL[bias.direction],
-                             "bias_source": bias.source, "bias_event_time": bias.event_time})
-            position = _current_position(cfg)
-
-    # 1b. The M5 state genuinely flipped against the trade after it opened -> close it at once.
+    # 1. The M5 state genuinely flipped against the trade after it opened -> close it at once.
     if position is not None and not m5_exits_paused:
         pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
         flip = trend_entry.find_flip_exit(pos_direction, position.time, cfg.squareoff_timeframe, state_fs)
@@ -408,7 +405,7 @@ def run_once(rt: _SymbolRuntime) -> None:
                              "flip_bar_time": flip.bar_time})
             position = _current_position(cfg)
 
-    # 1c. Square-off: a fresh opposite M5 CISD that the M5 strong/weak state agrees with (see docstring).
+    # 2. Square-off: a fresh opposite M5 CISD that the M5 strong/weak state agrees with (see docstring).
     if position is not None and not m5_exits_paused:
         pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
         cisd = trend_entry.find_squareoff(cfg.symbol, pos_direction, cfg.squareoff_timeframe, m5_state)
@@ -426,18 +423,20 @@ def run_once(rt: _SymbolRuntime) -> None:
                              "m5_state": "strong" if m5_state == 1 else "weak"})
             position = _current_position(cfg)
 
-    # 2. Entry: fresh M5 CISD matching the M15 bias (paused while the bias feed is stale).
-    if bias is not None and not entries_blocked:
-        sig = trend_entry.find_signal(cfg.symbol, bias, cfg.execution_timeframes, rt.eligibility,
-                                      cfg.sl_buffer, bid, ask)
+    # 3. Entry: fresh M5/M3 CISD whose direction the M15 gate allows (M3 has its own stricter
+    #    rule, see trend_entry.py); paused while the bias feed is stale.
+    if gate is not None and not entries_blocked:
+        sig = trend_entry.find_signal(cfg.symbol, gate, cfg.execution_timeframes, rt.eligibility,
+                                      cfg.sl_buffer, bid, ask, m5_state)
         if sig is not None:
-            ref = f"cisd@{sig.event_time} bias={bias.source}@{bias.event_time} sl={sig.sl_source}"
+            ref = (f"cisd@{sig.event_time} m15_structure={'strong' if gate.structure == 1 else 'weak'} "
+                  f"m15_cisd={'bullish' if gate.cisd == 1 else 'bearish'} sl={sig.sl_source}")
             decision_log.log(cfg.decision_log_file, "signal_found", direction=_DIR_LABEL[sig.direction],
                              tf_minutes=sig.timeframe_minutes, trigger=sig.trigger, event_time=sig.event_time,
-                             sl=sig.sl, sl_source=sig.sl_source, bias_source=sig.bias_source,
-                             bias_event_time=sig.bias_event_time)
+                             sl=sig.sl, sl_source=sig.sl_source, m15_structure=sig.m15_structure,
+                             m15_cisd=sig.m15_cisd)
             if position is None:
-                logic = {**dataclasses.asdict(sig), "rule": "M15 bias + fresh M5 CISD",
+                logic = {**dataclasses.asdict(sig), "rule": "M15 structure+CISD gate + fresh M5 CISD",
                          "direction": _DIR_LABEL[sig.direction], "bid": bid, "ask": ask,
                          "m5_state": {1: "strong", -1: "weak"}.get(m5_state)}
                 if _open_position(cfg, sig.direction, sig.sl, sig.trigger, ref, rt.journal, logic):
@@ -456,7 +455,7 @@ def run_once(rt: _SymbolRuntime) -> None:
                     print(f"[V6S-TM] {sig.trigger} qualifies ({_DIR_LABEL[sig.direction]}) but an opposite "
                           f"position #{position.ticket} is still open -- not entering this cycle")
 
-    # 3. Manage whatever is open (independent of whether a bias exists right now).
+    # 4. Manage whatever is open (independent of whether a gate exists right now).
     position = _current_position(cfg)
     if position is not None:
         _run_sl_manager(cfg, rt.sl_mgr, rt.tm_mgr, position, rt.journal)
