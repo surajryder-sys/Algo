@@ -130,7 +130,8 @@ def find_signal(symbol: str, tracker, block: BlockStore, eligibility: ScalperEli
         if hs is None:
             continue
         for pattern_name, role, direction in _PATTERNS:
-            if not getattr(hs, pattern_name):
+            pattern_present = candle_touch.is_hammer(hs) if pattern_name == "hammer" else candle_touch.is_star(hs)
+            if not pattern_present:
                 continue
             if eligibility.is_traded(tf, pattern_name, hs.bar_time):
                 continue

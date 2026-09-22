@@ -212,9 +212,9 @@ def run_once(cfg: "ExitManagerSymbolConfig", rt: CandleExitRuntime) -> None:
         hs = read_hammer_star(cfg.symbol, tf)
         if hs is None:
             continue
-        if hs.hammer:
+        if candle_touch.is_hammer(hs):
             _check_htf_lines(cfg, htf_states, tf, hs, _HAMMER_ROLE, _HAMMER_DIRECTION, "hammer")
             _check_zones(cfg, block, tf, hs, _HAMMER_DIRECTION, "hammer")
-        if hs.star:
+        if candle_touch.is_star(hs):
             _check_htf_lines(cfg, htf_states, tf, hs, _STAR_ROLE, _STAR_DIRECTION, "star")
             _check_zones(cfg, block, tf, hs, _STAR_DIRECTION, "star")

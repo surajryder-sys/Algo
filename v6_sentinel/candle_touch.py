@@ -34,12 +34,38 @@ virgin right now -- see that function's own docstring for the full "why"
 show that zone as already-tested by evaluation time otherwise). The touch
 itself may land on the pattern candle OR the ONE candle immediately before
 it ("a previous candle could be a retest candle").
+
+PATTERN-FLAG RESILIENCE (is_hammer()/is_star(), added 2026-09-23 after a
+real live inconsistency): the bridge's momentary hammer/star booleans can
+transiently read False for a bar its OWN last_hammer_time/last_star_time
+already confirms was that shape -- observed live 2026-09-22, 3 separate
+polls in a row, star=False while last_star_time exactly equalled bar_time.
+Root cause (mql5/ATR_Trial_Dual_SuperTrend_Major_Minor_HammerStar.mq5's own
+OnCalculate reprocessing loop): last_hammer_time/last_star_time update
+whenever ANY bar in the current reprocess range evaluates true, while the
+published hammer_now/star_now only ever reflects the LAST bar in that
+range -- for last_star_time to equal bar_time (the current last-closed
+bar) while star reads False, the SAME bar index must have evaluated True
+on one OnCalculate pass and False on a LATER pass with hs_last_closed
+still pointing at it (no new bar has closed since). HS_EvaluateBar() is a
+pure function of a bar's own OHLC plus its 10-bar HS_LOOKBACK window, so
+the only way the SAME bar's result can change between two passes is if the
+underlying rate data itself was revised in between -- a known (if
+uncommon) MT5 behavior where a broker feed corrects very-recently-closed
+bar data shortly after it first appears closed. Not an indicator logic
+bug; an inherent risk of evaluating pattern shape against a feed that can
+still revise itself. is_hammer()/is_star() below are the resilient check
+every caller should use instead of hs.hammer/hs.star directly -- they also
+trust last_*_time whenever it points at the EXACT current bar (a stronger
+condition than "recently set" -- an older bar's last_*_time can never
+false-positive-match a different, newer bar_time).
 """
 from __future__ import annotations
 
 from typing import Optional
 
 from v6_sentinel import htf_levels
+from v6_sentinel.bridge import HammerStar
 from v6_sentinel.nlb_nsb_block import BlockZone
 
 CANDLE_TIMEFRAMES = (3, 5)  # M3, M5 -- pattern source timeframes, shared by every caller
@@ -50,6 +76,18 @@ CANDLE_HTF_TIMEFRAMES = (1440, 240, 120, 60, 30, 15, 10)
 HAMMER_ROLE, HAMMER_DIRECTION = "SUPPORT", 1
 STAR_ROLE, STAR_DIRECTION = "RESISTANCE", -1
 ZONE_ROLE_FOR_PATTERN = {"hammer": "no_short_buffer", "star": "no_long_buffer"}
+
+
+def is_hammer(hs: HammerStar) -> bool:
+    """True if the CURRENT last-closed bar (hs.bar_time) is a hammer -- see
+    module docstring's PATTERN-FLAG RESILIENCE section for why this is
+    hs.hammer OR (hs.last_hammer_time == hs.bar_time), not hs.hammer alone."""
+    return hs.hammer or hs.last_hammer_time == hs.bar_time
+
+
+def is_star(hs: HammerStar) -> bool:
+    """See is_hammer()'s own docstring -- same resilience, star side."""
+    return hs.star or hs.last_star_time == hs.bar_time
 
 
 def compute_htf_states(symbol: str, tracker) -> dict[int, Optional[htf_levels.HTFState]]:
