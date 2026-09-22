@@ -62,7 +62,7 @@ def main() -> None:
                                candle=exit_manager_candle.build_runtime(c),
                                zone_alert=zone_touch_alert.build_runtime()) for c in cfgs]
     for c in cfgs:
-        alert_status = "on" if (c.zone_touch_alerts_bot_token and c.zone_touch_alerts_chat_id) else "off (unconfigured)"
+        alert_status = "on" if (c.alerts_bot_token and c.alerts_chat_id) else "off (unconfigured)"
         print(f"[V6S-XM] {c.symbol} starting -- enable_trading={c.enable_trading} poll={c.poll_seconds}s "
               f"watching={[s.name for s in c.sources]} components=[bias, ltf, candle] zone_touch_alert={alert_status}")
         broker.connect(c.symbol, c.mt5_terminal_path, c.mt5_login, c.mt5_password, c.mt5_server)
