@@ -9,8 +9,11 @@ TWO COMPONENTS (user's own split, 2026-09-21):
      open position on the opposite side, across every manager, as long as that CISD's candle
      closed AFTER the position opened (an already-existing CISD never closes a trade). See
      exit_manager_bias.py's own docstring for the exact rule.
-  2. LTF EXIT MANAGER -- not designed/built yet. A second, later addition; run_once() below
-     already calls out where it plugs in once it exists.
+  2. LTF EXIT MANAGER (exit_manager_ltf.py, built 2026-09-22) -- a touch of any D1-M15
+     support/resistance level followed by a FRESH, matching-direction M1 CISD closes every
+     open position on the opposite side, across every manager. Both components additionally
+     skip a position that currently carries a manual TP (broker.has_manual_tp()) -- see
+     exit_manager_ltf.py's own docstring for the exact rule and worked example.
 
 Run with: python -m v6_sentinel.exit_manager
 
@@ -21,30 +24,38 @@ touches the account.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 
-from v6_sentinel import broker, config, exit_manager_bias, heartbeat
+from v6_sentinel import broker, config, exit_manager_bias, exit_manager_ltf, heartbeat
 from v6_sentinel.exit_manager_config import ExitManagerSymbolConfig, load_symbol_config
 
 
-def run_once(cfg: ExitManagerSymbolConfig) -> None:
-    exit_manager_bias.run_once(cfg)          # component 1: Bias Exit Manager
-    # component 2 (LTF Exit Manager) goes here once it's designed
+@dataclass
+class _SymbolRuntime:
+    cfg: ExitManagerSymbolConfig
+    ltf: exit_manager_ltf.LTFExitRuntime
+
+
+def run_once(rt: _SymbolRuntime) -> None:
+    exit_manager_bias.run_once(rt.cfg)                  # component 1: Bias Exit Manager
+    exit_manager_ltf.run_once(rt.cfg, rt.ltf)             # component 2: LTF Exit Manager
 
 
 def main() -> None:
     cfgs = [load_symbol_config(symbol) for symbol in config.ACTIVE_SYMBOLS]
+    runtimes = [_SymbolRuntime(cfg=c, ltf=exit_manager_ltf.build_runtime(c)) for c in cfgs]
     for c in cfgs:
         print(f"[V6S-XM] {c.symbol} starting -- enable_trading={c.enable_trading} poll={c.poll_seconds}s "
-              f"watching={[s.name for s in c.sources]} components=[bias]")
+              f"watching={[s.name for s in c.sources]} components=[bias, ltf]")
         broker.connect(c.symbol, c.mt5_terminal_path, c.mt5_login, c.mt5_password, c.mt5_server)
     try:
         while True:
-            for c in cfgs:
+            for rt in runtimes:
                 try:
-                    run_once(c)
+                    run_once(rt)
                 except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
-                    print(f"[V6S-XM] {c.symbol} cycle error: {exc!r}")
-                heartbeat.write(c.heartbeat_file)
+                    print(f"[V6S-XM] {rt.cfg.symbol} cycle error: {exc!r}")
+                heartbeat.write(rt.cfg.heartbeat_file)
             time.sleep(min(c.poll_seconds for c in cfgs))
     finally:
         broker.shutdown()

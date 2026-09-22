@@ -12,6 +12,12 @@ exit_manager_bias.py's Bias Exit Manager (component 1). No per-source ranking/ti
 field any more -- that belonged to the earlier entry-watching design and no longer applies;
 see exit_manager_bias.py's own docstring for the current rule.
 
+ltf_levels_state_file / ltf_bridge_bar_flip_state_file (2026-09-22): component 2's
+(exit_manager_ltf.py) OWN LevelEligibilityStore/BridgeBarFlipTracker state, deliberately
+SEPARATE from RM-STR's own (reversal_config.py's levels_state_file/bridge_bar_flip_state_file)
+-- two independent processes, never sharing state even though both read the same underlying
+bridge/rates data.
+
 Safety: enable_trading must be explicitly set true (V6S_EM_{SYMBOL}_ENABLE_TRADING) for any
 close to actually be sent -- independent of every other component's own flag. Left unset
 (default false), every decision is printed and logged but nothing touches the account.
@@ -50,6 +56,9 @@ class ExitManagerSymbolConfig:
     enable_trading: bool
     sources: tuple[WatchedSource, ...]
 
+    ltf_levels_state_file: str            # component 2 (LTF Exit Manager) -- own touch-arming store
+    ltf_bridge_bar_flip_state_file: str     # component 2 -- own M15 ATR flip tracker
+
     heartbeat_file: str
     decision_log_file: str
 
@@ -77,6 +86,8 @@ def load_symbol_config(symbol: str) -> ExitManagerSymbolConfig:
         deviation_points=int(os.getenv(prefix + "DEVIATION_POINTS", "30")),
         enable_trading=_env_bool(prefix + "ENABLE_TRADING", False),
         sources=_sources_for(symbol),
+        ltf_levels_state_file=config.state_file_for("exit_manager_ltf_levels", symbol),
+        ltf_bridge_bar_flip_state_file=config.state_file_for("exit_manager_ltf_bridge_bar_flip", symbol),
         heartbeat_file=config.state_file_for("exit_manager_heartbeat", symbol),
         decision_log_file=config.state_file_for("exit_manager_decision_log", symbol, ext="jsonl"),
         mt5_terminal_path=config.MT5_TERMINAL_PATH,
