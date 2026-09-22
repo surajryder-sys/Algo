@@ -38,6 +38,7 @@ before trusting Major/Minor levels the way ATR's are trusted:
 """
 from __future__ import annotations
 
+import datetime as dt
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -259,6 +260,30 @@ def trail_values_at(series: TrailSeries, bar_time: int) -> Optional[tuple[float,
     if t1 is None or t2 is None:
         return None
     return t1, t2
+
+
+def read_bar_high_low(symbol: str, tf_minutes: int, bar_time: int) -> Optional[tuple[float, float]]:
+    """(high, low) of the ONE closed bar whose own open time is exactly
+    bar_time -- added 2026-09-22 for exit_manager_candle.py (EA-CandleExit,
+    component 3), which needs to know whether the SAME candle a
+    hammer/star formed on also reached an HTF level, and the
+    HAMMERSTAR_<sym>_<tf>.json bridge only publishes that bar's own close,
+    not its high/low. mt5.copy_rates_range's own date_from/date_to are
+    inclusive on bar OPEN time, so a 1-second window starting exactly at
+    bar_time returns precisely that one bar (bar boundaries never share a
+    timestamp). None if the timeframe isn't recognized or that bar isn't
+    in MT5's own history (already expired retention, or not published
+    yet)."""
+    tf_const = _TIMEFRAME_CONST.get(tf_minutes)
+    if tf_const is None:
+        return None
+    date_from = dt.datetime.fromtimestamp(bar_time, tz=dt.timezone.utc)
+    date_to = date_from + dt.timedelta(seconds=1)
+    bars = mt5.copy_rates_range(symbol, tf_const, date_from, date_to)
+    if bars is None or len(bars) == 0:
+        return None
+    bar = bars[0]
+    return float(bar["high"]), float(bar["low"])
 
 
 def recent_swing_low(series: TrailSeries, lookback: int = 8) -> Optional[float]:

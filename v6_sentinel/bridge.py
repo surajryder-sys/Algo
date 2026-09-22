@@ -129,6 +129,40 @@ class BridgeSupertrend:
     bar_time: int
 
 
+@dataclass(frozen=True)
+class HammerStar:
+    """Candle-pattern state for one timeframe, from
+    HAMMERSTAR_<sym>_<tf>.json (mql5/ATR_Trial_Dual_SuperTrend_Major_Minor_HammerStar.mq5's
+    own HammerShootingStar block). hammer/star are the LAST CLOSED bar's
+    own shape -- True for that bar's entire own duration (until the NEXT
+    bar closes, same "momentary but bar-scoped" contract cisd_bridge's
+    fresh_cisd() uses), not a standing memory. last_hammer_time/
+    last_star_time are the standing memory (most recent occurrence of
+    each, 0 if none yet) -- used by exit_manager_candle.py (EA-CandleExit,
+    component 3) only for logging, never for the trigger itself."""
+    hammer: bool
+    star: bool
+    last_hammer_time: int
+    last_star_time: int
+    close: float
+    bar_time: int
+
+
+def read_hammer_star(symbol: str, tf_minutes: int) -> Optional[HammerStar]:
+    """This timeframe's candle-pattern state. None if the file is
+    missing/stale/incomplete -- same two freshness tests every other
+    reader here uses."""
+    raw = _read_fresh(f"HAMMERSTAR_{symbol}_{tf_minutes}.json", symbol, tf_minutes)
+    if raw is None:
+        return None
+    try:
+        return HammerStar(hammer=bool(raw["hammer"]), star=bool(raw["star"]),
+                          last_hammer_time=int(raw["last_hammer_time"]), last_star_time=int(raw["last_star_time"]),
+                          close=float(raw["close"]), bar_time=int(raw["bar_time"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _read_fresh(filename: str, symbol: str, tf_minutes: int) -> Optional[dict]:
     """The parsed bridge file, or None if it is missing, unreadable or stale -- the same two
     freshness tests read_lines() uses (file touched recently AND bar_time keeping pace)."""

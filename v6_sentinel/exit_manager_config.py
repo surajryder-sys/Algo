@@ -18,6 +18,15 @@ SEPARATE from RM-STR's own (reversal_config.py's levels_state_file/bridge_bar_fl
 -- two independent processes, never sharing state even though both read the same underlying
 bridge/rates data.
 
+candle_bridge_bar_flip_state_file (2026-09-22): component 3's (exit_manager_candle.py,
+EA-CandleExit) OWN BridgeBarFlipTracker state -- also separate from every other component's
+own tracker. No LevelEligibilityStore needed for component 3 at all (fully stateless design,
+see that module's own docstring).
+
+ict_block_state_file (2026-09-22, "add virgin zones as well from ict"): the SAME Block file
+RM-ICT itself reads (reversal_config's own nlb_nsb_block_state_file) -- component 3 reads it,
+never writes to it, exactly like RM-ICT's own read-only relationship to it.
+
 Safety: enable_trading must be explicitly set true (V6S_EM_{SYMBOL}_ENABLE_TRADING) for any
 close to actually be sent -- independent of every other component's own flag. Left unset
 (default false), every decision is printed and logged but nothing touches the account.
@@ -58,6 +67,8 @@ class ExitManagerSymbolConfig:
 
     ltf_levels_state_file: str            # component 2 (LTF Exit Manager) -- own touch-arming store
     ltf_bridge_bar_flip_state_file: str     # component 2 -- own M15 ATR flip tracker
+    candle_bridge_bar_flip_state_file: str    # component 3 (EA-CandleExit) -- own M15 ATR flip tracker
+    ict_block_state_file: str                   # component 3 -- reads RM-ICT's own OB zone Block (read-only)
 
     heartbeat_file: str
     decision_log_file: str
@@ -88,6 +99,8 @@ def load_symbol_config(symbol: str) -> ExitManagerSymbolConfig:
         sources=_sources_for(symbol),
         ltf_levels_state_file=config.state_file_for("exit_manager_ltf_levels", symbol),
         ltf_bridge_bar_flip_state_file=config.state_file_for("exit_manager_ltf_bridge_bar_flip", symbol),
+        candle_bridge_bar_flip_state_file=config.state_file_for("exit_manager_candle_bridge_bar_flip", symbol),
+        ict_block_state_file=reversal_config.load_symbol_config(symbol).nlb_nsb_block_state_file,
         heartbeat_file=config.state_file_for("exit_manager_heartbeat", symbol),
         decision_log_file=config.state_file_for("exit_manager_decision_log", symbol, ext="jsonl"),
         mt5_terminal_path=config.MT5_TERMINAL_PATH,
