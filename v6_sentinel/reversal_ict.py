@@ -220,22 +220,38 @@ class ICTEligibilityStore:
         return None
 
 
-def _check_zone(zone: BlockZone, symbol: str):
+def _check_zone(zone: BlockZone, symbol: str, m5_structure: Optional[int] = None,
+                m15_structure: Optional[int] = None):
     """(direction, trigger_tag, cisd) if this TOUCHED, otherwise-eligible
     zone has a fresh, matching-direction CISD confirmation THIS cycle
     from its own timeframe's pool -- None if not (wrong/no fresh CISD
     yet, or an unrecognized zone timeframe, e.g. M1, which
     _ZONE_CISD_POOLS deliberately has no entry for -- see module
     docstring). The confirming CISD object is returned too, since the
-    SL-distance override may need its swing as the last-resort basis."""
+    SL-distance override may need its swing as the last-resort basis.
+
+    M1 GATE (2026-09-22, user's own words: "to get into a trade based on
+    m1 cisd, lets say sell trade, m5 or m15 should be bearish or weak"):
+    an M1 CISD confirmation (only ever offered for M5 zones' own
+    exception pool, see _ZONE_CISD_POOLS) additionally requires the
+    CISD's own direction to match EITHER the M5 or M15 ATR-dual confirmed
+    structure (m5_structure/m15_structure: 1 strong/bullish, -1 weak/
+    bearish, None unknown -- same convention trend_bias/sideways_trapper
+    already use). If neither agrees, M1 is skipped for this touch (NOT a
+    hard fail -- the pool keeps checking M3/M5 normally, exactly as
+    before this change). M3/M5 confirmations are never gated by this --
+    only M1's own, stricter case."""
     direction = 1 if zone.role == "no_short_buffer" else -1  # bullish OB -> BUY, bearish OB -> SELL
     pool = _ZONE_CISD_POOLS.get(zone.timeframe)
     if pool is None:
         return None
     for tf_minutes in pool:
         cisd = cisd_bridge.fresh_cisd(symbol, tf_minutes)
-        if cisd is not None and cisd_bridge.direction_of(cisd) == direction:
-            return direction, _CISD_TAG[tf_minutes], cisd
+        if cisd is None or cisd_bridge.direction_of(cisd) != direction:
+            continue
+        if tf_minutes == 1 and m5_structure != direction and m15_structure != direction:
+            continue   # M1 needs M5 or M15 structure agreement -- keep checking the rest of the pool
+        return direction, _CISD_TAG[tf_minutes], cisd
     return None
 
 
@@ -252,14 +268,16 @@ def _touch_is_current(zone: BlockZone, max_age_minutes: float, now: float) -> bo
 
 def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibilityStore,
                      sl_buffer: float, bid: float, ask: float, sl_override_points: float,
-                     touch_max_age_minutes: float, now: Optional[float] = None) -> list[ICTSignal]:
+                     touch_max_age_minutes: float, now: Optional[float] = None,
+                     m5_structure: Optional[int] = None, m15_structure: Optional[int] = None) -> list[ICTSignal]:
     """Every currently-valid (not invalidated -- an invalidated zone is
     already deleted from the Block outright), TOUCHED, untraded OB zone
     with a fresh matching-direction CISD confirmation this cycle -- see
     module docstring for the full design, including the SL-distance
     override. Reads the Block fresh (read-only -- this component never
     writes to it) every call. bid/ask are the live prices, used only as
-    the entry price for the SL-distance test."""
+    the entry price for the SL-distance test. m5_structure/m15_structure:
+    see _check_zone()'s own docstring for the M1 gate this feeds."""
     store = BlockStore(block_state_file)
     signals: list[ICTSignal] = []
     cache: dict = {}
@@ -276,7 +294,7 @@ def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibi
                   f"substantially overlaps already-traded zone {dup}")
             continue
 
-        result = _check_zone(zone, symbol)
+        result = _check_zone(zone, symbol, m5_structure, m15_structure)
         if result is None:
             continue
         direction, trigger, cisd = result

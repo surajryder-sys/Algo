@@ -29,62 +29,30 @@ star. "Opposite" is relative to the confirmed signal direction, same
 convention components 1/2 already use -- across every manager
 (TM-STR/RM-STR/RM-ICT alike), no exemptions.
 
-HTF LINES -- "TOUCH EVENT AND HAMMER SHOULD BE IN SAME M3 OR M5 CANDLE":
-the SAME bar that formed the pattern must ALSO be the one whose own high
-(star) or low (hammer) reached the line's value -- not a separately-armed
-touch from some earlier candle. rates.read_bar_high_low() fetches that
-specific bar's own high/low directly from MT5 (the HAMMERSTAR bridge itself
-only publishes that bar's close, not its full OHLC).
-
-SCOPE (HTF lines): D1, H4, H2, H1, M30, M15, M10 -- CANDLE_HTF_TIMEFRAMES
-below. Started as component 2's own D1-M15 set (reused directly), then the
-user explicitly asked to "add m10 as well" (2026-09-22) once shown the exact
-scope -- component 3 now carries its OWN separate scope constant rather than
-importing component 2's, so the two can diverge cleanly (M10 here, not
-there) without ever silently coupling one component's scope change to the
-other's. Still excludes M5 (RM-STR's own fuller 8-timeframe scope goes one
-step further than this) -- M3/M5 are this component's PATTERN timeframes,
-not part of its HTF-line touch scope. M10 needs no new bridge dependency:
-htf_levels.compute_htf_state() already computes it NATIVELY via rates.py
-(M10 isn't in bridge.BRIDGE_ONLY_TIMEFRAMES), same as every other non-bridge
-timeframe here.
-
-ZONE SOURCE (2026-09-22, "add virgin zones as well from ict / only untested
-zones"): nlb_nsb_block.BlockStore -- the SAME OB zone Block RM-ICT itself
-reads (read-only here, never written to, same relationship reversal_ict.py
-already has to it). "ONLY UNTESTED ZONES": zone.retested == False (virgin --
-BlockZone has no separate "virgin" field; retested IS the tested/untested
-flag, see nlb_nsb_block.py's own docstring -- retested=False is virgin).
-
-"THE TESTING CANDLE CAN BE A HAMMER OR STAR, OR A PREVIOUS CANDLE COULD BE A
-RETEST CANDLE": unlike the HTF-line rule, a zone's own touch does NOT have
-to land on the exact same bar as the pattern -- either the pattern candle
-ITSELF touches the zone's [btm, top] range, OR the ONE candle immediately
-before it does (rates.read_bar_high_low() at bar_time - tf_minutes*60).
-Deliberately does NOT read the Block's own retested_at/retested_source
-fields for this touch test (those track the WATCHER's own live-tick
-retest detection, which would already have flipped retested=True the
-instant a genuine touch happened -- using that here would make "only
-untested zones" and "the testing candle touched it" self-contradictory).
-Instead this component does its OWN independent, candle-OHLC-vs-zone-range
-overlap test, using zone.retested purely as an ELIGIBILITY filter (this OB
-is still structurally virgin in the Block's own tracking), never as the
-touch signal itself. "Touch" = candle's [low, high] overlaps the zone's
-[btm, top] -- the same "price entered the range" test the watcher itself
-uses for its own retest detection, just applied to one candle's OHLC
-instead of live ticks.
+TOUCH LOGIC (HTF lines same-candle-only, OB zones virgin-as-of + same-or-
+previous-candle) -- fully shared with scalper_main.py (the Scalper manager,
+an ENTRY use of the exact same pattern+touch signal) via candle_touch.py,
+extracted 2026-09-22 specifically so both callers use the EXACT SAME logic,
+especially the virgin-zone eligibility-timing fix (see
+candle_touch.virgin_as_of()'s own docstring for the full "why" and the real
+live miss that prompted it) -- never two independently-drifting copies. See
+that module's own docstring for the complete rule (scope, pairing, both
+touch mechanisms).
 
 Both the HTF-line and zone checks are fully stateless (re-derived fresh
 every cycle from live bridge/rates/Block reads) -- no persisted touch-
 arming store needed anywhere in this component, unlike component 2's
 RM-STR-style LevelEligibilityStore. Needs its own BridgeBarFlipTracker
 instance (M15 is the only bridge-only timeframe in the HTF-line scope) --
-own state file, never shared with RM-STR's or component 2's own trackers.
+own state file, never shared with RM-STR's, component 2's, or Scalper's own
+trackers.
 
 Also carries the same two guards components 1/2 already use:
   - broker.has_manual_tp() pauses auto-close for a position that currently
     carries a manual TP (the user's own "just like sl manager, and trade
-    manager" convention) -- fully reactive, not latched.
+    manager" convention) -- fully reactive, not latched. A Telegram alert
+    fires on every skip too (2026-09-22), via
+    telegram_alerts.send_if_configured().
   - "already-existing" guard: only a position opened BEFORE the pattern
     candle's own CLOSE time (bar_time + tf_minutes*60) qualifies.
 """
@@ -95,28 +63,23 @@ from typing import TYPE_CHECKING, Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import broker, decision_log, htf_levels, rates, trade_journal
+from v6_sentinel import broker, candle_touch, decision_log, rates, telegram_alerts, trade_journal
 from v6_sentinel.bridge import HammerStar, read_hammer_star
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
-from v6_sentinel.nlb_nsb_block import BlockStore, BlockZone
+from v6_sentinel.nlb_nsb_block import BlockStore
 
 if TYPE_CHECKING:
     from v6_sentinel.exit_manager_config import ExitManagerSymbolConfig, WatchedSource
 
 _DIR_LABEL = {1: "BUY", -1: "SELL"}
-_CANDLE_TIMEFRAMES = (3, 5)  # M3, M5 -- both checked independently every cycle, PATTERN source only
 
-# D1, H4, H2, H1, M30, M15, M10 -- this component's OWN HTF-line touch
-# scope, see module docstring's SCOPE section (started from component 2's
-# D1-M15, then M10 added on the user's explicit follow-up).
-CANDLE_HTF_TIMEFRAMES = (1440, 240, 120, 60, 30, 15, 10)
-
-# (level_role_required, confirmed_direction) -- see module docstring's
-# LEVEL/DIRECTION PAIRING section. Zone roles use a different vocabulary
-# ("no_short_buffer"/"no_long_buffer", see ob_levels.py) -- same pairing.
-_HAMMER_ROLE, _HAMMER_DIRECTION = "SUPPORT", 1
-_STAR_ROLE, _STAR_DIRECTION = "RESISTANCE", -1
-_ZONE_ROLE_FOR_PATTERN = {"hammer": "no_short_buffer", "star": "no_long_buffer"}
+# Re-exported for backward compat / anyone importing these from this module's
+# own namespace -- the real definitions now live in candle_touch.py, shared
+# with scalper_main.py. See that module's own docstring for the full rule.
+CANDLE_HTF_TIMEFRAMES = candle_touch.CANDLE_HTF_TIMEFRAMES
+_CANDLE_TIMEFRAMES = candle_touch.CANDLE_TIMEFRAMES
+_HAMMER_ROLE, _HAMMER_DIRECTION = candle_touch.HAMMER_ROLE, candle_touch.HAMMER_DIRECTION
+_STAR_ROLE, _STAR_DIRECTION = candle_touch.STAR_ROLE, candle_touch.STAR_DIRECTION
 
 
 @dataclass
@@ -159,11 +122,20 @@ def _close_position(cfg: "ExitManagerSymbolConfig", position, source: "WatchedSo
         print(f"[V6S-XM-CANDLE] close failed: retcode={result.retcode} comment={result.comment}")
         decision_log.log(cfg.decision_log_file, "candle_close_failed", ticket=position.ticket, target=source.name,
                          retcode=result.retcode)
+        telegram_alerts.send_if_configured(
+            cfg.alerts_bot_token, cfg.alerts_chat_id,
+            f"[V6S] EXIT FAILED: {source.name} #{position.ticket} ({_DIR_LABEL[direction]}) -- "
+            f"CANDLEEXIT-{sub_tag} (M{pattern_tf} {pattern_name} touched {trigger_label}) -- "
+            f"retcode={result.retcode} {result.comment}")
         return
     decision_log.log(cfg.decision_log_file, "candle_close_filled", ticket=position.ticket, target=source.name,
                      direction=_DIR_LABEL[direction], **detail)
     trade_journal.TradeJournal(source.journal_file, source.name, cfg.symbol).exit_requested(
         position.ticket, f"CANDLEEXIT-{sub_tag}", detail)
+    telegram_alerts.send_if_configured(
+        cfg.alerts_bot_token, cfg.alerts_chat_id,
+        f"[V6S] EXIT: {source.name} #{position.ticket} ({_DIR_LABEL[direction]}) closed -- "
+        f"CANDLEEXIT-{sub_tag} (M{pattern_tf} {pattern_name} touched {trigger_label})")
 
 
 def _close_opposite_positions(cfg: "ExitManagerSymbolConfig", direction: int, confirm_time: int,
@@ -176,9 +148,16 @@ def _close_opposite_positions(cfg: "ExitManagerSymbolConfig", direction: int, co
                 continue
             if position.time >= confirm_time:
                 continue   # opened at/after the pattern candle's own close -- "already existing", not after
-            if broker.has_manual_tp(position):
+            own_tp = source.own_tp_lookup(position.ticket) if source.own_tp_lookup else None
+            if broker.is_paused_by_manual_tp(position, own_tp):
+                pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
                 print(f"[V6S-XM-CANDLE] {source.name} #{position.ticket} has a manual TP set -- "
                       f"skipping auto-close (user is watching it manually)")
+                telegram_alerts.send_if_configured(
+                    cfg.alerts_bot_token, cfg.alerts_chat_id,
+                    f"[V6S] EM SKIPPED (manual TP set): {source.name} #{position.ticket} "
+                    f"({_DIR_LABEL[pos_direction]}) -- would have closed via CANDLEEXIT-{sub_tag} "
+                    f"(M{pattern_tf} {pattern_name} touched {trigger_label})")
                 continue
             _close_position(cfg, position, source, pattern_tf, pattern_name, sub_tag, trigger_label,
                             confirm_time, detail_extra)
@@ -192,16 +171,7 @@ def _check_htf_lines(cfg: "ExitManagerSymbolConfig", htf_states: dict, pattern_t
     high, low = extremes
     touch_price = low if role == "SUPPORT" else high
 
-    touching = next(
-        (
-            (level_tf, level.source)
-            for level_tf, state in htf_states.items() if state is not None
-            for level in state.levels
-            if level.role == role
-            and ((touch_price <= level.value) if role == "SUPPORT" else (touch_price >= level.value))
-        ),
-        None,
-    )
+    touching = candle_touch.find_touching_line(htf_states, role, touch_price)
     if touching is None:
         return
     level_tf, level_source = touching
@@ -211,32 +181,18 @@ def _check_htf_lines(cfg: "ExitManagerSymbolConfig", htf_states: dict, pattern_t
                               detail_extra={"level_timeframe": level_tf, "level_source": level_source})
 
 
-def _candle_touches_zone(high: float, low: float, zone: BlockZone) -> bool:
-    """True if [low, high] overlaps the zone's own [btm, top] range -- the
-    same 'price entered the range' test nlb_nsb_watcher's own live retest
-    detection uses, just evaluated against one specific candle's OHLC
-    instead of live ticks."""
-    return low <= zone.top and high >= zone.btm
-
-
 def _check_zones(cfg: "ExitManagerSymbolConfig", block: BlockStore, pattern_tf: int, hs: HammerStar,
                  direction: int, pattern_name: str) -> None:
-    wanted_role = _ZONE_ROLE_FOR_PATTERN[pattern_name]
-    same_extremes = rates.read_bar_high_low(cfg.symbol, pattern_tf, hs.bar_time)
-    prev_extremes = rates.read_bar_high_low(cfg.symbol, pattern_tf, hs.bar_time - pattern_tf * 60)
+    wanted_role = candle_touch.ZONE_ROLE_FOR_PATTERN[pattern_name]
+    same_bar_time = hs.bar_time
+    prev_bar_time = hs.bar_time - pattern_tf * 60
+    same_extremes = rates.read_bar_high_low(cfg.symbol, pattern_tf, same_bar_time)
+    prev_extremes = rates.read_bar_high_low(cfg.symbol, pattern_tf, prev_bar_time)
     if same_extremes is None and prev_extremes is None:
         return
 
-    touching_zone = None
-    for zone in block.zones():
-        if zone.role != wanted_role or zone.retested:
-            continue   # only untested (still virgin) zones of the matching role
-        if same_extremes is not None and _candle_touches_zone(*same_extremes, zone):
-            touching_zone = zone
-            break
-        if prev_extremes is not None and _candle_touches_zone(*prev_extremes, zone):
-            touching_zone = zone
-            break
+    touching_zone = candle_touch.find_touching_zone(block.zones(), wanted_role, same_extremes, prev_extremes,
+                                                     same_bar_time, prev_bar_time)
     if touching_zone is None:
         return
 
@@ -249,10 +205,10 @@ def _check_zones(cfg: "ExitManagerSymbolConfig", block: BlockStore, pattern_tf: 
 
 
 def run_once(cfg: "ExitManagerSymbolConfig", rt: CandleExitRuntime) -> None:
-    htf_states = {tf: htf_levels.compute_htf_state(cfg.symbol, tf, rt.tracker) for tf in CANDLE_HTF_TIMEFRAMES}
+    htf_states = candle_touch.compute_htf_states(cfg.symbol, rt.tracker)
     block = BlockStore(cfg.ict_block_state_file)   # read fresh every cycle -- never written to here
 
-    for tf in _CANDLE_TIMEFRAMES:
+    for tf in candle_touch.CANDLE_TIMEFRAMES:
         hs = read_hammer_star(cfg.symbol, tf)
         if hs is None:
             continue

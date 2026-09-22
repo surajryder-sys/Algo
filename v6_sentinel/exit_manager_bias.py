@@ -33,6 +33,17 @@ longer exists is simply not found again, and a process restart mid-bar
 self-heals (fresh_cisd() is purely a live read, not an in-memory latch), so there
 is nothing to persist or replay.
 
+MANUAL TP GUARD (fixed 2026-09-22 -- this component was MISSING it entirely until
+now, even though the user's original "EM component not to execute its logic if
+tp is set" instruction predates components 2/3, which both had it from their own
+first build; only component 1 was never retrofitted, found while wiring the
+Telegram skip-alert below): broker.has_manual_tp() pauses auto-close for a
+position that currently carries a manual TP, same per-position, fully reactive
+convention every other component/trade_manager.py uses. A Telegram alert
+("EM SKIPPED (manual TP set)...") fires on every skip too, via
+telegram_alerts.send_if_configured() -- so the user can directly observe the
+guard working (or not) rather than inferring it from the absence of a close.
+
 Applies per symbol; `sources` (exit_manager_config.WatchedSource) is only used to
 know which journal file to write the closed trade's own "why" into.
 """
@@ -42,7 +53,7 @@ from typing import TYPE_CHECKING
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import broker, cisd_bridge, decision_log, trade_journal
+from v6_sentinel import broker, cisd_bridge, decision_log, telegram_alerts, trade_journal
 
 if TYPE_CHECKING:
     from v6_sentinel.exit_manager_config import ExitManagerSymbolConfig, WatchedSource
@@ -72,11 +83,19 @@ def _close_position(cfg: "ExitManagerSymbolConfig", position, source: "WatchedSo
         print(f"[V6S-XM-BIAS] close failed: retcode={result.retcode} comment={result.comment}")
         decision_log.log(cfg.decision_log_file, "bias_close_failed", ticket=position.ticket, target=source.name,
                          retcode=result.retcode)
+        telegram_alerts.send_if_configured(
+            cfg.alerts_bot_token, cfg.alerts_chat_id,
+            f"[V6S] EXIT FAILED: {source.name} #{position.ticket} ({_DIR_LABEL[direction]}) -- "
+            f"BIASEXIT (M{tf_minutes} {cisd_direction} CISD) -- retcode={result.retcode} {result.comment}")
         return
     decision_log.log(cfg.decision_log_file, "bias_close_filled", ticket=position.ticket, target=source.name,
                      direction=_DIR_LABEL[direction], **detail)
     trade_journal.TradeJournal(source.journal_file, source.name, cfg.symbol).exit_requested(
         position.ticket, "BIASEXIT", detail)
+    telegram_alerts.send_if_configured(
+        cfg.alerts_bot_token, cfg.alerts_chat_id,
+        f"[V6S] EXIT: {source.name} #{position.ticket} ({_DIR_LABEL[direction]}) closed -- "
+        f"BIASEXIT (fresh M{tf_minutes} {cisd_direction} CISD confirmed after it opened)")
 
 
 def run_once(cfg: "ExitManagerSymbolConfig") -> None:
@@ -93,4 +112,17 @@ def run_once(cfg: "ExitManagerSymbolConfig") -> None:
                     continue
                 if position.time >= confirm_time:
                     continue   # opened at/after this CISD's own confirm time -- "already existing", not after
+                own_tp = source.own_tp_lookup(position.ticket) if source.own_tp_lookup else None
+                if broker.is_paused_by_manual_tp(position, own_tp):
+                    # Component 1 was MISSING this guard entirely until 2026-09-22 (found while
+                    # wiring the manual-TP skip alert below) -- components 2/3 always had it.
+                    direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+                    print(f"[V6S-XM-BIAS] {source.name} #{position.ticket} has a manual TP set -- "
+                          f"skipping auto-close (user is watching it manually)")
+                    telegram_alerts.send_if_configured(
+                        cfg.alerts_bot_token, cfg.alerts_chat_id,
+                        f"[V6S] EM SKIPPED (manual TP set): {source.name} #{position.ticket} "
+                        f"({_DIR_LABEL[direction]}) -- would have closed via BIASEXIT "
+                        f"(fresh M{tf_minutes} {cisd.last_cisd} CISD)")
+                    continue
                 _close_position(cfg, position, source, tf_minutes, cisd.last_cisd, confirm_time)

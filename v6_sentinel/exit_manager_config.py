@@ -2,10 +2,18 @@
 built from the trading components' own configs so the watched magic numbers and journal
 files can never drift out of sync with the bots that own them.
 
-WATCHED COMPONENTS (per symbol): TM-STR, RM-STR, RM-ICT. Each is a WatchedSource: its name
-(the "component" string its trade journal uses), its magic number, and its trade journal file
-(trade_journal.py) -- used by exit_manager_bias.py to know which journal to write a closed
-trade's "why" into. TM-ICT is not built yet; when it is, it is one more entry in _sources_for().
+WATCHED COMPONENTS (per symbol): TM-STR, RM-STR, RM-ICT, SCALPER (added 2026-09-22). Each is a
+WatchedSource: its name (the "component" string its trade journal uses), its magic number, and
+its trade journal file (trade_journal.py) -- used by exit_manager_bias.py to know which journal
+to write a closed trade's "why" into. TM-ICT is not built yet; when it is, it is one more entry
+in _sources_for().
+
+own_tp_lookup (WatchedSource, 2026-09-22): None for every source except SCALPER -- Scalper is
+the only manager that ever places its own broker-side TP (see scalper_main.py), so its own
+WatchedSource carries a ticket->tp lookup (scalper_own_tp.ScalperOwnTPStore.get) that every Exit
+Manager closing loop uses via broker.is_paused_by_manual_tp() instead of plain has_manual_tp()
+-- otherwise Scalper's own untouched 1:1 TP would look "manually watched" and NEVER let Exit
+Manager close one of its trades. See broker.py's own is_paused_by_manual_tp() docstring.
 
 Rebuilt 2026-09-21 (user: "lets re build the exit manager from the beginning") for
 exit_manager_bias.py's Bias Exit Manager (component 1). No per-source ranking/timeframe
@@ -27,18 +35,31 @@ ict_block_state_file (2026-09-22, "add virgin zones as well from ict"): the SAME
 RM-ICT itself reads (reversal_config's own nlb_nsb_block_state_file) -- component 3 reads it,
 never writes to it, exactly like RM-ICT's own read-only relationship to it.
 
+alerts_bot_token / alerts_chat_id (2026-09-22, renamed from zone_touch_alerts_* the same day
+once the user asked for EXIT alerts on the same bot too -- "also send me exit alerts and
+their logic too"): ONE shared Telegram bot for every alert-only (non-trading) notification
+this component sends -- zone_touch_alert.py's own touch alerts AND the exit alert each of
+components 1/2/3's own _close_position() sends on every REAL fill. Left unset (both None, the
+default with no env vars set) disables ALL of these at once -- same "unset means off"
+convention enable_trading itself uses, but none of these ever send an order either way, only
+a message. telegram_alerts.send_if_configured() is the shared guarded-send helper every one
+of these call sites uses.
+
 Safety: enable_trading must be explicitly set true (V6S_EM_{SYMBOL}_ENABLE_TRADING) for any
 close to actually be sent -- independent of every other component's own flag. Left unset
 (default false), every decision is printed and logged but nothing touches the account.
+zone_touch_alert.py sends no orders at all, ever, so it is NOT gated by enable_trading.
 """
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Callable, Optional
 
 from dotenv import load_dotenv
 
-from v6_sentinel import config, reversal_config, trend_config
+from v6_sentinel import config, reversal_config, scalper_config, trend_config
+from v6_sentinel.scalper_own_tp import ScalperOwnTPStore
 
 load_dotenv()
 
@@ -55,6 +76,7 @@ class WatchedSource:
     name: str              # the "component" string in that bot's trade journal, e.g. "RM-ICT"
     magic_number: int
     journal_file: str
+    own_tp_lookup: Optional[Callable[[int], Optional[float]]] = None   # SCALPER only, see module docstring
 
 
 @dataclass(frozen=True)
@@ -70,6 +92,9 @@ class ExitManagerSymbolConfig:
     candle_bridge_bar_flip_state_file: str    # component 3 (EA-CandleExit) -- own M15 ATR flip tracker
     ict_block_state_file: str                   # component 3 -- reads RM-ICT's own OB zone Block (read-only)
 
+    alerts_bot_token: str | None       # shared Telegram bot for zone-touch + exit alerts, see above
+    alerts_chat_id: str | None
+
     heartbeat_file: str
     decision_log_file: str
 
@@ -82,10 +107,13 @@ class ExitManagerSymbolConfig:
 def _sources_for(symbol: str) -> tuple[WatchedSource, ...]:
     tm = trend_config.load_symbol_config(symbol)
     rm = reversal_config.load_symbol_config(symbol)
+    sc = scalper_config.load_symbol_config(symbol)
+    scalper_own_tp = ScalperOwnTPStore(sc.own_tp_state_file)
     return (
         WatchedSource("TM-STR", tm.magic_number, tm.trade_journal_file),
         WatchedSource("RM-STR", rm.magic_number, rm.str_trade_journal_file),
         WatchedSource("RM-ICT", rm.ict_magic_number, rm.ict_trade_journal_file),
+        WatchedSource("SCALPER", sc.magic_number, sc.trade_journal_file, own_tp_lookup=scalper_own_tp.get),
     )
 
 
@@ -101,6 +129,8 @@ def load_symbol_config(symbol: str) -> ExitManagerSymbolConfig:
         ltf_bridge_bar_flip_state_file=config.state_file_for("exit_manager_ltf_bridge_bar_flip", symbol),
         candle_bridge_bar_flip_state_file=config.state_file_for("exit_manager_candle_bridge_bar_flip", symbol),
         ict_block_state_file=reversal_config.load_symbol_config(symbol).nlb_nsb_block_state_file,
+        alerts_bot_token=os.getenv("V6S_ALERTS_TELEGRAM_BOT_TOKEN") or None,
+        alerts_chat_id=os.getenv("V6S_ALERTS_TELEGRAM_CHAT_ID") or None,
         heartbeat_file=config.state_file_for("exit_manager_heartbeat", symbol),
         decision_log_file=config.state_file_for("exit_manager_decision_log", symbol, ext="jsonl"),
         mt5_terminal_path=config.MT5_TERMINAL_PATH,

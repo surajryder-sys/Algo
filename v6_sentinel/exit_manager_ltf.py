@@ -36,7 +36,10 @@ latched) convention trade_manager.py already established -- a manual TP
 placed on a position pauses ONLY that position's own auto-close here; every
 other open position is unaffected, and removing the TP resumes evaluation
 from whatever the current price/signal is the very next cycle, no special
-resume step needed. Re-placing a TP pauses again.
+resume step needed. Re-placing a TP pauses again. A Telegram alert fires on
+every skip too (2026-09-22, "send me if exit manager tries exiting, when a
+manual tp is placed so that i can understand the specified logic works"),
+via telegram_alerts.send_if_configured().
 
 "ALREADY-EXISTING CISD DOESN'T COUNT": same guard as Component 1 -- only a
 position opened BEFORE the confirming M1 candle's own CLOSE time
@@ -66,7 +69,7 @@ from typing import TYPE_CHECKING, Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import broker, cisd_bridge, decision_log, htf_levels, trade_journal
+from v6_sentinel import broker, cisd_bridge, decision_log, htf_levels, telegram_alerts, trade_journal
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.reversal_entry import scan_touches
 
@@ -120,11 +123,20 @@ def _close_position(cfg: "ExitManagerSymbolConfig", position, source: "WatchedSo
         print(f"[V6S-XM-LTF] close failed: retcode={result.retcode} comment={result.comment}")
         decision_log.log(cfg.decision_log_file, "ltf_close_failed", ticket=position.ticket, target=source.name,
                          retcode=result.retcode)
+        telegram_alerts.send_if_configured(
+            cfg.alerts_bot_token, cfg.alerts_chat_id,
+            f"[V6S] EXIT FAILED: {source.name} #{position.ticket} ({_DIR_LABEL[direction]}) -- "
+            f"LTFEXIT (M{level_tf}/{level_source} touch + M1 {cisd_direction} CISD) -- "
+            f"retcode={result.retcode} {result.comment}")
         return
     decision_log.log(cfg.decision_log_file, "ltf_close_filled", ticket=position.ticket, target=source.name,
                      direction=_DIR_LABEL[direction], **detail)
     trade_journal.TradeJournal(source.journal_file, source.name, cfg.symbol).exit_requested(
         position.ticket, "LTFEXIT", detail)
+    telegram_alerts.send_if_configured(
+        cfg.alerts_bot_token, cfg.alerts_chat_id,
+        f"[V6S] EXIT: {source.name} #{position.ticket} ({_DIR_LABEL[direction]}) closed -- "
+        f"LTFEXIT (M{level_tf}/{level_source} touch + fresh M1 {cisd_direction} CISD confirmed after it opened)")
 
 
 def run_once(cfg: "ExitManagerSymbolConfig", rt: LTFExitRuntime) -> None:
@@ -173,8 +185,15 @@ def run_once(cfg: "ExitManagerSymbolConfig", rt: LTFExitRuntime) -> None:
                 continue
             if position.time >= confirm_time:
                 continue   # opened at/after this CISD's own confirm time -- "already existing", not after
-            if broker.has_manual_tp(position):
+            own_tp = source.own_tp_lookup(position.ticket) if source.own_tp_lookup else None
+            if broker.is_paused_by_manual_tp(position, own_tp):
+                direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
                 print(f"[V6S-XM-LTF] {source.name} #{position.ticket} has a manual TP set -- "
                       f"skipping auto-close (user is watching it manually)")
+                telegram_alerts.send_if_configured(
+                    cfg.alerts_bot_token, cfg.alerts_chat_id,
+                    f"[V6S] EM SKIPPED (manual TP set): {source.name} #{position.ticket} "
+                    f"({_DIR_LABEL[direction]}) -- would have closed via LTFEXIT "
+                    f"(M{level_tf}/{level_source} touch + M1 {cisd.last_cisd} CISD)")
                 continue
             _close_position(cfg, position, source, level_tf, level_source, cisd.last_cisd, confirm_time)

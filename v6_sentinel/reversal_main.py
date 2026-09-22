@@ -390,6 +390,10 @@ def run_once(rt: _SymbolRuntime) -> None:
     # condition (sideways_trapper.py); RM-STR's own entry/touch logic never uses M15 for anything else.
     m15_fs = rt.tracker.update(cfg.symbol, 15) if rt.tracker is not None else None
     m15_structure = m15_fs.confirmed.value if m15_fs is not None else None
+    # M5 structure -- ADDED 2026-09-22, feeds ONLY RM-ICT's own M1-CISD gate below (see
+    # reversal_ict._check_zone()'s own docstring); RM-STR's own logic never uses this.
+    m5_fs = rt.tracker.update(cfg.symbol, 5) if rt.tracker is not None else None
+    m5_structure = m5_fs.confirmed.value if m5_fs is not None else None
 
     str_signals = reversal_entry.find_signals(cfg.symbol, htf_states, rt.store, cfg.sl_buffer, bid, ask,
                                               rt.trapper_str, cfg.sideways_trap_min_distance_points, m15_structure)
@@ -397,10 +401,13 @@ def run_once(rt: _SymbolRuntime) -> None:
     # post-touch CISD confirmation, fully independent of the M15/tracker
     # machinery STR uses. See reversal_ict.py's own docstring for the
     # full entry rule (a complete redesign, 2026-09-18 -- no longer the
-    # M15-Primary-Structure-gated system).
+    # M15-Primary-Structure-gated system). m5_structure/m15_structure feed
+    # ONLY the M1-CISD gate (2026-09-22) -- every other confirmation
+    # timeframe (M3/M5) is unaffected by them.
     ict_signals = reversal_ict.find_ict_signals(cfg.symbol, cfg.nlb_nsb_block_state_file, rt.ict_eligibility,
                                                 cfg.sl_buffer, bid, ask, cfg.ict_sl_override_points,
-                                                cfg.ict_touch_max_age_minutes)
+                                                cfg.ict_touch_max_age_minutes,
+                                                m5_structure=m5_structure, m15_structure=m15_structure)
 
     # Logged BEFORE _process_signal acts on them, listing EVERY qualifying
     # signal this cycle (not just the one that becomes a real position) --

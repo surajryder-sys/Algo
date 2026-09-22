@@ -89,9 +89,13 @@ def _result_from(result) -> OrderResult:
 
 
 def send_market_order(symbol: str, direction: int, lots: float, sl: float, magic: int,
-                      deviation: int, comment: str) -> OrderResult:
-    """No tp= here on purpose -- Trade Manager books profit as direct
-    partial closes, the bot never places a broker-side TP itself."""
+                      deviation: int, comment: str, tp: Optional[float] = None) -> OrderResult:
+    """tp=None (the default, every caller except scalper_main.py) omits the
+    "tp" field entirely -- every OTHER manager books profit as direct
+    partial closes (Trade Manager) or an Exit Manager close, never a
+    broker-side TP. scalper_main.py (2026-09-22) is the first and only
+    caller that passes a real tp -- its own fixed 1:1 R:R -- see that
+    module's own docstring."""
     bid, ask = get_tick_price(symbol)
     price = ask if direction == 1 else bid
     order_type = mt5.ORDER_TYPE_BUY if direction == 1 else mt5.ORDER_TYPE_SELL
@@ -109,6 +113,8 @@ def send_market_order(symbol: str, direction: int, lots: float, sl: float, magic
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
+    if tp is not None:
+        request["tp"] = tp
     return _result_from(mt5.order_send(request))
 
 
@@ -155,8 +161,32 @@ def close_position(symbol: str, position, deviation: int, volume: Optional[float
 
 
 def has_manual_tp(position) -> bool:
-    """True if the position currently carries a broker-side TP -- the
-    bot itself never sets one (see send_market_order), so any TP present
-    was set manually and should pause Trade Manager's automatic
-    %-exits (see trade_manager.py)."""
+    """True if the position currently carries a broker-side TP. For every
+    manager EXCEPT Scalper (added 2026-09-22), the bot itself never sets
+    one (see send_market_order's own tp= docstring), so any TP present was
+    set manually and should pause Trade Manager's automatic %-exits (see
+    trade_manager.py) or an Exit Manager component's own auto-close. For
+    Scalper's OWN positions (which always carry a bot-placed 1:1 TP by
+    design), use is_paused_by_manual_tp() instead -- this plain check
+    would otherwise treat EVERY Scalper trade as permanently manually-
+    watched and never auto-close any of them."""
     return bool(position.tp) and position.tp != 0.0
+
+
+def is_paused_by_manual_tp(position, own_tp: Optional[float] = None) -> bool:
+    """The general form has_manual_tp() is a special case of (own_tp=None
+    always -- see that function's own docstring). own_tp is the TP a bot
+    itself placed at entry (Scalper only, via WatchedSource.own_tp_lookup
+    -- see exit_manager_config.py), if any: None means this position never
+    had one (every non-Scalper manager, or a Scalper position whose own_tp
+    record is missing for some reason) -- same as has_manual_tp(). A real
+    own_tp means only a TP that DIFFERS from it counts as "manual" (the
+    user has since changed or added one) -- Scalper's own untouched 1:1 TP
+    must never itself pause Exit Manager's auto-close (2026-09-22, "exit
+    manager can also close even this trade when exit criteria met... or
+    exits if EM satisfies their logics")."""
+    if not position.tp:
+        return False
+    if own_tp is None:
+        return True
+    return abs(position.tp - own_tp) > 1e-6
