@@ -171,7 +171,7 @@ def _check_htf_lines(cfg: "ExitManagerSymbolConfig", htf_states: dict, pattern_t
     high, low = extremes
     touch_price = low if role == "SUPPORT" else high
 
-    touching = candle_touch.find_touching_line(htf_states, role, touch_price)
+    touching = candle_touch.find_touching_line(htf_states, role, touch_price, hs.close)
     if touching is None:
         return
     level_tf, level_source = touching

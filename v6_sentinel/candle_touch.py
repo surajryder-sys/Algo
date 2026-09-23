@@ -23,7 +23,11 @@ bearish/supply OB zone ("no_long_buffer") -> confirms a BEARISH signal.
 HTF LINES -- SAME-CANDLE ONLY: the pattern candle's own high (star) or low
 (hammer) must reach the line's value, same bar, no exception. Scope:
 D1/H4/H2/H1/M30/M15/M10 (CANDLE_HTF_TIMEFRAMES) -- native for every
-timeframe except M15 (bridge-only, needs a BridgeBarFlipTracker).
+timeframe except M15 (bridge-only, needs a BridgeBarFlipTracker). ALSO
+(added 2026-09-23) that same candle's own CLOSE must stay on the correct
+side of the line -- see find_touching_line()'s own docstring for the
+full "why" (a wick that reaches a line but then closes past it is a clean
+break, not a genuine touch/rejection, and no longer a valid reference).
 
 OB ZONES from RM-ICT's own Block (nlb_nsb_block.BlockStore, read-only) --
 "only untested (virgin) zones", TIME-AWARE (virgin_as_of(), fixed
@@ -94,10 +98,23 @@ def compute_htf_states(symbol: str, tracker) -> dict[int, Optional[htf_levels.HT
     return {tf: htf_levels.compute_htf_state(symbol, tf, tracker) for tf in CANDLE_HTF_TIMEFRAMES}
 
 
-def find_touching_line(htf_states: dict, role: str, touch_price: float) -> Optional[tuple[int, str]]:
+def find_touching_line(htf_states: dict, role: str, touch_price: float, close_price: float) -> Optional[tuple[int, str]]:
     """(level_tf, level_source) of the first HTF line of this role touched
     by touch_price (the pattern candle's own low for SUPPORT, high for
-    RESISTANCE) -- None if none qualify."""
+    RESISTANCE) -- None if none qualify.
+
+    ALSO requires close_price (that SAME candle's own close) to sit on the
+    CORRECT side of the line -- above it for SUPPORT, below it for
+    RESISTANCE (added 2026-09-23, user: "any level becomes valid to close
+    only if qualifying exit is above the support price line, likewise
+    qualifying close should be under resistance"). A wick that merely
+    reaches a line isn't enough on its own -- if the candle actually
+    CLOSED past the line (a clean break, not a rejection/bounce), that
+    line no longer counts as a meaningful support/resistance reference for
+    this candle, regardless of how far the wick reached. Same "closed
+    candle, not just a wick" validity principle already used for SL-line
+    usability elsewhere in this project (a line must sit on the correct
+    side of both the entry price and the last closed candle)."""
     return next(
         (
             (level_tf, level.source)
@@ -105,6 +122,7 @@ def find_touching_line(htf_states: dict, role: str, touch_price: float) -> Optio
             for level in state.levels
             if level.role == role
             and ((touch_price <= level.value) if role == "SUPPORT" else (touch_price >= level.value))
+            and ((close_price > level.value) if role == "SUPPORT" else (close_price < level.value))
         ),
         None,
     )

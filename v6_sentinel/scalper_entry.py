@@ -146,7 +146,7 @@ def find_signal(symbol: str, tracker, block: BlockStore, eligibility: ScalperEli
             sub_tag: Optional[str] = None
             base_timeframe_name = ""
             trigger_label = ""
-            touching_line = candle_touch.find_touching_line(htf_states, role, touch_price)
+            touching_line = candle_touch.find_touching_line(htf_states, role, touch_price, hs.close)
             if touching_line is not None:
                 level_tf, level_source = touching_line
                 sub_tag, trigger_label = "STR", f"M{level_tf}/{level_source}"
