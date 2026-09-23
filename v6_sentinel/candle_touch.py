@@ -22,8 +22,9 @@ bearish/supply OB zone ("no_long_buffer") -> confirms a BEARISH signal.
 
 HTF LINES -- SAME-CANDLE ONLY: the pattern candle's own high (star) or low
 (hammer) must reach the line's value, same bar, no exception. Scope:
-D1/H4/H2/H1/M30/M15/M10 (CANDLE_HTF_TIMEFRAMES) -- native for every
-timeframe except M15 (bridge-only, needs a BridgeBarFlipTracker). ALSO
+D1/H4/H2/H1/M30/M15/M10/M5 (CANDLE_HTF_TIMEFRAMES, M5 added 2026-09-23) --
+native for every timeframe except M15 and M5 (bridge-only, needs a
+BridgeBarFlipTracker). ALSO
 (added 2026-09-23) that same candle's own CLOSE must stay on the correct
 side of the line -- see find_touching_line()'s own docstring for the
 full "why" (a wick that reaches a line but then closes past it is a clean
@@ -74,8 +75,10 @@ from v6_sentinel.nlb_nsb_block import BlockZone
 
 CANDLE_TIMEFRAMES = (3, 5)  # M3, M5 -- pattern source timeframes, shared by every caller
 
-# D1, H4, H2, H1, M30, M15, M10 -- HTF line touch scope, shared by every caller.
-CANDLE_HTF_TIMEFRAMES = (1440, 240, 120, 60, 30, 15, 10)
+# D1, H4, H2, H1, M30, M15, M10, M5 -- HTF line touch scope, shared by every caller. M5 added
+# 2026-09-23 (user: "add m5 as well on HTF support and resistance") -- bridge-only (see
+# bridge.BRIDGE_ONLY_TIMEFRAMES), same as M15, already fully supported by htf_levels.compute_htf_state.
+CANDLE_HTF_TIMEFRAMES = (1440, 240, 120, 60, 30, 15, 10, 5)
 
 HAMMER_ROLE, HAMMER_DIRECTION = "SUPPORT", 1
 STAR_ROLE, STAR_DIRECTION = "RESISTANCE", -1
