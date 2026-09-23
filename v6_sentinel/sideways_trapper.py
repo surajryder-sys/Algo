@@ -13,10 +13,20 @@ ACROSS ALL of RM-STR's 8 timeframes -- not per-timeframe -- since the whole
 point is "don't re-enter right where this direction just got stopped out,"
 regardless of which HTF line triggers the next attempt.
 
-Recording happens ONLY on a genuine SL_HIT close (never a manual close,
-square-off, Exit Manager close, or a win) -- reversal_main.py feeds this
-from trade_journal.TradeJournal.reconcile()'s own return value, which is
-the single source of truth for "was this actually an SL hit."
+WIDENED TO ANY RED CLOSE (2026-09-23, user: "dont just see trades which hit
+sl / also see trades which closed in red, which is closed via exit manager
+as well... its always entry level... from there +/- 5 points"): recording
+now happens on ANY close that nets a LOSS (profit_net < 0), regardless of
+exit_reason -- SL_HIT, CANDLEEXIT-*, LTFEXIT, BIASEXIT, SQOFF-in-red, all
+of it -- not just a literal SL_HIT. The reference price recorded is always
+the trade's own ENTRY price (never the exit/SL price), same as before.
+A REAL side effect of this change (not just an addition): a profitable
+SL_HIT (SL had trailed into profit before getting hit) no longer records
+anything -- only a genuine loss does, matching "don't re-enter near where
+we just LOST money," not "don't re-enter near any SL hit regardless of
+outcome." trend_main.py/reversal_main.py feed this from trade_journal.
+TradeJournal.reconcile()'s own return value (entry_price + profit_net),
+the single source of truth for both.
 
 RESET (user, 2026-09-22, simplified after discussion -- CISD does NOT reset
 it, only structure does): the recorded price for a direction is cleared the
@@ -57,9 +67,11 @@ class SidewaysTrapper:
     def _save(self) -> None:
         self._path.write_text(json.dumps(self._state))
 
-    def record_sl_hit(self, direction: int, entry_price: float, m15_structure: Optional[int]) -> None:
-        """Call once, right when a trade in `direction` is confirmed SL-hit --
-        overwrites whatever was recorded for that direction before."""
+    def record_loss(self, direction: int, entry_price: float, m15_structure: Optional[int]) -> None:
+        """Call once, right when a trade in `direction` closes at a net loss --
+        any exit_reason, not just SL_HIT (see module docstring's own WIDENED
+        TO ANY RED CLOSE section) -- overwrites whatever was recorded for
+        that direction before."""
         self._state[str(direction)] = {"price": entry_price, "m15_structure": m15_structure}
         self._save()
 

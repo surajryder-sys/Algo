@@ -434,12 +434,13 @@ def run_once(rt: _SymbolRuntime) -> None:
     if rt.journal is not None:
         tm_exits = rt.journal.reconcile(open_tickets)
         for exit_rec in tm_exits:
-            if exit_rec.get("exit_reason") == "SL_HIT" and rt.trapper is not None:
+            if exit_rec.get("profit_net", 0) < 0 and rt.trapper is not None:
                 exit_direction = 1 if exit_rec.get("direction") == "BUY" else -1
                 m15_structure_now = gate.structure if gate is not None else None
-                rt.trapper.record_sl_hit(exit_direction, exit_rec["entry_price"], m15_structure_now)
-                print(f"[V6S-TM] Sideways Trapper recorded {exit_rec['direction']} SL-hit @ "
-                      f"{exit_rec['entry_price']:.3f} -- next M5/M3 {exit_rec['direction']} needs to be "
+                rt.trapper.record_loss(exit_direction, exit_rec["entry_price"], m15_structure_now)
+                print(f"[V6S-TM] Sideways Trapper recorded {exit_rec['direction']} loss "
+                      f"({exit_rec.get('exit_reason')}) @ entry {exit_rec['entry_price']:.3f} -- "
+                      f"next M5/M3 {exit_rec['direction']} needs to be "
                       f"{cfg.sideways_trap_min_distance_points:.1f}+ points away")
     rt.sl_mgr.prune(open_tickets)
     rt.tm_mgr.prune(open_tickets)

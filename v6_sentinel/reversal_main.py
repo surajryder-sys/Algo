@@ -624,11 +624,12 @@ def run_once(rt: _SymbolRuntime) -> None:
     str_positions = broker.get_positions(cfg.symbol, cfg.magic_number)
     str_exits = rt.journal_str.reconcile({p.ticket for p in str_positions})
     for exit_rec in str_exits:
-        if exit_rec.get("exit_reason") == "SL_HIT" and rt.trapper_str is not None:
+        if exit_rec.get("profit_net", 0) < 0 and rt.trapper_str is not None:
             exit_direction = 1 if exit_rec.get("direction") == "BUY" else -1
-            rt.trapper_str.record_sl_hit(exit_direction, exit_rec["entry_price"], m15_structure)
-            print(f"[V6S-STR] Sideways Trapper recorded {exit_rec['direction']} SL-hit @ "
-                  f"{exit_rec['entry_price']:.3f} -- next {exit_rec['direction']} needs to be "
+            rt.trapper_str.record_loss(exit_direction, exit_rec["entry_price"], m15_structure)
+            print(f"[V6S-STR] Sideways Trapper recorded {exit_rec['direction']} loss "
+                  f"({exit_rec.get('exit_reason')}) @ entry {exit_rec['entry_price']:.3f} -- "
+                  f"next {exit_rec['direction']} needs to be "
                   f"{cfg.sideways_trap_min_distance_points:.1f}+ points away")
     rt.sl_mgr_str.prune({p.ticket for p in str_positions})
     rt.tm_mgr_str.prune({p.ticket for p in str_positions})
