@@ -54,6 +54,11 @@ class TMSymbolConfig:
     partial1_fraction: float
     partial2_trigger_points: float
     partial2_fraction: float
+    # TYPE 2 booking (2026-09-23) -- wider trigger points used INSTEAD of the two above whenever
+    # M5+M15 structure both agree with the open trade's own direction; same fractions either way.
+    # See trade_manager.py's own module docstring for the full rule.
+    type2_partial1_trigger_points: float
+    type2_partial2_trigger_points: float
 
     magic_number: int
     bias_timeframe: int                    # M15
@@ -92,6 +97,8 @@ _SYMBOL_DEFAULTS: dict[str, dict] = {
         partial1_fraction=0.70,
         partial2_trigger_points=15.0,
         partial2_fraction=0.15,
+        type2_partial1_trigger_points=15.0,   # user's own explicit numbers, 2026-09-23
+        type2_partial2_trigger_points=20.0,
         magic_number=26091803,
         bias_timeframe=15,
         execution_timeframes=(5, 3),   # M3 added 2026-09-22, its own stricter rule -- see trend_entry.py
@@ -127,6 +134,10 @@ def load_symbol_config(symbol: str) -> TMSymbolConfig:
         partial1_fraction=float(os.getenv(prefix + "PARTIAL1_FRACTION", str(d["partial1_fraction"]))),
         partial2_trigger_points=float(os.getenv(prefix + "PARTIAL2_TRIGGER_POINTS", str(d["partial2_trigger_points"]))),
         partial2_fraction=float(os.getenv(prefix + "PARTIAL2_FRACTION", str(d["partial2_fraction"]))),
+        type2_partial1_trigger_points=float(os.getenv(prefix + "TYPE2_PARTIAL1_TRIGGER_POINTS",
+                                                      str(d["type2_partial1_trigger_points"]))),
+        type2_partial2_trigger_points=float(os.getenv(prefix + "TYPE2_PARTIAL2_TRIGGER_POINTS",
+                                                      str(d["type2_partial2_trigger_points"]))),
         magic_number=int(os.getenv(prefix + "MAGIC_NUMBER", str(d["magic_number"]))),
         bias_timeframe=d["bias_timeframe"],
         execution_timeframes=d["execution_timeframes"],

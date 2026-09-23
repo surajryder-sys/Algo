@@ -57,6 +57,11 @@ class RMSymbolConfig:
     partial1_fraction: float
     partial2_trigger_points: float
     partial2_fraction: float
+    # TYPE 2 booking (2026-09-23) -- wider trigger points used INSTEAD of the two above whenever
+    # M5+M15 structure both agree with the open trade's own direction; same fractions either way.
+    # See trade_manager.py's own module docstring for the full rule. Shared by both STR and ICT.
+    type2_partial1_trigger_points: float
+    type2_partial2_trigger_points: float
 
     # STR component (HTF-levels-based, reversal_entry.py).
     magic_number: int
@@ -132,6 +137,8 @@ _SYMBOL_DEFAULTS: dict[str, dict] = {
         partial1_fraction=0.70,
         partial2_trigger_points=15.0,
         partial2_fraction=0.15,
+        type2_partial1_trigger_points=15.0,   # user's own explicit numbers, 2026-09-23
+        type2_partial2_trigger_points=20.0,
         magic_number=26091801,
         ict_magic_number=26091802,
         ict_guard_buffer_points=5.0,
@@ -168,6 +175,10 @@ def load_symbol_config(symbol: str) -> RMSymbolConfig:
         partial1_fraction=float(os.getenv(prefix + "PARTIAL1_FRACTION", str(d["partial1_fraction"]))),
         partial2_trigger_points=float(os.getenv(prefix + "PARTIAL2_TRIGGER_POINTS", str(d["partial2_trigger_points"]))),
         partial2_fraction=float(os.getenv(prefix + "PARTIAL2_FRACTION", str(d["partial2_fraction"]))),
+        type2_partial1_trigger_points=float(os.getenv(prefix + "TYPE2_PARTIAL1_TRIGGER_POINTS",
+                                                      str(d["type2_partial1_trigger_points"]))),
+        type2_partial2_trigger_points=float(os.getenv(prefix + "TYPE2_PARTIAL2_TRIGGER_POINTS",
+                                                      str(d["type2_partial2_trigger_points"]))),
         magic_number=int(os.getenv(prefix + "MAGIC_NUMBER", str(d["magic_number"]))),
         state_file=config.state_file_for("reversal_manager_state", symbol),
         sl_state_file=config.state_file_for("reversal_manager_sl_state", symbol),

@@ -280,6 +280,7 @@ def _run_sl_manager(cfg: TMSymbolConfig, mgr: sl_manager.SLManager, tm_mgr: trad
 
 
 def _run_trade_manager(cfg: TMSymbolConfig, mgr: trade_manager.TradeManager, position,
+                       tracker: Optional[BridgeBarFlipTracker] = None,
                        journal: Optional[trade_journal.TradeJournal] = None) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
@@ -289,8 +290,18 @@ def _run_trade_manager(cfg: TMSymbolConfig, mgr: trade_manager.TradeManager, pos
     symbol_info = mt5.symbol_info(cfg.symbol)
     volume_step = symbol_info.volume_step if symbol_info is not None else 0.01
 
+    # TYPE 2 booking gate (2026-09-23) -- see trade_manager.py's own docstring. "Parent and primary"
+    # = M5 AND M15 (structure only, same convention reversal_ict.py's M1 gate and reversal_main.py's
+    # M3-reversal-exit already use), BOTH agreeing with this position's own direction.
+    m5_fs = tracker.update(cfg.symbol, 5) if tracker is not None else None
+    m15_fs = tracker.update(cfg.symbol, 15) if tracker is not None else None
+    m5_structure = m5_fs.confirmed.value if m5_fs is not None else None
+    m15_structure = m15_fs.confirmed.value if m15_fs is not None else None
+    structure_agrees = m5_structure == direction and m15_structure == direction
+
     outcome = mgr.evaluate(position.ticket, direction, position.price_open, current_price,
-                           position.volume, has_tp, volume_step, entry_comment=position.comment)
+                           position.volume, has_tp, volume_step, entry_comment=position.comment,
+                           structure_agrees=structure_agrees)
     if outcome is None:
         return
     volume, label = outcome
@@ -332,7 +343,8 @@ def _build_runtime(symbol: str) -> _SymbolRuntime:
         eligibility=trend_entry.TrendEligibilityStore(cfg.eligibility_state_file),
         sl_mgr=sl_manager.SLManager(cfg.sl_state_file, cfg.breakeven_trigger_points, cfg.sl_buffer),
         tm_mgr=trade_manager.TradeManager(cfg.state_file, cfg.partial1_trigger_points, cfg.partial1_fraction,
-                                          cfg.partial2_trigger_points, cfg.partial2_fraction),
+                                          cfg.partial2_trigger_points, cfg.partial2_fraction,
+                                          cfg.type2_partial1_trigger_points, cfg.type2_partial2_trigger_points),
         feed_watch=BiasFeedWatch(),
         journal=trade_journal.TradeJournal(cfg.trade_journal_file, "TM-STR", cfg.symbol),
         trapper=sideways_trapper.SidewaysTrapper(cfg.sideways_trapper_state_file),
@@ -475,7 +487,7 @@ def run_once(rt: _SymbolRuntime) -> None:
     position = _current_position(cfg)
     if position is not None:
         _run_sl_manager(cfg, rt.sl_mgr, rt.tm_mgr, position, rt.tracker, rt.journal)
-        _run_trade_manager(cfg, rt.tm_mgr, position, rt.journal)
+        _run_trade_manager(cfg, rt.tm_mgr, position, rt.tracker, rt.journal)
 
 
 def main() -> None:

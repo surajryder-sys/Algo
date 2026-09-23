@@ -3,7 +3,7 @@ Ported verbatim from v5_sentinel/trade_manager.py (2026-09-18) -- keyed
 by MT5 ticket (globally unique per account, not per symbol), so no
 multi-instrument change needed.
 
-Rule:
+Rule (TYPE 1, the default):
   - +10 points in favor -> close 70% of the ORIGINAL entry volume.
   - +15 points in favor -> close another 15% of the ORIGINAL entry volume.
   - Remaining 15% rides on SL Manager's trailing SL, no fixed TP.
@@ -17,6 +17,35 @@ Rule:
     resumes normal evaluation from whatever the current price is.
     Re-placing a TP pauses again. Fully reactive to current TP presence,
     not a one-time latch.
+
+TYPE 2 -- STRUCTURE-AGREEMENT MODE (added 2026-09-23, user's own words):
+"when all parent and primary structure agrees, tp manager switches the
+mode to type2... type 1 usual booking... this is okay when primary and
+parent dont agree with the open trade direction, type 1 booking takes
+care, but the moment they agree, the trade manager should book according
+to type 2... first partial book at 15 points from entry, second partial
+at 20 points from entry, 3rd left over for auto close on opposite setup
+as it is!" -- wider trigger points (15/20 instead of 10/15), SAME
+fractions (70%/15%/15%) and SAME leftover handling as Type 1, "similar to
+type 1" in every way except the two trigger points. The caller decides
+which type is active EACH cycle (structure_agrees: bool, passed into
+evaluate()) -- this module stays agnostic to what "parent and primary
+structure" even means (M5+M15 ATR-dual confirmed structure both agreeing
+with the position's own direction, same convention reversal_ict.py's own
+M1 gate and reversal_main.py's own M3-reversal-exit already use), same
+"caller computes it, this module just consumes a bool" pattern
+with_direction_flip_after_entry already established in sl_manager.py.
+Evaluated FRESH every cycle, independently for partial1 and partial2 --
+NOT locked in once at entry or once partial1 fires, so it's possible
+(if structure agreement itself changes mid-trade) for partial1 to use one
+type's trigger and partial2 the other's; each threshold check simply asks
+"which type is active RIGHT NOW" at the moment IT is checked.
+
+On top of Trade Manager's own booking, Exit Manager's own independent
+components (bias flip / LTF touch / CandleExit / RM's own square-off and
+M3-reversal-exit) can still close the WHOLE position at any time,
+unchanged by any of this -- Trade Manager only ever manages the profit-
+booking progress of a position that's still open.
 
 Position-lifecycle decisions (square-off on a valid opposite setup, or on
 a same-direction resolved trap once partially cut) live in each
@@ -61,12 +90,16 @@ def _round_volume(volume: float, volume_step: float) -> float:
 
 class TradeManager:
     def __init__(self, path: str, partial1_trigger_points: float, partial1_fraction: float,
-                partial2_trigger_points: float, partial2_fraction: float):
+                partial2_trigger_points: float, partial2_fraction: float,
+                type2_partial1_trigger_points: float = 15.0, type2_partial2_trigger_points: float = 20.0):
         self._path = Path(path)
         self._partial1_trigger = partial1_trigger_points
         self._partial1_fraction = partial1_fraction
         self._partial2_trigger = partial2_trigger_points
         self._partial2_fraction = partial2_fraction
+        # TYPE 2 -- same fractions as Type 1, only the trigger points differ (see module docstring).
+        self._type2_partial1_trigger = type2_partial1_trigger_points
+        self._type2_partial2_trigger = type2_partial2_trigger_points
         self._state: dict[int, PositionTMState] = {}
         self._load()
 
@@ -110,12 +143,16 @@ class TradeManager:
 
     def evaluate(self, ticket: int, direction: int, entry_price: float, current_price: float,
                 current_volume: float, has_manual_tp: bool, volume_step: float,
-                entry_comment: str = "") -> Optional[tuple[float, str]]:
+                entry_comment: str = "", structure_agrees: bool = False) -> Optional[tuple[float, str]]:
         """Returns (volume_to_close, label) for THIS cycle's partial close,
         or None if nothing to do. label is "partial1"/"partial2", purely
         for logging/comments. entry_comment is only ever used on first
         sighting (see get_entry_comment) -- passing it on later calls is
-        harmless, it's just ignored once the state already exists."""
+        harmless, it's just ignored once the state already exists.
+
+        structure_agrees: True picks TYPE 2's wider trigger points (see
+        module docstring) for THIS call's own threshold checks; False (the
+        default) uses TYPE 1's. Fractions never change between the two."""
         state = self._state.get(ticket)
         if state is None:
             # First sighting -- original_volume is whatever's open right
@@ -132,8 +169,10 @@ class TradeManager:
             return None  # paused entirely, no state progress either
 
         favor = (current_price - entry_price) if direction == 1 else (entry_price - current_price)
+        partial1_trigger = self._type2_partial1_trigger if structure_agrees else self._partial1_trigger
+        partial2_trigger = self._type2_partial2_trigger if structure_agrees else self._partial2_trigger
 
-        if not state.partial1_done and favor >= self._partial1_trigger:
+        if not state.partial1_done and favor >= partial1_trigger:
             vol = _round_volume(state.original_volume * self._partial1_fraction, volume_step)
             vol = min(vol, current_volume)
             if vol > 0:
@@ -141,7 +180,7 @@ class TradeManager:
                 self._save()
                 return vol, "partial1"
 
-        if state.partial1_done and not state.partial2_done and favor >= self._partial2_trigger:
+        if state.partial1_done and not state.partial2_done and favor >= partial2_trigger:
             vol = _round_volume(state.original_volume * self._partial2_fraction, volume_step)
             vol = min(vol, current_volume)
             if vol > 0:

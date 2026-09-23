@@ -329,6 +329,7 @@ def _check_m3_reversal_exit(cfg: RMSymbolConfig, component: str, position, track
 
 
 def _run_trade_manager(cfg: RMSymbolConfig, component: str, mgr: trade_manager.TradeManager, position,
+                       tracker: Optional[BridgeBarFlipTracker] = None,
                        journal: Optional[trade_journal.TradeJournal] = None) -> None:
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     bid, ask = broker.get_tick_price(cfg.symbol)
@@ -338,8 +339,18 @@ def _run_trade_manager(cfg: RMSymbolConfig, component: str, mgr: trade_manager.T
     symbol_info = mt5.symbol_info(cfg.symbol)
     volume_step = symbol_info.volume_step if symbol_info is not None else 0.01
 
+    # TYPE 2 booking gate (2026-09-23) -- see trade_manager.py's own docstring. "Parent and primary"
+    # = M5 AND M15 (structure only, same convention reversal_ict.py's M1 gate and this module's own
+    # M3-reversal-exit already use), BOTH agreeing with this position's own direction.
+    m5_fs = tracker.update(cfg.symbol, 5) if tracker is not None else None
+    m15_fs = tracker.update(cfg.symbol, 15) if tracker is not None else None
+    m5_structure = m5_fs.confirmed.value if m5_fs is not None else None
+    m15_structure = m15_fs.confirmed.value if m15_fs is not None else None
+    structure_agrees = m5_structure == direction and m15_structure == direction
+
     outcome = mgr.evaluate(position.ticket, direction, position.price_open, current_price,
-                           position.volume, has_tp, volume_step, entry_comment=position.comment)
+                           position.volume, has_tp, volume_step, entry_comment=position.comment,
+                           structure_agrees=structure_agrees)
     if outcome is None:
         return
     volume, label = outcome
@@ -481,10 +492,12 @@ def _build_runtime(symbol: str) -> _SymbolRuntime:
         cfg=cfg,
         sl_mgr_str=sl_manager.SLManager(cfg.sl_state_file, cfg.breakeven_trigger_points, cfg.sl_buffer),
         tm_mgr_str=trade_manager.TradeManager(cfg.state_file, cfg.partial1_trigger_points, cfg.partial1_fraction,
-                                              cfg.partial2_trigger_points, cfg.partial2_fraction),
+                                              cfg.partial2_trigger_points, cfg.partial2_fraction,
+                                              cfg.type2_partial1_trigger_points, cfg.type2_partial2_trigger_points),
         sl_mgr_ict=sl_manager.SLManager(cfg.ict_sl_state_file, cfg.breakeven_trigger_points, cfg.sl_buffer),
         tm_mgr_ict=trade_manager.TradeManager(cfg.ict_state_file, cfg.partial1_trigger_points, cfg.partial1_fraction,
-                                              cfg.partial2_trigger_points, cfg.partial2_fraction),
+                                              cfg.partial2_trigger_points, cfg.partial2_fraction,
+                                              cfg.type2_partial1_trigger_points, cfg.type2_partial2_trigger_points),
         store=htf_levels.LevelEligibilityStore(cfg.levels_state_file),
         ict_eligibility=reversal_ict.ICTEligibilityStore(cfg.ict_eligibility_state_file),
         sticky=ict_guard.ICTGuardStickyStore(cfg.ict_guard_sticky_state_file),
@@ -617,13 +630,13 @@ def run_once(rt: _SymbolRuntime) -> None:
         if _check_m3_reversal_exit(cfg, "STR", str_position, rt.tracker, rt.journal_str):
             continue   # closed this cycle -- ticket no longer exists, nothing left to manage
         _run_sl_manager(cfg, "STR", rt.sl_mgr_str, rt.tm_mgr_str, str_position, rt.tracker, rt.journal_str)
-        _run_trade_manager(cfg, "STR", rt.tm_mgr_str, str_position, rt.journal_str)
+        _run_trade_manager(cfg, "STR", rt.tm_mgr_str, str_position, rt.tracker, rt.journal_str)
 
     for ict_position in broker.get_positions(cfg.symbol, cfg.ict_magic_number):
         if _check_m3_reversal_exit(cfg, "ICT", ict_position, rt.tracker, rt.journal_ict):
             continue   # closed this cycle -- ticket no longer exists, nothing left to manage
         _run_sl_manager(cfg, "ICT", rt.sl_mgr_ict, rt.tm_mgr_ict, ict_position, rt.tracker, rt.journal_ict)
-        _run_trade_manager(cfg, "ICT", rt.tm_mgr_ict, ict_position, rt.journal_ict)
+        _run_trade_manager(cfg, "ICT", rt.tm_mgr_ict, ict_position, rt.tracker, rt.journal_ict)
 
 
 def main() -> None:
