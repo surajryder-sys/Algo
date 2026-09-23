@@ -4,7 +4,7 @@ which manager opened them. Rebuilt from scratch 2026-09-21 (user: "lets re build
 manager from the beginning"), replacing the earlier entry-watching / timeframe-hierarchy
 design entirely.
 
-THREE COMPONENTS (user's own split, 2026-09-21/22):
+FOUR COMPONENTS (user's own split, 2026-09-21/22/23):
   1. BIAS EXIT MANAGER (exit_manager_bias.py, built) -- a fresh M5 or M15 CISD closes every
      open position on the opposite side, across every manager, as long as that CISD's candle
      closed AFTER the position opened (an already-existing CISD never closes a trade). See
@@ -17,8 +17,14 @@ THREE COMPONENTS (user's own split, 2026-09-21/22):
      touches an HTF support level (same candle) closes SELL positions; a star on M3/M5 that
      touches an HTF resistance level (same candle) closes BUY positions. See
      exit_manager_candle.py's own docstring for the exact rule.
+  4. SCALPER-ONLY M3/M5 EXIT (exit_manager_bias.run_once_scalper(), built 2026-09-23, user:
+     "scalper trade can be exited when a m5/m3 opposite cisd event occurs") -- the SAME
+     mechanic as component 1, but scoped to ONLY Scalper's own positions and checking M3/M5
+     (matching Scalper's own faster pattern-entry timeframes) instead of M5/M15. Scalper is
+     already covered by component 1's own shared M5/M15 rule too -- this is a purely
+     ADDITIONAL, faster watcher on top, not a replacement.
 
-All three additionally skip a position that currently carries a manual TP
+All four additionally skip a position that currently carries a manual TP
 (broker.has_manual_tp()), across every manager, no exemptions.
 
 ALSO RUNS (alert-only, sends no orders, not gated by enable_trading): zone_touch_alert.py --
@@ -53,7 +59,8 @@ def run_once(rt: _SymbolRuntime) -> None:
     exit_manager_bias.run_once(rt.cfg)                        # component 1: Bias Exit Manager
     exit_manager_ltf.run_once(rt.cfg, rt.ltf)                   # component 2: LTF Exit Manager
     exit_manager_candle.run_once(rt.cfg, rt.candle)               # component 3: EA-CandleExit
-    zone_touch_alert.run_once(rt.cfg, rt.zone_alert)                # alert-only: Zone Touch Alert
+    exit_manager_bias.run_once_scalper(rt.cfg)                      # component 4: Scalper-only M3/M5 exit
+    zone_touch_alert.run_once(rt.cfg, rt.zone_alert)                  # alert-only: Zone Touch Alert
 
 
 def main() -> None:
@@ -64,7 +71,8 @@ def main() -> None:
     for c in cfgs:
         alert_status = "on" if (c.alerts_bot_token and c.alerts_chat_id) else "off (unconfigured)"
         print(f"[V6S-XM] {c.symbol} starting -- enable_trading={c.enable_trading} poll={c.poll_seconds}s "
-              f"watching={[s.name for s in c.sources]} components=[bias, ltf, candle] zone_touch_alert={alert_status}")
+              f"watching={[s.name for s in c.sources]} components=[bias, ltf, candle, scalper-m3m5] "
+              f"zone_touch_alert={alert_status}")
         broker.connect(c.symbol, c.mt5_terminal_path, c.mt5_login, c.mt5_password, c.mt5_server)
     try:
         while True:
