@@ -17,14 +17,15 @@ confirmed bullish signal (support touch + bullish CISD) closes SELL
 positions -- across every manager (TM-STR/RM-STR/RM-ICT/SCALPER alike), same
 no-exemptions scope Component 1 (exit_manager_bias.py) already uses.
 
-M3-ONLY (revised 2026-09-23, superseding the same-day M1+M3 fallback
-below): M1 removed entirely -- _CISD_TIMEFRAMES is now just (3,), so the
-CISD confirmation is M3-only. The touch-arming mechanism (support/
-resistance touch arms a level in its own implied direction) and the
-close-side validity check are unchanged, just evaluated against M3's own
-fresh_cisd() exclusively now. (Historical note: earlier the same day this
-was M1-tried-first-then-M3-fallback, briefly (1, 3) -- that shape is gone,
-kept here only so the git history around 2026-09-23 makes sense.)
+M1 BACK (re-added 2026-09-23, same day it was removed -- user: "can we
+add back this level touch plus m1 cisd confirmation as well"):
+_CISD_TIMEFRAMES is (1, 3) again -- M1 tried first each cycle, M3 a
+fallback when M1 doesn't qualify, same shape and same order as the
+original M3-FALLBACK design. (Historical note: for a brief window the
+same day this was M3-only, (3,) -- that shape is gone. See git history
+around 2026-09-23 for the full back-and-forth.) The touch-arming
+mechanism and the close-side validity check are unchanged throughout
+all of this, only which CISD timeframe(s) get checked has moved.
 
 CISD-CANDLE CLOSE-SIDE VALIDITY (added 2026-09-23, user's own worked
 example: "4312 was 2h support, m1 bullish cisd close qualifying below
@@ -67,7 +68,7 @@ manual tp is placed so that i can understand the specified logic works"),
 via telegram_alerts.send_if_configured().
 
 "ALREADY-EXISTING CISD DOESN'T COUNT": same guard as Component 1 -- only a
-position opened BEFORE the confirming M3 candle's own CLOSE time
+position opened BEFORE the confirming M1/M3 candle's own CLOSE time
 (cisd.bar_time + cisd_tf * 60) qualifies, so a position this exact same
 signal just opened is never immediately closed by it.
 
@@ -80,11 +81,11 @@ still counts.
 NOTE: unlike RM-STR's own entry use of LevelEligibilityStore, this component
 NEVER calls mark_traded()/is_traded() for the "traded" concept -- there is no
 "only once" rule here (a still-armed level legitimately protects again on a
-LATER, separate M1 CISD confirmation if a new opposite position has opened in
-the meantime); only mark_touched()/is_touched() and sync()'s own
+LATER, separate M1/M3 CISD confirmation if a new opposite position has opened
+in the meantime); only mark_touched()/is_touched() and sync()'s own
 character-change invalidation are used. fresh_cisd()'s own one-shot-per-bar
 contract is what already stops this from re-triggering every single poll
-cycle within the same M3 bar -- once that bar closes without a fresh
+cycle within the same bar -- once that bar closes without a fresh
 confirmation, fresh_cisd() goes back to None until a genuinely new one fires.
 """
 from __future__ import annotations
@@ -102,7 +103,7 @@ if TYPE_CHECKING:
     from v6_sentinel.exit_manager_config import ExitManagerSymbolConfig, WatchedSource
 
 _DIR_LABEL = {1: "BUY", -1: "SELL"}
-_CISD_TIMEFRAMES = (3,)  # M3-only (2026-09-23) -- M1 removed, see module docstring's "M3-ONLY" section
+_CISD_TIMEFRAMES = (1, 3)  # M1 tried first, M3 fallback (re-added 2026-09-23) -- see module docstring's "M1 BACK" section
 
 # "all supports and resistances of all timeframes till M15" -- D1 through
 # M15, NOT RM-STR's own full 8-timeframe scope (htf_levels.HTF_TIMEFRAMES_MINUTES
@@ -181,8 +182,8 @@ def run_once(cfg: "ExitManagerSymbolConfig", rt: LTFExitRuntime) -> None:
         rt.last_tick_msc = int(tick.time_msc) if tick is not None else 0
     scan_touches(htf_states, rt.store, bid, ask, bid_low, ask_high)
 
-    # M3-only now (M1 removed, see module docstring's own "M3-ONLY" section) --
-    # _CISD_TIMEFRAMES is a single-element tuple, kept as a loop for minimal diff.
+    # M1 tried first; M3 only gets a chance if M1 has no fresh, matching-direction CISD this
+    # cycle (see module docstring's own "M1 BACK" section) -- both share the same rt.store.
     for cisd_tf in _CISD_TIMEFRAMES:
         cisd = cisd_bridge.fresh_cisd(cfg.symbol, cisd_tf)
         if cisd is None:
