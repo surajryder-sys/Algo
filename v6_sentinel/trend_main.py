@@ -101,7 +101,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import alerts, bridge, bridge_flip, broker, cisd_bridge, config, decision_log, flip_state, heartbeat, rates, sideways_trapper, sl_manager, telegram_alerts, trade_journal, trade_manager, trend_bias, trend_entry
+from v6_sentinel import alerts, bridge, bridge_flip, broker, cisd_bridge, config, decision_log, flip_state, heartbeat, position_size_manager, rates, session_manager, sideways_trapper, sl_manager, telegram_alerts, trade_journal, trade_manager, trend_bias, trend_entry
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.flip_state import far_near_line
 from v6_sentinel.trend_config import TMSymbolConfig, load_symbol_config
@@ -196,13 +196,15 @@ def _open_position(cfg: TMSymbolConfig, direction: int, sl: float, tag: str, ref
     "session closed") must not consume a valid setup that never got a
     position."""
     comment = _entry_comment(tag)
-    print(f"[V6S-TM-ENTRY] {cfg.symbol} {_DIR_LABEL[direction]} ({tag}) {ref_desc} sl={sl:.3f}")
+    # Position Size Manager -- halved lots during the 23:00-04:00 IST window (position_size_manager.py).
+    lots = cfg.night_lots if position_size_manager.is_night() else cfg.lots
+    print(f"[V6S-TM-ENTRY] {cfg.symbol} {_DIR_LABEL[direction]} ({tag}) {ref_desc} sl={sl:.3f} lots={lots}")
     if not cfg.enable_trading:
         print("[V6S-TM-ENTRY] enable_trading is false -- decision only, no order sent")
         decision_log.log(cfg.decision_log_file, "entry_decision_only", direction=_DIR_LABEL[direction],
-                         tag=tag, ref=ref_desc, sl=sl)
+                         tag=tag, ref=ref_desc, sl=sl, lots=lots)
         return True
-    result = broker.send_market_order(cfg.symbol, direction, cfg.lots, sl, cfg.magic_number,
+    result = broker.send_market_order(cfg.symbol, direction, lots, sl, cfg.magic_number,
                                       cfg.deviation_points, comment)
     if not result.ok:
         print(f"[V6S-TM-ENTRY] order_send failed: retcode={result.retcode} comment={result.comment}")
@@ -211,9 +213,9 @@ def _open_position(cfg: TMSymbolConfig, direction: int, sl: float, tag: str, ref
         return False
     print(f"[V6S-TM-ENTRY] filled, ticket={result.ticket}")
     decision_log.log(cfg.decision_log_file, "entry_filled", direction=_DIR_LABEL[direction], tag=tag,
-                     ref=ref_desc, sl=sl, ticket=result.ticket)
+                     ref=ref_desc, sl=sl, ticket=result.ticket, lots=lots)
     if journal is not None and result.ticket is not None:
-        journal.entry(result.ticket, _DIR_LABEL[direction], cfg.lots, sl, comment, logic or {})
+        journal.entry(result.ticket, _DIR_LABEL[direction], lots, sl, comment, logic or {})
     tf = (logic or {}).get("timeframe_minutes")
     telegram_alerts.send_if_configured(
         cfg.alerts_bot_token, cfg.alerts_chat_id,
@@ -316,6 +318,23 @@ def _run_trade_manager(cfg: TMSymbolConfig, mgr: trade_manager.TradeManager, pos
     current_price = bid if direction == 1 else ask
     has_tp = broker.has_manual_tp(position)
 
+    # Position Size Manager's NIGHT MODE booking (2026-09-24, user: "profit booking full at 10
+    # points... remaining exit rules and other logics remain untouched") -- REPLACES Type1/Type2
+    # partial booking entirely for the 23:00-04:00 IST window: a single FULL close the instant
+    # the position reaches NIGHT_PROFIT_TARGET_POINTS, no partials. Same manual-TP pause
+    # convention as normal booking. SL Manager/Exit Manager/Sideways Trapper are untouched --
+    # this function's only job either way is booking, never SL or Exit Manager's own closes.
+    if position_size_manager.is_night():
+        if has_tp or not position_size_manager.night_target_hit(direction, position.price_open, current_price):
+            return
+        tag = _extract_tag(mgr.get_entry_comment(position.ticket) or position.comment or "")
+        print(f"[V6S-TM-TM] #{position.ticket} NIGHT MODE full close -- "
+              f"{position_size_manager.NIGHT_PROFIT_TARGET_POINTS:.0f}+ points reached")
+        _close_position(cfg, position, "NIGHTFULL", tag, "NF", journal,
+                        {"rule": "night-mode full close at fixed points target",
+                         "target_points": position_size_manager.NIGHT_PROFIT_TARGET_POINTS})
+        return
+
     symbol_info = mt5.symbol_info(cfg.symbol)
     volume_step = symbol_info.volume_step if symbol_info is not None else 0.01
 
@@ -360,6 +379,7 @@ class _SymbolRuntime:
     tm_mgr: trade_manager.TradeManager
     feed_watch: BiasFeedWatch                  # the M15 bias feed: stale -> entries paused
     state_feed_watch: BiasFeedWatch = field(default_factory=BiasFeedWatch)   # the M5 state feed: stale -> square-off paused
+    session_watch: session_manager.SessionWindowWatch = field(default_factory=session_manager.SessionWindowWatch)  # daily no-new-trade windows
     journal: Optional[trade_journal.TradeJournal] = None                       # per-trade entry/exit logic
     trapper: Optional[sideways_trapper.SidewaysTrapper] = None                   # Sideways Trapper, M5+M3
 
@@ -480,9 +500,19 @@ def run_once(rt: _SymbolRuntime) -> None:
                              "m5_state": "strong" if m5_state == 1 else "weak"})
             position = _current_position(cfg)
 
+    session_blocked, session_window, session_event = rt.session_watch.update()
+    if session_event == "entered":
+        msg = f"[V6S-TM] {cfg.symbol} entering session window '{session_window}' -- new entries PAUSED until it ends (open trades still managed)."
+        print(msg)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, msg)
+    elif session_event == "left":
+        msg = f"[V6S-TM] {cfg.symbol} session window ended -- new entries resumed."
+        print(msg)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, msg)
+
     # 3. Entry: fresh M5/M3 CISD whose direction the M15 gate allows (M3 has its own stricter
-    #    rule, see trend_entry.py); paused while the bias feed is stale.
-    if gate is not None and not entries_blocked:
+    #    rule, see trend_entry.py); paused while the bias feed is stale OR a session window is active.
+    if gate is not None and not entries_blocked and not session_blocked:
         sig = trend_entry.find_signal(cfg.symbol, gate, cfg.execution_timeframes, rt.eligibility,
                                       cfg.sl_buffer, bid, ask, m5_state,
                                       rt.trapper, cfg.sideways_trap_min_distance_points)

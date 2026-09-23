@@ -44,6 +44,7 @@ def _env_bool(name: str, default: bool) -> bool:
 class TMSymbolConfig:
     symbol: str
     lots: float
+    night_lots: float          # position_size_manager.py's own 23:00-04:00 IST window
     deviation_points: int
     poll_seconds: float
     enable_trading: bool
@@ -93,6 +94,7 @@ class TMSymbolConfig:
 _SYMBOL_DEFAULTS: dict[str, dict] = {
     "XAUUSD": dict(
         lots=0.06,     # 0.06 (user, 2026-09-21): at 0.01 the 70%/15%/15% partial scheme degenerates -> 0.04/0.01/0.01
+        night_lots=0.03,   # user's own explicit number, 2026-09-24 -- 23:00-04:00 IST, see position_size_manager.py
         deviation_points=30,
         sl_buffer=2.0,
         breakeven_trigger_points=10.0,
@@ -128,6 +130,7 @@ def load_symbol_config(symbol: str) -> TMSymbolConfig:
     return TMSymbolConfig(
         symbol=symbol,
         lots=float(os.getenv(prefix + "LOTS", str(d["lots"]))),
+        night_lots=float(os.getenv(prefix + "NIGHT_LOTS", str(d["night_lots"]))),
         deviation_points=int(os.getenv(prefix + "DEVIATION_POINTS", str(d["deviation_points"]))),
         poll_seconds=float(os.getenv(prefix + "POLL_SECONDS", str(config.POLL_SECONDS))),
         enable_trading=_env_bool(prefix + "ENABLE_TRADING", False),

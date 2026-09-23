@@ -34,10 +34,10 @@ printed and logged but nothing touches the account.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
-from v6_sentinel import broker, config, decision_log, heartbeat, scalper_entry, telegram_alerts, trade_journal
+from v6_sentinel import broker, config, decision_log, heartbeat, position_size_manager, scalper_entry, session_manager, telegram_alerts, trade_journal
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.nlb_nsb_block import BlockStore
 from v6_sentinel.reversal_config import load_symbol_config as load_rm_config
@@ -68,6 +68,7 @@ class _SymbolRuntime:
     own_tp: ScalperOwnTPStore
     block_state_file: str                 # RM-ICT's own Block -- read-only, same source EA-CandleExit uses
     journal: trade_journal.TradeJournal
+    session_watch: session_manager.SessionWindowWatch = field(default_factory=session_manager.SessionWindowWatch)  # daily no-new-trade windows
 
 
 def _build_runtime(symbol: str) -> _SymbolRuntime:
@@ -92,14 +93,18 @@ def _open_position(cfg: ScalperSymbolConfig, sig: scalper_entry.ScalperSignal, j
     print(f"[V6S-SC-ENTRY] {cfg.symbol} {_DIR_LABEL[sig.direction]} -- {sig.pattern_name} on M{sig.pattern_tf} "
           f"(execution tf) touched {sig.sub_tag} {sig.base_timeframe_name} (base tf, {sig.trigger_label}) "
           f"sl={sig.sl:.3f} tp={sig.tp:.3f}")
+    # Position Size Manager -- halved lots during the 23:00-04:00 IST window (position_size_manager.py).
+    # Scalper's own TP stays a fixed 1:1 R:R off the SL distance regardless -- unaffected by lot size
+    # ("scalper to follow tp" -- user's own words, 2026-09-24: no change to its exit behavior).
+    lots = cfg.night_lots if position_size_manager.is_night() else cfg.lots
     detail = {"rule": "hammer/star + touch (Scalper)", "pattern": sig.pattern_name, "sub_source": sig.sub_tag,
               "execution_timeframe": f"M{sig.pattern_tf}", "base_timeframe": sig.base_timeframe_name,
-              "trigger": sig.trigger_label, "bar_time": sig.bar_time, "sl": sig.sl, "tp": sig.tp}
+              "trigger": sig.trigger_label, "bar_time": sig.bar_time, "sl": sig.sl, "tp": sig.tp, "lots": lots}
     if not cfg.enable_trading:
         print("[V6S-SC-ENTRY] enable_trading is false -- decision only, no order sent")
         decision_log.log(cfg.decision_log_file, "entry_decision_only", direction=_DIR_LABEL[sig.direction], **detail)
         return True
-    result = broker.send_market_order(cfg.symbol, sig.direction, cfg.lots, sig.sl, cfg.magic_number,
+    result = broker.send_market_order(cfg.symbol, sig.direction, lots, sig.sl, cfg.magic_number,
                                       cfg.deviation_points, comment, tp=sig.tp)
     if not result.ok:
         print(f"[V6S-SC-ENTRY] order_send failed: retcode={result.retcode} comment={result.comment}")
@@ -110,7 +115,7 @@ def _open_position(cfg: ScalperSymbolConfig, sig: scalper_entry.ScalperSignal, j
     decision_log.log(cfg.decision_log_file, "entry_filled", direction=_DIR_LABEL[sig.direction],
                      ticket=result.ticket, **detail)
     if result.ticket is not None:
-        journal.entry(result.ticket, _DIR_LABEL[sig.direction], cfg.lots, sig.sl, comment, detail)
+        journal.entry(result.ticket, _DIR_LABEL[sig.direction], lots, sig.sl, comment, detail)
         own_tp.set(result.ticket, sig.tp)
     telegram_alerts.send_if_configured(
         cfg.alerts_bot_token, cfg.alerts_chat_id,
@@ -124,6 +129,22 @@ def run_once(rt: _SymbolRuntime) -> None:
     cfg = rt.cfg
     bid, ask = broker.get_tick_price(cfg.symbol)
     block = BlockStore(rt.block_state_file)   # read-only, RM-ICT's own Block, never written to here
+
+    # Session Manager -- daily no-new-trade windows (session_manager.py). Scalper has no
+    # independent exit logic of its own (see module docstring), so this only ever suppresses
+    # NEW entries; a position opened before a window began is left entirely alone by this file
+    # regardless, same as always.
+    session_blocked, session_window, session_event = rt.session_watch.update()
+    if session_event == "entered":
+        msg = f"[V6S-SC] {cfg.symbol} entering session window '{session_window}' -- new entries PAUSED until it ends."
+        print(msg)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, msg)
+    elif session_event == "left":
+        msg = f"[V6S-SC] {cfg.symbol} session window ended -- new entries resumed."
+        print(msg)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, msg)
+    if session_blocked:
+        return
 
     sig = scalper_entry.find_signal(cfg.symbol, rt.tracker, block, rt.eligibility, cfg.sl_buffer, cfg.risk_reward,
                                     bid, ask)

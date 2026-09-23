@@ -110,7 +110,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import broker, cisd_bridge, config, decision_log, flip_state, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sideways_trapper, sl_manager, telegram_alerts, trade_journal, trade_manager
+from v6_sentinel import broker, cisd_bridge, config, decision_log, flip_state, heartbeat, htf_levels, ict_guard, position_size_manager, reversal_entry, reversal_ict, session_manager, sideways_trapper, sl_manager, telegram_alerts, trade_journal, trade_manager
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.bridge_flip import m3_far_line
 from v6_sentinel.alerts import send_alert as _send_alert
@@ -190,13 +190,15 @@ def _open_position(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, c
     still threaded through and instantiated (see _build_runtime()) so
     reinstating the check later is a small, isolated change."""
     comment = _entry_comment(component, tag)
-    print(f"[V6S-{component}-ENTRY] {_DIR_LABEL[direction]} ({tag}) {ref_desc} sl={sl:.3f}")
+    # Position Size Manager -- halved lots during the 23:00-04:00 IST window (position_size_manager.py).
+    lots = cfg.night_lots if position_size_manager.is_night() else cfg.lots
+    print(f"[V6S-{component}-ENTRY] {_DIR_LABEL[direction]} ({tag}) {ref_desc} sl={sl:.3f} lots={lots}")
     if not cfg.enable_trading:
         print(f"[V6S-{component}-ENTRY] enable_trading is false -- decision only, no order sent")
         decision_log.log(cfg.decision_log_file, "entry_decision_only", component=component,
-                         direction=_DIR_LABEL[direction], tag=tag, ref=ref_desc, sl=sl)
+                         direction=_DIR_LABEL[direction], tag=tag, ref=ref_desc, sl=sl, lots=lots)
         return True
-    result = broker.send_market_order(cfg.symbol, direction, cfg.lots, sl, magic_number,
+    result = broker.send_market_order(cfg.symbol, direction, lots, sl, magic_number,
                                       cfg.deviation_points, comment)
     if not result.ok:
         print(f"[V6S-{component}-ENTRY] order_send failed: retcode={result.retcode} comment={result.comment}")
@@ -206,9 +208,9 @@ def _open_position(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, c
         return False
     print(f"[V6S-{component}-ENTRY] filled, ticket={result.ticket}")
     decision_log.log(cfg.decision_log_file, "entry_filled", component=component, direction=_DIR_LABEL[direction],
-                     tag=tag, ref=ref_desc, sl=sl, ticket=result.ticket)
+                     tag=tag, ref=ref_desc, sl=sl, ticket=result.ticket, lots=lots)
     if journal is not None and result.ticket is not None:
-        journal.entry(result.ticket, _DIR_LABEL[direction], cfg.lots, sl, comment, logic or {})
+        journal.entry(result.ticket, _DIR_LABEL[direction], lots, sl, comment, logic or {})
     # STR signals carry timeframe_minutes (HTF line's own tf); ICT signals instead carry
     # timeframe_name (the zone's own base tf, e.g. "H1") + trigger (the CISD tf that fired it,
     # e.g. "M1CD") -- see reversal_entry.ReversalSignal / reversal_ict.ICTSignal.
@@ -386,6 +388,23 @@ def _run_trade_manager(cfg: RMSymbolConfig, component: str, mgr: trade_manager.T
     current_price = bid if direction == 1 else ask
     has_tp = broker.has_manual_tp(position)
 
+    # Position Size Manager's NIGHT MODE booking (2026-09-24) -- see trend_main.py's own
+    # identical block for the full rationale. REPLACES Type1/Type2 partial booking entirely for
+    # the 23:00-04:00 IST window: a single FULL close the instant the position reaches
+    # NIGHT_PROFIT_TARGET_POINTS, no partials. Shared by both STR and ICT (this function already
+    # is). SL Manager/Exit Manager/Sideways Trapper are untouched -- this function's only job
+    # either way is booking.
+    if position_size_manager.is_night():
+        if has_tp or not position_size_manager.night_target_hit(direction, position.price_open, current_price):
+            return
+        entry_tag = _extract_tag(mgr.get_entry_comment(position.ticket) or "")
+        print(f"[V6S-{component}-TM] #{position.ticket} NIGHT MODE full close -- "
+              f"{position_size_manager.NIGHT_PROFIT_TARGET_POINTS:.0f}+ points reached")
+        _close_position(cfg, component, position, "NIGHTFULL", entry_tag, "NF", journal,
+                        {"rule": "night-mode full close at fixed points target",
+                         "target_points": position_size_manager.NIGHT_PROFIT_TARGET_POINTS})
+        return
+
     symbol_info = mt5.symbol_info(cfg.symbol)
     volume_step = symbol_info.volume_step if symbol_info is not None else 0.01
 
@@ -534,6 +553,8 @@ class _SymbolRuntime:
     journal_str: Optional[trade_journal.TradeJournal] = None    # per-trade entry/exit logic, one per component
     journal_ict: Optional[trade_journal.TradeJournal] = None
     trapper_str: Optional[sideways_trapper.SidewaysTrapper] = None   # RM-STR only, see sideways_trapper.py
+    session_watch: session_manager.SessionWindowWatch = dataclasses.field(
+        default_factory=session_manager.SessionWindowWatch)  # daily no-new-trade windows -- both STR and ICT
 
 
 def _build_runtime(symbol: str) -> _SymbolRuntime:
@@ -597,6 +618,22 @@ def run_once(rt: _SymbolRuntime) -> None:
                                                 cfg.sl_buffer, bid, ask, cfg.ict_sl_override_points,
                                                 cfg.ict_touch_max_age_minutes,
                                                 m5_structure=m5_structure, m15_structure=m15_structure)
+
+    # Session Manager -- daily no-new-trade windows (session_manager.py). Touch-arming/eligibility
+    # syncing above already happened regardless; this only ever discards signals that would
+    # otherwise become NEW entries -- existing positions (SL/TM/Exit Manager, all below) are
+    # completely unaffected.
+    session_blocked, session_window, session_event = rt.session_watch.update()
+    if session_event == "entered":
+        msg = f"[V6S-RM] {cfg.symbol} entering session window '{session_window}' -- new entries PAUSED until it ends (open trades still managed)."
+        print(msg)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, msg)
+    elif session_event == "left":
+        msg = f"[V6S-RM] {cfg.symbol} session window ended -- new entries resumed."
+        print(msg)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, msg)
+    if session_blocked:
+        str_signals, ict_signals = [], []
 
     # Logged BEFORE _process_signal acts on them, listing EVERY qualifying
     # signal this cycle (not just the one that becomes a real position) --
