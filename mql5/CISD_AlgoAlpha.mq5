@@ -751,6 +751,16 @@ int OnInit()
    if(PublishToFile)
       FolderCreate(FileBridgeFolder, FILE_COMMON);
 
+   // OnCalculate only fires when MT5 delivers a NEW TICK to this specific chart, and MT5 can
+   // delay/throttle that delivery for a background/inactive chart or under heavy multi-chart,
+   // multi-indicator load on one shared terminal (this project's own setup). Real incident
+   // 2026-09-23: a fresh M5 CISD confirmed on its own bar close but wasn't published for
+   // ~520s for exactly this reason, so a TM-STR trade filled far from that bar's own open/
+   // close. This 250ms timer is a cheap, periodic nudge -- see OnTimer() below -- that pulls
+   // fresh rates independently and re-runs the SAME OnCalculate() already above, so
+   // publishing no longer depends on the platform happening to schedule this chart promptly.
+   EventSetMillisecondTimer(250);
+
    return(INIT_SUCCEEDED);
 }
 
@@ -806,8 +816,47 @@ int OnCalculate(const int rates_total,
 }
 
 //+------------------------------------------------------------------+
+//| Timer -- decouples bridge publish from this chart's own tick     |
+//| delivery (2026-09-23, see OnInit's own EventSetMillisecondTimer  |
+//| comment for the full rationale). Pulls the current rates          |
+//| independently via Copy*() -- these fill chronologically (index 0 |
+//| = oldest, matching OnCalculate's own built-in array convention,  |
+//| since a freshly-declared local array defaults to AS_SERIES=false |
+//| -- MQL5 documented behaviour) -- then re-runs the EXACT SAME     |
+//| OnCalculate() above with them. No duplicated logic, no new per-  |
+//| tick work: this only ever does what OnCalculate would already do |
+//| on its own next real tick, just not left waiting for one.        |
+//| prev_calculated is passed as `bars` (not 0/negative) so this     |
+//| never trips ResetAllCISDState -- only prev_calculated<=0 does.   |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   int bars = Bars(_Symbol, _Period);
+   if(bars < 2*SwingPeriod + 2)
+      return;
+
+   datetime time[];
+   double open[], high[], low[], close[];
+   long tick_volume[], volume[];
+   int spread[];
+
+   if(CopyTime(_Symbol, _Period, 0, bars, time) <= 0)   return;
+   if(CopyOpen(_Symbol, _Period, 0, bars, open) <= 0)   return;
+   if(CopyHigh(_Symbol, _Period, 0, bars, high) <= 0)   return;
+   if(CopyLow(_Symbol, _Period, 0, bars, low) <= 0)     return;
+   if(CopyClose(_Symbol, _Period, 0, bars, close) <= 0) return;
+   if(CopyTickVolume(_Symbol, _Period, 0, bars, tick_volume) <= 0) return;
+   if(CopyRealVolume(_Symbol, _Period, 0, bars, volume) < 0)  ArrayResize(volume, bars);  // real volume often unavailable for this symbol type -- zero-filled is fine, unused by this file's own logic
+   if(CopySpread(_Symbol, _Period, 0, bars, spread) < 0)      ArrayResize(spread, bars);  // same -- unused by this file's own logic
+
+   OnCalculate(bars, bars, time, open, high, low, close, tick_volume, volume, spread);
+}
+
+//+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   EventKillTimer();
+
    ObjectDelete(0, STATUS_LABEL_NAME);
    ObjectDelete(0, STATUS_LABEL_NAME2);
 
