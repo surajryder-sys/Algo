@@ -101,7 +101,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import alerts, bridge, bridge_flip, broker, cisd_bridge, config, decision_log, flip_state, heartbeat, rates, sideways_trapper, sl_manager, trade_journal, trade_manager, trend_bias, trend_entry
+from v6_sentinel import alerts, bridge, bridge_flip, broker, cisd_bridge, config, decision_log, flip_state, heartbeat, rates, sideways_trapper, sl_manager, telegram_alerts, trade_journal, trade_manager, trend_bias, trend_entry
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.flip_state import far_near_line
 from v6_sentinel.trend_config import TMSymbolConfig, load_symbol_config
@@ -203,6 +203,11 @@ def _open_position(cfg: TMSymbolConfig, direction: int, sl: float, tag: str, ref
                      ref=ref_desc, sl=sl, ticket=result.ticket)
     if journal is not None and result.ticket is not None:
         journal.entry(result.ticket, _DIR_LABEL[direction], cfg.lots, sl, comment, logic or {})
+    tf = (logic or {}).get("timeframe_minutes")
+    telegram_alerts.send_if_configured(
+        cfg.alerts_bot_token, cfg.alerts_chat_id,
+        f"[V6S] ENTRY: TM-STR {_DIR_LABEL[direction]} {cfg.symbol} #{result.ticket} ({tag}) -- "
+        f"{f'M{tf}' if tf else 'tf n/a'} -- {(logic or {}).get('rule', ref_desc)} -- sl={sl:.3f}")
     return True
 
 

@@ -110,7 +110,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import broker, cisd_bridge, config, decision_log, flip_state, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sideways_trapper, sl_manager, trade_journal, trade_manager
+from v6_sentinel import broker, cisd_bridge, config, decision_log, flip_state, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sideways_trapper, sl_manager, telegram_alerts, trade_journal, trade_manager
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.bridge_flip import m3_far_line
 from v6_sentinel.alerts import send_alert as _send_alert
@@ -192,6 +192,22 @@ def _open_position(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, c
                      tag=tag, ref=ref_desc, sl=sl, ticket=result.ticket)
     if journal is not None and result.ticket is not None:
         journal.entry(result.ticket, _DIR_LABEL[direction], cfg.lots, sl, comment, logic or {})
+    # STR signals carry timeframe_minutes (HTF line's own tf); ICT signals instead carry
+    # timeframe_name (the zone's own base tf, e.g. "H1") + trigger (the CISD tf that fired it,
+    # e.g. "M1CD") -- see reversal_entry.ReversalSignal / reversal_ict.ICTSignal.
+    tf_minutes = (logic or {}).get("timeframe_minutes")
+    tf_name = (logic or {}).get("timeframe_name")
+    trigger = (logic or {}).get("trigger")
+    if tf_minutes:
+        tf_desc = f"M{tf_minutes}"
+    elif tf_name:
+        tf_desc = f"{tf_name}/{trigger}" if trigger else tf_name
+    else:
+        tf_desc = "tf n/a"
+    telegram_alerts.send_if_configured(
+        cfg.alerts_bot_token, cfg.alerts_chat_id,
+        f"[V6S] ENTRY: RM-{component} {_DIR_LABEL[direction]} {cfg.symbol} #{result.ticket} ({tag}) -- "
+        f"{tf_desc} -- {(logic or {}).get('rule', ref_desc)} -- sl={sl:.3f}")
     return True
 
 

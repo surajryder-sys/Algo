@@ -37,7 +37,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from v6_sentinel import broker, config, decision_log, heartbeat, scalper_entry, trade_journal
+from v6_sentinel import broker, config, decision_log, heartbeat, scalper_entry, telegram_alerts, trade_journal
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.nlb_nsb_block import BlockStore
 from v6_sentinel.reversal_config import load_symbol_config as load_rm_config
@@ -112,6 +112,11 @@ def _open_position(cfg: ScalperSymbolConfig, sig: scalper_entry.ScalperSignal, j
     if result.ticket is not None:
         journal.entry(result.ticket, _DIR_LABEL[sig.direction], cfg.lots, sig.sl, comment, detail)
         own_tp.set(result.ticket, sig.tp)
+    telegram_alerts.send_if_configured(
+        cfg.alerts_bot_token, cfg.alerts_chat_id,
+        f"[V6S] ENTRY: SCALPER {_DIR_LABEL[sig.direction]} {cfg.symbol} #{result.ticket} -- "
+        f"{sig.pattern_name} on M{sig.pattern_tf} (execution tf) touched {sig.sub_tag} "
+        f"{sig.base_timeframe_name} (base tf, {sig.trigger_label}) -- sl={sig.sl:.3f} tp={sig.tp:.3f}")
     return True
 
 

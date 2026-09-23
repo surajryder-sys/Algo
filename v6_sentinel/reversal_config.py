@@ -121,6 +121,9 @@ class RMSymbolConfig:
     mt5_password: str | None
     mt5_server: str | None
 
+    alerts_bot_token: str | None       # shared V6S Telegram bot, same one Exit Manager uses -- entry alerts
+    alerts_chat_id: str | None
+
 
 # Deliberately-tuned defaults, one entry per symbol that's actually been
 # tuned for RM-STR/RM-ICT -- XAUUSD's values are carried over unchanged
@@ -204,4 +207,6 @@ def load_symbol_config(symbol: str) -> RMSymbolConfig:
         mt5_login=config.MT5_LOGIN,
         mt5_password=config.MT5_PASSWORD,
         mt5_server=config.MT5_SERVER,
+        alerts_bot_token=os.getenv("V6S_ALERTS_TELEGRAM_BOT_TOKEN") or None,
+        alerts_chat_id=os.getenv("V6S_ALERTS_TELEGRAM_CHAT_ID") or None,
     )

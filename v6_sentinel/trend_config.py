@@ -86,6 +86,9 @@ class TMSymbolConfig:
     mt5_password: str | None
     mt5_server: str | None
 
+    alerts_bot_token: str | None       # shared V6S Telegram bot, same one Exit Manager uses -- entry alerts
+    alerts_chat_id: str | None
+
 
 _SYMBOL_DEFAULTS: dict[str, dict] = {
     "XAUUSD": dict(
@@ -157,4 +160,6 @@ def load_symbol_config(symbol: str) -> TMSymbolConfig:
         mt5_login=config.MT5_LOGIN,
         mt5_password=config.MT5_PASSWORD,
         mt5_server=config.MT5_SERVER,
+        alerts_bot_token=os.getenv("V6S_ALERTS_TELEGRAM_BOT_TOKEN") or None,
+        alerts_chat_id=os.getenv("V6S_ALERTS_TELEGRAM_CHAT_ID") or None,
     )
