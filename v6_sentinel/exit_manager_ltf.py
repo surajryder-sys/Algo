@@ -27,6 +27,23 @@ CISD this cycle does M3 get a chance. Both share the exact same touch-
 arming state (rt.store) -- a level armed for M1's own check is equally
 available to M3's.
 
+CISD-CANDLE CLOSE-SIDE VALIDITY (added 2026-09-23, user's own worked
+example: "4312 was 2h support, m1 bullish cisd close qualifying below
+4312 is not valid, same m1 cisd qualifies to close the trade if the exit
+qualifying price level is above 4312 level" -- same close-side principle
+candle_touch.find_touching_line() already applies to EA-CandleExit/
+Scalper, now applied here too): the confirming CISD candle's own CLOSE
+(CISDState.close -- the close of that candle, not a wick) must sit on
+the correct side of the SPECIFIC level being used to validate it -- above
+the level's value for a bullish CISD (closes SELL), below it for a
+bearish CISD (closes BUY). The touch itself can still be a bare wick
+(scan_touches()/rt.store stay wick-aware, unchanged); it's specifically
+the CISD candle that must have actually reclaimed/broken back past the
+level by its own close, not just wicked through it, for that CISD to
+count as a genuine confirmation off that level. A level whose touch is
+armed but whose confirming CISD candle closed on the wrong side is not a
+match -- another armed level (if any) may still qualify independently.
+
 SCOPE -- "all supports and resistances of all timeframes till M15" (user's own
 words): D1, H4, H2, H1, M30, M15 -- htf_levels.compute_htf_state(), the exact
 same ATR-dual + Supertrend level source RM-STR's own entry reads, just a
@@ -175,7 +192,9 @@ def run_once(cfg: "ExitManagerSymbolConfig", rt: LTFExitRuntime) -> None:
 
         # Any ONE armed level in the SAME direction as this CISD is enough to
         # validate it -- see module docstring (no is_traded()/mark_traded()
-        # gating here, unlike RM-STR's own entry use of this same store).
+        # gating here, unlike RM-STR's own entry use of this same store) --
+        # AND the CISD candle's own close must have actually reclaimed/broken
+        # back past THAT level (close-side validity, see module docstring).
         triggering = next(
             (
                 (tf, level.source)
@@ -183,6 +202,7 @@ def run_once(cfg: "ExitManagerSymbolConfig", rt: LTFExitRuntime) -> None:
                 for level in state.levels
                 if (1 if level.role == "SUPPORT" else -1) == cisd_direction
                 and rt.store.is_touched(tf, level.source, level.line_no, level.value, level.role)
+                and ((cisd.close > level.value) if cisd_direction == 1 else (cisd.close < level.value))
             ),
             None,
         )
