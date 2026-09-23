@@ -48,10 +48,16 @@ _DIR_LABEL = {1: "BUY", -1: "SELL"}
 
 
 def _entry_comment(sig: scalper_entry.ScalperSignal) -> str:
-    """e.g. "V6S-SC-STR-H" (hammer via an HTF line) or "V6S-SC-ICT-S" (star
-    via an OB zone) -- well under MT5's 31-character comment limit."""
+    """e.g. "V6S-SC-STR-H2-M3-H" -- sub_tag (STR line / ICT zone), the BASE
+    timeframe (the touched line/zone's own -- "H2", "M15", ...), the
+    EXECUTION timeframe (the pattern candle's own -- always M3 or M5), and
+    the pattern letter (H hammer / S star). Made explicit 2026-09-23 (user:
+    "comment should be clear with base and execution timeframe" -- the
+    original "V6S-SC-STR-H" didn't say WHICH line/zone or WHICH pattern
+    timeframe fired). Comfortably under MT5's 31-character comment limit
+    even for the longest base name ("V6S-SC-ICT-M30-M3-H" = 20 chars)."""
     pattern_letter = "H" if sig.pattern_name == "hammer" else "S"
-    return f"V6S-SC-{sig.sub_tag}-{pattern_letter}"
+    return f"V6S-SC-{sig.sub_tag}-{sig.base_timeframe_name}-M{sig.pattern_tf}-{pattern_letter}"
 
 
 @dataclass
@@ -83,11 +89,12 @@ def _open_position(cfg: ScalperSymbolConfig, sig: scalper_entry.ScalperSignal, j
     same "caller must not mark the event handled on False" contract
     trend_main._open_position() uses."""
     comment = _entry_comment(sig)
-    print(f"[V6S-SC-ENTRY] {cfg.symbol} {_DIR_LABEL[sig.direction]} (M{sig.pattern_tf} {sig.pattern_name} / "
-          f"{sig.sub_tag} {sig.trigger_label}) sl={sig.sl:.3f} tp={sig.tp:.3f}")
+    print(f"[V6S-SC-ENTRY] {cfg.symbol} {_DIR_LABEL[sig.direction]} -- {sig.pattern_name} on M{sig.pattern_tf} "
+          f"(execution tf) touched {sig.sub_tag} {sig.base_timeframe_name} (base tf, {sig.trigger_label}) "
+          f"sl={sig.sl:.3f} tp={sig.tp:.3f}")
     detail = {"rule": "hammer/star + touch (Scalper)", "pattern": sig.pattern_name, "sub_source": sig.sub_tag,
-              "pattern_timeframe": sig.pattern_tf, "trigger": sig.trigger_label, "bar_time": sig.bar_time,
-              "sl": sig.sl, "tp": sig.tp}
+              "execution_timeframe": f"M{sig.pattern_tf}", "base_timeframe": sig.base_timeframe_name,
+              "trigger": sig.trigger_label, "bar_time": sig.bar_time, "sl": sig.sl, "tp": sig.tp}
     if not cfg.enable_trading:
         print("[V6S-SC-ENTRY] enable_trading is false -- decision only, no order sent")
         decision_log.log(cfg.decision_log_file, "entry_decision_only", direction=_DIR_LABEL[sig.direction], **detail)

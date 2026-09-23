@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from v6_sentinel import candle_touch, rates
+from v6_sentinel import candle_touch, htf_levels, rates
 from v6_sentinel.bridge import read_hammer_star
 from v6_sentinel.nlb_nsb_block import BlockStore
 
@@ -58,10 +58,11 @@ _PATTERNS = (
 @dataclass(frozen=True)
 class ScalperSignal:
     direction: int              # 1 buy, -1 sell
-    pattern_tf: int
-    pattern_name: str            # "hammer" | "star"
-    bar_time: int                  # the pattern candle's own bar_time -- the eligibility key
-    sub_tag: str                     # "STR" (HTF line) | "ICT" (OB zone)
+    pattern_tf: int               # the EXECUTION timeframe -- the pattern candle's own (M3 or M5)
+    pattern_name: str               # "hammer" | "star"
+    bar_time: int                     # the pattern candle's own bar_time -- the eligibility key
+    sub_tag: str                        # "STR" (HTF line) | "ICT" (OB zone)
+    base_timeframe_name: str              # the BASE timeframe -- the touched line/zone's own (e.g. "H2", "M15")
     trigger_label: str
     sl: float
     tp: float
@@ -143,11 +144,13 @@ def find_signal(symbol: str, tracker, block: BlockStore, eligibility: ScalperEli
             touch_price = low if role == "SUPPORT" else high
 
             sub_tag: Optional[str] = None
+            base_timeframe_name = ""
             trigger_label = ""
             touching_line = candle_touch.find_touching_line(htf_states, role, touch_price)
             if touching_line is not None:
                 level_tf, level_source = touching_line
                 sub_tag, trigger_label = "STR", f"M{level_tf}/{level_source}"
+                base_timeframe_name = htf_levels.TIMEFRAME_NAMES.get(level_tf, f"M{level_tf}")
             else:
                 wanted_role = candle_touch.ZONE_ROLE_FOR_PATTERN[pattern_name]
                 prev_bar_time = hs.bar_time - tf * 60
@@ -157,6 +160,7 @@ def find_signal(symbol: str, tracker, block: BlockStore, eligibility: ScalperEli
                 if touching_zone is not None:
                     sub_tag = "ICT"
                     trigger_label = f"{touching_zone.timeframe_name} OB zone {touching_zone.zone_id}"
+                    base_timeframe_name = touching_zone.timeframe_name
 
             if sub_tag is None:
                 continue   # neither a line nor a zone touched -- not a signal
@@ -164,5 +168,6 @@ def find_signal(symbol: str, tracker, block: BlockStore, eligibility: ScalperEli
             entry_price = ask if direction == 1 else bid
             sl, tp = _resolve_sl_tp(direction, entry_price, low, high, sl_buffer, risk_reward)
             return ScalperSignal(direction=direction, pattern_tf=tf, pattern_name=pattern_name,
-                                 bar_time=hs.bar_time, sub_tag=sub_tag, trigger_label=trigger_label, sl=sl, tp=tp)
+                                 bar_time=hs.bar_time, sub_tag=sub_tag, base_timeframe_name=base_timeframe_name,
+                                 trigger_label=trigger_label, sl=sl, tp=tp)
     return None

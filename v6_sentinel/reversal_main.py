@@ -28,6 +28,17 @@ to stay distinguishable from a component's own internal square-off
 ("SQOFF"/"SQ"). Entry, eligibility, SL, and TP remain fully independent
 otherwise -- this is the ONE place STR and ICT now interact.
 
+M3-REVERSAL-TRADE EARLY EXIT (added 2026-09-23, see _check_m3_reversal_exit's
+own docstring for the full rule): a position entered on a fresh M3 CISD
+("M3CD" -- a genuine reversal-against-the-prevailing-bias trade) closes
+early if M3 later genuinely reverses (a fresh, opposite-direction M3 CISD)
+while BOTH M5 and M15's own confirmed structure agree with that new
+direction ("parent and primary timeframe agreement", user's own words,
+asked for twice -- deliberately AND, not the M1 entry gate's own OR).
+Otherwise the position waits for its own SL, exactly as before this rule.
+Lives here (not Exit Manager) since it needs the position's own ENTRY
+trigger, which only this process's own journal records.
+
 MAGIC NUMBERS -- 26091801 (STR) / 26091802 (ICT), deliberately DIFFERENT
 from V5-Sentinel's own 26090701/26090702 (see reversal_config.py's own
 docstring for why: V5S is still running live on the same MT5 account).
@@ -99,7 +110,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import broker, config, decision_log, flip_state, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sideways_trapper, sl_manager, trade_journal, trade_manager
+from v6_sentinel import broker, cisd_bridge, config, decision_log, flip_state, heartbeat, htf_levels, ict_guard, reversal_entry, reversal_ict, sideways_trapper, sl_manager, trade_journal, trade_manager
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.bridge_flip import m3_far_line
 from v6_sentinel.alerts import send_alert as _send_alert
@@ -241,6 +252,80 @@ def _run_sl_manager(cfg: RMSymbolConfig, component: str, mgr: sl_manager.SLManag
             journal.sl_move(position.ticket, current_sl, proposed, current_price)
     else:
         print(f"[V6S-{component}-SL] modify failed: retcode={result.retcode} comment={result.comment}")
+
+
+def _check_m3_reversal_exit(cfg: RMSymbolConfig, component: str, position, tracker: Optional[BridgeBarFlipTracker],
+                            journal: Optional[trade_journal.TradeJournal]) -> bool:
+    """Returns True if this position was just closed by this rule (the
+    caller should skip any further management of it this cycle -- the
+    ticket no longer exists)."""
+    """M3-TRIGGERED REVERSAL TRADE EARLY EXIT (added 2026-09-23, user's own
+    real incident: a LONG opened by RM-ICT on a fresh M3 BULLISH CISD while
+    M5/M15 were ALREADY bearish -- a genuine reversal-against-the-prevailing-
+    bias trade. Bias Exit Manager's own "fresh opposite M5/M15 CISD AFTER
+    entry" rule can never close a trade like this: M5/M15 were already
+    bearish BEFORE entry, not freshly reversing after it, so it would
+    otherwise just sit open until its own SL, however long that takes.
+    User's own words: "if an m3 cisd opens a reversal trade, and if same m3
+    reverses with opposite cisd, agreeing with parent and primary, then we
+    can close the trade based on m3 bearish cisd with parent and primary
+    timeframe agreement, else this will wait for sl."
+
+    Lives in RM's OWN process (not Exit Manager) because it needs to know
+    the position's own ENTRY trigger, which only RM's own journal records
+    (TradeJournal.entry_trigger()) -- Exit Manager has no such visibility
+    into how a position was originally opened, only its live state.
+
+    Applies to a position from EITHER component (STR or ICT) -- M3CD is a
+    valid entry trigger for both, not just ICT's own zones (the real
+    incident happened to be ICT, but the underlying mechanism is identical
+    for STR's own HTF-line entries).
+
+    RULE, precisely:
+      1. This position's own entry_trigger must be EXACTLY "M3CD" (not
+         M5CD, M1CD, or M1CD-DIRECT) -- only M3-triggered entries qualify.
+      2. A FRESH M3 CISD (cisd_bridge.fresh_cisd(), not a standing state --
+         a genuine new confirmation event, "same m3 reverses") in the
+         OPPOSITE direction to the position.
+      3. That CISD's own confirming candle closed AFTER the position
+         opened (same "already-existing doesn't count" guard every other
+         fresh-CISD trigger in this project uses).
+      4. "PARENT AND PRIMARY TIMEFRAME AGREEMENT" -- BOTH M5's AND M15's
+         own confirmed ATR-dual STRUCTURE (not CISD -- same structure-only
+         convention reversal_ict.py's own M1 gate already uses) must agree
+         with the reversal CISD's own direction. AND, not OR -- this is
+         deliberately stricter than the M1 entry gate's own "M5 or M15"
+         (asked for TWICE in the user's own words: "agreeing with parent
+         and primary" then "with parent and primary timeframe agreement"),
+         and matches the real incident where both had already agreed.
+    If ANY of these fail, no early exit -- "else this will wait for sl",
+    the position rides to its own SL/other exit mechanism exactly as
+    before this rule existed."""
+    if journal is None or tracker is None:
+        return False
+    if journal.entry_trigger(position.ticket) != "M3CD":
+        return False
+    position_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+    cisd = cisd_bridge.fresh_cisd(cfg.symbol, 3)
+    if cisd is None:
+        return False
+    cisd_direction = cisd_bridge.direction_of(cisd)
+    if cisd_direction != -position_direction:
+        return False
+    confirm_time = cisd.bar_time + 3 * 60
+    if position.time >= confirm_time:
+        return False   # opened at/after this CISD's own confirm time -- "already existing", not a genuine reversal after
+    m5_fs = tracker.update(cfg.symbol, 5)
+    m15_fs = tracker.update(cfg.symbol, 15)
+    m5_structure = m5_fs.confirmed.value if m5_fs is not None else None
+    m15_structure = m15_fs.confirmed.value if m15_fs is not None else None
+    if m5_structure != cisd_direction or m15_structure != cisd_direction:
+        return False   # no full parent+primary agreement -- waits for SL instead, per the user's own words
+    return _close_position(cfg, component, position, "M3REV", "M3CD", "M3R", journal,
+                           {"rule": "M3-triggered reversal trade reversed, with parent+primary (M5+M15) structure agreement",
+                            "original_entry_trigger": "M3CD", "reversal_cisd": cisd.last_cisd,
+                            "m5_structure": m5_structure, "m15_structure": m15_structure,
+                            "confirm_time": confirm_time, "position_open_time": position.time})
 
 
 def _run_trade_manager(cfg: RMSymbolConfig, component: str, mgr: trade_manager.TradeManager, position,
@@ -529,10 +614,14 @@ def run_once(rt: _SymbolRuntime) -> None:
     # normally at most one per component now that any opposite signal squares off the other one again,
     # but this still covers the transient case where a square-off's own close failed and both are open.
     for str_position in broker.get_positions(cfg.symbol, cfg.magic_number):
+        if _check_m3_reversal_exit(cfg, "STR", str_position, rt.tracker, rt.journal_str):
+            continue   # closed this cycle -- ticket no longer exists, nothing left to manage
         _run_sl_manager(cfg, "STR", rt.sl_mgr_str, rt.tm_mgr_str, str_position, rt.tracker, rt.journal_str)
         _run_trade_manager(cfg, "STR", rt.tm_mgr_str, str_position, rt.journal_str)
 
     for ict_position in broker.get_positions(cfg.symbol, cfg.ict_magic_number):
+        if _check_m3_reversal_exit(cfg, "ICT", ict_position, rt.tracker, rt.journal_ict):
+            continue   # closed this cycle -- ticket no longer exists, nothing left to manage
         _run_sl_manager(cfg, "ICT", rt.sl_mgr_ict, rt.tm_mgr_ict, ict_position, rt.tracker, rt.journal_ict)
         _run_trade_manager(cfg, "ICT", rt.tm_mgr_ict, ict_position, rt.journal_ict)
 

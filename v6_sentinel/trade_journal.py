@@ -155,6 +155,14 @@ class TradeJournal:
         info = self._open.get(ticket)
         return timeframe_of_logic(info["entry"].get("logic") or {}) if info else None
 
+    def entry_trigger(self, ticket: int) -> Optional[str]:
+        """This OPEN journaled trade's own entry trigger tag (e.g. "M3CD",
+        "M5CD", "M1CD-DIRECT") -- None if unknown/not journaled. Added
+        2026-09-23 for reversal_main.py's own M3-reversal-agreement exit
+        check (see that module's own docstring)."""
+        info = self._open.get(ticket)
+        return (info["entry"].get("logic") or {}).get("trigger") if info else None
+
     def _pending_from_file(self, ticket: int) -> Optional[dict]:
         """An exit_requested line for this ticket written by ANOTHER process (the Exit Manager
         closes trades it does not own and records why here), newest first."""
