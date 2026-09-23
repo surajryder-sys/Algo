@@ -158,6 +158,17 @@ class BiasFeedWatch:
         return True, None
 
 
+# Bridge-lag alert threshold (2026-09-23, user: "instead send me an alert on telegram /
+# instead of adding staleness" -- after a real live case where a fresh M5CD fired 520s after
+# its own bar's OPEN time (well after that bar's own CLOSE too), because the M5 ATR/CISD
+# bridge indicator's OnCalculate fell behind real bar closes -- fresh_cisd() only reports
+# fresh once the bridge file's own bar_time finally catches up, so the entry landed at
+# whatever price was live by THEN, far from that bar's own open or close. Rather than reject
+# a late-but-genuine CISD (the user's explicit call -- no staleness gate), this just alerts
+# so it's visible when it happens, purely informational, never blocks the entry.
+ENTRY_BRIDGE_LAG_ALERT_SECONDS = 30.0
+
+
 def _entry_comment(tag: str) -> str:
     return f"V6S-TM-STR-{tag}"
 
@@ -208,6 +219,19 @@ def _open_position(cfg: TMSymbolConfig, direction: int, sl: float, tag: str, ref
         cfg.alerts_bot_token, cfg.alerts_chat_id,
         f"[V6S] ENTRY: TM-STR {_DIR_LABEL[direction]} {cfg.symbol} #{result.ticket} ({tag}) -- "
         f"{f'M{tf}' if tf else 'tf n/a'} -- {(logic or {}).get('rule', ref_desc)} -- sl={sl:.3f}")
+
+    event_time = (logic or {}).get("event_time")
+    if event_time is not None and tf:
+        bar_close_time = event_time + tf * 60
+        lag = time.time() - bar_close_time
+        if lag > ENTRY_BRIDGE_LAG_ALERT_SECONDS:
+            telegram_alerts.send_if_configured(
+                cfg.alerts_bot_token, cfg.alerts_chat_id,
+                f"[V6S] BRIDGE LAG: TM-STR {_DIR_LABEL[direction]} {cfg.symbol} #{result.ticket} -- "
+                f"the M{tf} CISD's own bar closed {lag:.0f}s before this entry actually fired -- "
+                f"the M{tf} ATR/CISD bridge indicator's OnCalculate likely fell behind real bar "
+                f"closes, so the entry price may be far from that bar's own open/close. Check the "
+                f"M{tf} chart/indicator.")
     return True
 
 

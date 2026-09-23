@@ -100,6 +100,7 @@ class ReversalSignal:
     level_value: float
     sl: float
     sl_source: str                  # where the SL basis came from, for the decision log: "M5/ATR1", "M3/ST", "SWING", ...
+    confirm_bar_time: int              # the CISD's own confirming bar_time -- see trend_main.py's ENTRY_BRIDGE_LAG_ALERT_SECONDS
 
 
 def scan_touches(htf_states: dict[int, Optional[HTFState]], store: LevelEligibilityStore,
@@ -162,7 +163,8 @@ def _check_level(store: LevelEligibilityStore, symbol: str, tf: int, level, sl_b
         sl = basis - sl_buffer if direction == 1 else basis + sl_buffer
         return ReversalSignal(direction=direction, timeframe_minutes=tf, source=level.source,
                               line_no=level.line_no, trigger=_CISD_TAG[tf_minutes],
-                              level_value=level.value, sl=sl, sl_source=sl_source)
+                              level_value=level.value, sl=sl, sl_source=sl_source,
+                              confirm_bar_time=cisd.bar_time)
     return None
 
 

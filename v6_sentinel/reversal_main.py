@@ -120,6 +120,23 @@ _DIR_LABEL = {1: "BUY", -1: "SELL"}
 _COMPONENTS = ("STR", "ICT")  # the two Reversal Manager components sharing this magic number/position slot
 _SOURCE_SHORT = {"ATR": "ATR", "SUPERTREND": "ST"}
 
+# Bridge-lag alert threshold -- see trend_main.py's own ENTRY_BRIDGE_LAG_ALERT_SECONDS docstring
+# for the full rationale (2026-09-23, user: "instead send me an alert on telegram / instead of
+# adding staleness", then "yes extend" to RM-STR/RM-ICT). Same mechanism here: both components'
+# entries are gated on cisd_bridge.fresh_cisd(), so the identical OnCalculate-lag risk applies.
+ENTRY_BRIDGE_LAG_ALERT_SECONDS = 30.0
+
+
+def _cisd_tf_from_trigger(trigger: str) -> Optional[int]:
+    """"M3CD" -> 3, "M1CD-DIRECT" -> 1 -- the CISD timeframe embedded in every trigger tag this
+    module uses. None if it doesn't match the expected shape (defensive; every real trigger does)."""
+    if not trigger.startswith("M") or "CD" not in trigger:
+        return None
+    try:
+        return int(trigger.split("CD")[0][1:])
+    except ValueError:
+        return None
+
 
 def _tag(sig: "reversal_entry.ReversalSignal") -> str:
     return f"{htf_levels.TIMEFRAME_NAMES[sig.timeframe_minutes]}/{_SOURCE_SHORT[sig.source]}/{sig.trigger}"
@@ -208,6 +225,23 @@ def _open_position(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, c
         cfg.alerts_bot_token, cfg.alerts_chat_id,
         f"[V6S] ENTRY: RM-{component} {_DIR_LABEL[direction]} {cfg.symbol} #{result.ticket} ({tag}) -- "
         f"{tf_desc} -- {(logic or {}).get('rule', ref_desc)} -- sl={sl:.3f}")
+
+    # Bridge-lag alert (see module's own ENTRY_BRIDGE_LAG_ALERT_SECONDS docstring) -- skipped for
+    # M1CD-DIRECT, whose confirm_bar_time is a STANDING cisd, not a fresh-this-bar confirmation,
+    # so an "old" bar_time there is by design, not evidence of any bridge lag.
+    confirm_bar_time = (logic or {}).get("confirm_bar_time")
+    cisd_tf = _cisd_tf_from_trigger(trigger) if trigger else None
+    if confirm_bar_time is not None and cisd_tf and trigger != "M1CD-DIRECT":
+        bar_close_time = confirm_bar_time + cisd_tf * 60
+        lag = time.time() - bar_close_time
+        if lag > ENTRY_BRIDGE_LAG_ALERT_SECONDS:
+            telegram_alerts.send_if_configured(
+                cfg.alerts_bot_token, cfg.alerts_chat_id,
+                f"[V6S] BRIDGE LAG: RM-{component} {_DIR_LABEL[direction]} {cfg.symbol} #{result.ticket} -- "
+                f"the M{cisd_tf} CISD's own bar closed {lag:.0f}s before this entry actually fired -- "
+                f"the M{cisd_tf} CISD bridge indicator's OnCalculate likely fell behind real bar "
+                f"closes, so the entry price may be far from that bar's own open/close. Check the "
+                f"M{cisd_tf} chart/indicator.")
     return True
 
 

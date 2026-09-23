@@ -138,9 +138,10 @@ class ICTSignal:
     timeframe_name: str          # "H1"
     zone_top: float
     zone_btm: float
-    trigger: str                  # "M1CD" | "M3CD" | "M5CD" -- whichever CISD timeframe fired first
+    trigger: str                  # "M1CD" | "M3CD" | "M5CD" | "M1CD-DIRECT" -- whichever CISD timeframe fired first
     sl: float
     sl_source: str                  # "ZONE" (plain zone edge) | "M5/ATR2" | "M3/ST" | "SWING" (only when it replaced a too-far zone SL with a tighter one)
+    confirm_bar_time: int              # the CISD's own bar_time -- see trend_main.py's ENTRY_BRIDGE_LAG_ALERT_SECONDS. For "M1CD-DIRECT" this is the STANDING cisd's bar_time, not a fresh confirmation -- reversal_main.py's lag check skips that trigger.
 
 
 class ICTEligibilityStore:
@@ -346,6 +347,7 @@ def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibi
         signals.append(ICTSignal(
             direction=direction, zone_id=zone.zone_id, timeframe_name=zone.timeframe_name,
             zone_top=zone.top, zone_btm=zone.btm, trigger=trigger, sl=sl, sl_source=sl_source,
+            confirm_bar_time=cisd.bar_time,
         ))
 
     return signals
