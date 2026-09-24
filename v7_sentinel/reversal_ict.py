@@ -102,7 +102,34 @@ _process_signal, generalized to accept either component) -- no position
 -> open fresh. Opposite direction -> square off + reopen. SAME
 direction -> NO-OP, just mark this zone traded. Credited under its own
 "V7S-RM-ICT-{tag}" comment prefix.
-"""
+
+MT5-SOURCED ZONES + CROSS-SOURCE DEDUP (2026-09-24, user: "get them from
+MT5 bridge M15, M5, M3 keep them in data manager classify TV and MT5
+zones we need reversal trades to be fired based on Mt5 zones as well...
+if a ict trade is already fired in a direction and if TV qualifies, skip
+it, also vice versa"): find_ict_signals() now scans TWO zone sources --
+the existing TV-only NLB/NSB Block (H4-M10, unchanged) AND the new merged
+TV+MT5 store (ict_ob_block.ICTBlockStore, M15/M5/M3, Data Manager's own
+ict_ob_watcher.py). _ZONE_CISD_POOLS is UNCHANGED -- it has no "3" entry
+(M3 zones are an EXIT-only concept, confirmed with the user; RM's own
+entry pool stays H4/H2/H1/M30/M15/M10/M5 exactly as before), so any
+M3-timeframe zone from the merged store is scanned but can never actually
+produce a signal (_check_zone's own pool lookup returns None for it) --
+no special-casing needed. M15/M5 TV-sourced zones now exist in BOTH
+stores at once (the old Block already covered them); this is harmless,
+not a double-entry risk -- see below.
+
+CROSS-SOURCE DEDUP NEEDS NO NEW MECHANISM: both stores' zones feed the
+SAME eligibility/position-lifecycle machinery below, scoped to RM-ICT's
+one shared magic number (cfg.ict_magic_number) regardless of which
+store/source a zone came from. _process_signal's own existing "a
+same-direction position is already open -> NO-OP, mark traded, alert
+only" branch (see that function's own docstring) already means: once
+EITHER source fires a real BUY, any LATER-qualifying BUY signal from the
+OTHER source that same or a later cycle finds that position already open
+and just no-ops -- exactly "if a trade is already fired in a direction
+and the other source qualifies, skip it" with zero new state to build or
+maintain."""
 from __future__ import annotations
 
 import json
@@ -111,8 +138,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from v7_sentinel import cisd_bridge, sl_basis
-from v7_sentinel.nlb_nsb_block import BlockStore, BlockZone
+from v7_sentinel import cisd_bridge, flip_state, sl_basis
+from v7_sentinel.ict_ob_block import ICTBlockStore
+from v7_sentinel.nlb_nsb_block import BlockStore
 
 # Which CISD timeframe(s) can confirm a touched zone of a given
 # timeframe, in the order checked each cycle -- see module docstring.
@@ -128,7 +156,7 @@ _ZONE_CISD_POOLS: dict[str, tuple[int, ...]] = {
     # no "3" entry -- M3 zones removed 2026-09-22, see module docstring
 }
 
-_CISD_TAG = {1: "M1CD", 3: "M3CD", 5: "M5CD"}
+_CISD_TAG = {3: "M3CD", 5: "M5CD"}   # no "1" entry any more -- M1 is a structure FLIP now, not a CISD, see _check_zone()
 
 
 @dataclass(frozen=True)
@@ -139,10 +167,10 @@ class ICTSignal:
     zone_top: float
     zone_btm: float
     role: str                     # "no_short_buffer" (demand/bull) | "no_long_buffer" (supply/bear) -- the zone's own role, threaded through to mark_traded() so overlaps_traded() can stay role-aware (see ICTEligibilityStore's own docstring, 2026-09-24 fix)
-    trigger: str                   # "M1CD" | "M3CD" | "M5CD" | "M1CD-DIRECT" -- whichever CISD timeframe fired first
+    trigger: str                   # "M1FLIP" | "M3CD" | "M5CD" | "M1FLIP-DIRECT" -- whichever confirmation fired first (M1 dual-ATR structure FLIP replaced M1 CISD 2026-09-24, see _check_zone()'s own docstring)
     sl: float
     sl_source: str                  # "ZONE" (plain zone edge) | "M5/ATR2" | "M3/ST" | "SWING" (only when it replaced a too-far zone SL with a tighter one)
-    confirm_bar_time: int              # the CISD's own bar_time -- see trend_main.py's ENTRY_BRIDGE_LAG_ALERT_SECONDS. For "M1CD-DIRECT" this is the STANDING cisd's bar_time, not a fresh confirmation -- reversal_main.py's lag check skips that trigger.
+    confirm_bar_time: int              # the triggering event's own bar_time -- see trend_main.py's ENTRY_BRIDGE_LAG_ALERT_SECONDS. For "M1FLIP-DIRECT" this is the CURRENT M1 bar's own time, not a fresh confirmation -- reversal_main.py's lag check skips both direct-fire and flip triggers (neither is CISD-bridge-specific).
 
 
 class ICTEligibilityStore:
@@ -253,72 +281,91 @@ class ICTEligibilityStore:
         return None
 
 
-def _check_zone(zone: BlockZone, symbol: str, m5_structure: Optional[int] = None,
-                m15_structure: Optional[int] = None):
-    """(direction, trigger_tag, cisd, direct_fire) if this TOUCHED,
-    otherwise-eligible zone has a fresh, matching-direction CISD
-    confirmation THIS cycle from its own timeframe's pool -- None if not
-    (wrong/no fresh CISD yet, or an unrecognized zone timeframe, e.g. M1,
-    which _ZONE_CISD_POOLS deliberately has no entry for -- see module
-    docstring). The confirming CISD object is returned too, since the
-    SL-distance override may need its swing as the last-resort basis.
-    direct_fire (see M1 DIRECT FIRE below) tells the caller to skip the
-    SL-distance override entirely and use the plain zone edge, always
-    False for every other path.
+def _check_zone(zone, symbol: str, m1_fs: Optional["flip_state.FlipStateResult"] = None,
+                m5_structure: Optional[int] = None, m15_structure: Optional[int] = None):
+    """(direction, trigger_tag, cisd_for_sl, direct_fire, bar_time) if
+    this TOUCHED, otherwise-eligible zone has a qualifying confirmation
+    THIS cycle from its own timeframe's pool -- None if not (no
+    confirmation yet, or an unrecognized zone timeframe, e.g. M3, which
+    _ZONE_CISD_POOLS deliberately has no entry for -- see module
+    docstring). direct_fire (see M1 DIRECT FIRE below) tells the caller
+    to skip the SL-distance override entirely and use the plain zone
+    edge, always False for every other path.
+
+    M1 DUAL-ATR FLIP REPLACES M1 CISD (2026-09-24, user: "there also use
+    m1 dual atr flip, instead of m1 cisd, rest m3 cisd is good"): the M1
+    slot in M5 zones' own exception pool (_ZONE_CISD_POOLS["5"]) is now a
+    genuine M1 ATR-dual structure FLIP (flip_state.fresh_flip_direction(),
+    the same "privileged, momentary" one-shot contract as fresh_cisd() --
+    confirmed with the user the same day for exit_manager_ltf.py's
+    identical substitution, applied here for consistency), not a CISD
+    confirmation. M3/M5 stay exactly CISD-based, unchanged.
+
+    cisd_for_sl: for the M3/M5 CISD-triggered paths this is the real
+    triggering CISDState, exactly as before. For the M1FLIP paths there
+    is no CISD event at all -- this instead carries M3's own CURRENT
+    standing CISD (cisd_bridge.read_cisd(symbol, 3), which may be None if
+    that bridge happens to be stale) purely as a last-resort swing-basis
+    provider for sl_basis.initial_sl_basis()'s own fallback; that
+    function's own None-guard (cisd_bridge.sl_basis()) means a
+    genuinely-unavailable swing just yields "no valid override", never a
+    crash.
 
     M1 GATE (2026-09-22, user's own words: "to get into a trade based on
-    m1 cisd, lets say sell trade, m5 or m15 should be bearish or weak"):
-    an M1 CISD confirmation (only ever offered for M5 zones' own
-    exception pool, see _ZONE_CISD_POOLS) additionally requires the
-    CISD's own direction to match EITHER the M5 or M15 ATR-dual confirmed
-    structure (m5_structure/m15_structure: 1 strong/bullish, -1 weak/
-    bearish, None unknown -- same convention trend_bias/sideways_trapper
-    already use). If neither agrees, M1 is skipped for this touch (NOT a
-    hard fail -- the pool keeps checking M3/M5 normally, exactly as
-    before this change). M3/M5 confirmations are never gated by this --
-    only M1's own, stricter case.
+    m1 cisd, lets say sell trade, m5 or m15 should be bearish or weak" --
+    unchanged in spirit for the flip): a fresh M1 flip additionally
+    requires ITS OWN direction to match EITHER the M5 or M15 ATR-dual
+    confirmed structure (m5_structure/m15_structure: 1 strong/bullish, -1
+    weak/bearish, None unknown). If neither agrees, M1 is skipped for
+    this touch (NOT a hard fail -- the pool keeps checking M3/M5
+    normally). M3/M5 confirmations are never gated by this.
 
     M1 DIRECT FIRE (2026-09-22, M5 zones only, user's own words: "sometime
-    the cisd is already bullish to fire on m1 cisd on bullish ob...
-    similarly the cisd on m1 is already bearish to fire on m1 cisd on
-    bearish ob, in such cases we can use direct fire on zone edge"): the
-    fresh-CISD loop above only ever fires on a NEW confirmation event
-    AFTER the touch (fresh_cisd()'s own one-shot contract) -- a CISD that
-    was ALREADY sitting in the matching direction at touch time (or ever
-    since) never re-confirms and so could never fire M1 for this zone at
-    all under that rule alone, potentially missing a genuinely good entry
-    indefinitely. This is a SEPARATE, ADDITIONAL path, checked only when
-    the fresh-CISD loop found nothing: if M1's STANDING CISD
-    (cisd_bridge.read_cisd() -- the current, not-necessarily-fresh state)
+    the cisd is already bullish to fire on m1 cisd on bullish ob... in
+    such cases we can use direct fire on zone edge" -- now keyed off M1's
+    CURRENT confirmed structure rather than a standing CISD
+    classification): the fresh check above only ever fires on a NEW flip
+    event AFTER the touch -- a structure that was ALREADY confirmed in
+    the matching direction at touch time (or ever since) never re-flips
+    and so could never fire M1 for this zone at all under that rule
+    alone, potentially missing a genuinely good entry indefinitely. This
+    is a SEPARATE, ADDITIONAL path, checked only when the fresh check
+    found nothing: if M1's CURRENT confirmed structure (m1_fs.confirmed)
     already matches this zone's own direction, AND the same M5/M15
     structure agreement the fresh-M1 gate requires also holds, fire
     immediately using the zone's own edge as SL, skipping the normal
-    SL-distance override search entirely (tagged "M1CD-DIRECT" to stay
-    distinguishable from a genuine fresh-event "M1CD" fire in logs/
+    SL-distance override search entirely (tagged "M1FLIP-DIRECT" to stay
+    distinguishable from a genuine fresh-event "M1FLIP" fire in logs/
     journal). M5 zones only -- M1 is never offered to any other zone
     timeframe's pool to begin with."""
     direction = 1 if zone.role == "no_short_buffer" else -1  # bullish OB -> BUY, bearish OB -> SELL
     pool = _ZONE_CISD_POOLS.get(zone.timeframe)
     if pool is None:
         return None
+
+    m1_flip_direction = flip_state.fresh_flip_direction(m1_fs) if m1_fs is not None else None
+
     for tf_minutes in pool:
+        if tf_minutes == 1:
+            if m1_flip_direction != direction:
+                continue
+            if m5_structure != direction and m15_structure != direction:
+                continue   # M1 needs M5 or M15 structure agreement -- keep checking the rest of the pool
+            return direction, "M1FLIP", cisd_bridge.read_cisd(symbol, 3), False, m1_fs.last_event.bar_time
         cisd = cisd_bridge.fresh_cisd(symbol, tf_minutes)
         if cisd is None or cisd_bridge.direction_of(cisd) != direction:
             continue
-        if tf_minutes == 1 and m5_structure != direction and m15_structure != direction:
-            continue   # M1 needs M5 or M15 structure agreement -- keep checking the rest of the pool
-        return direction, _CISD_TAG[tf_minutes], cisd, False
+        return direction, _CISD_TAG[tf_minutes], cisd, False, cisd.bar_time
 
-    if zone.timeframe == "5":
-        standing = cisd_bridge.read_cisd(symbol, 1)
-        if (standing is not None and cisd_bridge.direction_of(standing) == direction
+    if zone.timeframe == "5" and m1_fs is not None:
+        if (m1_fs.confirmed.value == direction
                 and (m5_structure == direction or m15_structure == direction)):
-            return direction, "M1CD-DIRECT", standing, True
+            return direction, "M1FLIP-DIRECT", cisd_bridge.read_cisd(symbol, 3), True, m1_fs.last_time
 
     return None
 
 
-def _touch_is_current(zone: BlockZone, max_age_minutes: float, now: float) -> bool:
+def _touch_is_current(zone, max_age_minutes: float, now: float) -> bool:
     """True only for a touch this component may act on: the watcher saw price
     enter the zone LIVE (retested_source "live" -- a "seed" retest was copied
     from the scraper's history, we never observed it) and it happened within
@@ -329,24 +376,31 @@ def _touch_is_current(zone: BlockZone, max_age_minutes: float, now: float) -> bo
     return 0 <= now - zone.retested_at <= max_age_minutes * 60
 
 
-def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibilityStore,
+def find_ict_signals(symbol: str, block_state_file: str, ict_block_state_file: str,
+                     eligibility: ICTEligibilityStore,
                      sl_buffer: float, bid: float, ask: float, sl_override_points: float,
                      touch_max_age_minutes: float, now: Optional[float] = None,
+                     m1_fs: Optional["flip_state.FlipStateResult"] = None,
                      m5_structure: Optional[int] = None, m15_structure: Optional[int] = None) -> list[ICTSignal]:
     """Every currently-valid (not invalidated -- an invalidated zone is
-    already deleted from the Block outright), TOUCHED, untraded OB zone
-    with a fresh matching-direction CISD confirmation this cycle -- see
-    module docstring for the full design, including the SL-distance
-    override. Reads the Block fresh (read-only -- this component never
-    writes to it) every call. bid/ask are the live prices, used only as
-    the entry price for the SL-distance test. m5_structure/m15_structure:
-    see _check_zone()'s own docstring for the M1 gate this feeds."""
+    already deleted from its own Block outright), TOUCHED, untraded OB
+    zone with a qualifying confirmation this cycle -- see module
+    docstring for the full design, including the SL-distance override
+    and the MT5-SOURCED ZONES + CROSS-SOURCE DEDUP section. Scans TWO
+    stores every call, read-only: the TV-only NLB/NSB Block
+    (block_state_file, H4-M10) and the merged TV+MT5 store
+    (ict_block_state_file, M15/M5/M3). bid/ask are the live prices, used
+    only as the entry price for the SL-distance test. m1_fs/m5_structure/
+    m15_structure: see _check_zone()'s own docstring for the M1 FLIP
+    gate/direct-fire this feeds (m1_fs: reversal_main.py's own shared
+    BridgeBarFlipTracker, updated for tf_minutes=1)."""
     store = BlockStore(block_state_file)
+    ict_store = ICTBlockStore(ict_block_state_file)
     signals: list[ICTSignal] = []
     cache: dict = {}
     now = time.time() if now is None else now
 
-    for zone in store.zones():
+    for zone in store.zones() + ict_store.zones():
         if not _touch_is_current(zone, touch_max_age_minutes, now):
             continue
         if eligibility.is_traded(zone.zone_id):
@@ -357,10 +411,10 @@ def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibi
                   f"substantially overlaps already-traded zone {dup}")
             continue
 
-        result = _check_zone(zone, symbol, m5_structure, m15_structure)
+        result = _check_zone(zone, symbol, m1_fs, m5_structure, m15_structure)
         if result is None:
             continue
-        direction, trigger, cisd, direct_fire = result
+        direction, trigger, cisd, direct_fire, bar_time = result
 
         sl = zone.btm - sl_buffer if direction == 1 else zone.top + sl_buffer
         sl_source = "ZONE"
@@ -368,8 +422,11 @@ def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibi
         if not direct_fire and abs(entry_price - sl) > sl_override_points:
             # Only a strictly TIGHTER SL replaces it (must_beat_sl) -- None means
             # nothing would reduce risk, so the zone-edge SL stays as-is. Skipped
-            # entirely for a direct-fire signal (M1CD-DIRECT) -- always the plain
-            # zone edge, see _check_zone()'s own M1 DIRECT FIRE docstring.
+            # entirely for a direct-fire signal (M1FLIP-DIRECT) -- always the plain
+            # zone edge, see _check_zone()'s own M1 DIRECT FIRE docstring. cisd here
+            # is the real triggering CISD for M3CD/M5CD, or M3's own best-effort
+            # standing state (possibly None) for M1FLIP -- see _check_zone()'s own
+            # cisd_for_sl docstring.
             resolved = sl_basis.initial_sl_basis(symbol, direction, entry_price, cisd, cache,
                                                  sl_buffer=sl_buffer, must_beat_sl=sl)
             if resolved is not None:
@@ -379,7 +436,7 @@ def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibi
         signals.append(ICTSignal(
             direction=direction, zone_id=zone.zone_id, timeframe_name=zone.timeframe_name,
             zone_top=zone.top, zone_btm=zone.btm, role=zone.role, trigger=trigger, sl=sl, sl_source=sl_source,
-            confirm_bar_time=cisd.bar_time,
+            confirm_bar_time=bar_time,
         ))
 
     return signals

@@ -110,6 +110,8 @@ _PROCESSES: list[_Monitored] = [
     _Monitored("Data Manager", "v7s_data_manager_run.log", (
         ("tv_scraper", "v7s_tv_scraper_heartbeat.json"),
         ("NLB/NSB Watcher", "v7s_nlb_nsb_watcher_heartbeat_XAUUSD.json"),
+        # ICT Block Watcher (2026-09-24) -- see ict_ob_watcher.py's own docstring.
+        ("ICT Block Watcher", "v7s_ict_ob_watcher_heartbeat_XAUUSD.json"),
     )),
     _Monitored("Trade Manager", "v7s_trade_manager_run.log", (
         ("TM-STR", "v7s_trend_manager_heartbeat_XAUUSD.json"),
@@ -119,6 +121,8 @@ _PROCESSES: list[_Monitored] = [
         ("EM-LTF", "v7s_exit_manager_heartbeat_ltf_XAUUSD.json"),
         ("EM-Candle", "v7s_exit_manager_heartbeat_candle_XAUUSD.json"),
         ("EM-Scalper-M3M5", "v7s_exit_manager_heartbeat_scalper_exit_XAUUSD.json"),
+        # ICT Exit (2026-09-24) -- see exit_manager_ict.py's own docstring.
+        ("EM-ICT", "v7s_exit_manager_heartbeat_ict_XAUUSD.json"),
     )),
 ]
 

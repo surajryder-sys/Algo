@@ -122,10 +122,16 @@ def direction_of(cisd: CISDState) -> int:
     return _CISD_DIRECTION[cisd.last_cisd]
 
 
-def sl_basis(cisd: CISDState) -> Optional[float]:
+def sl_basis(cisd: Optional[CISDState]) -> Optional[float]:
     """The nearest active swing low/high, frozen at confirmation time --
     see module docstring's own SL BASIS section. None if no active swing
     line existed at that moment (last_cisd_has_swing is False) -- no
     fallback, no guess; the caller must treat that as "this trigger
-    can't fire right now", same as a stale/missing bridge file."""
-    return cisd.last_cisd_swing_level if cisd.last_cisd_has_swing else None
+    can't fire right now", same as a stale/missing bridge file. Also None
+    for cisd=None itself (2026-09-24, added for reversal_ict.py's own
+    M1FLIP-triggered signals, which have no real CISD event of their own
+    and pass a best-effort M3 standing CISD here purely as a swing-basis
+    provider -- that read can legitimately come back None if M3's own
+    bridge is stale, and this must degrade to "no valid override" rather
+    than crash)."""
+    return cisd.last_cisd_swing_level if cisd is not None and cisd.last_cisd_has_swing else None

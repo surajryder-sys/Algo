@@ -157,7 +157,7 @@ class TradeJournal:
 
     def entry_trigger(self, ticket: int) -> Optional[str]:
         """This OPEN journaled trade's own entry trigger tag (e.g. "M3CD",
-        "M5CD", "M1CD-DIRECT") -- None if unknown/not journaled. Added
+        "M5CD", "M1FLIP-DIRECT") -- None if unknown/not journaled. Added
         2026-09-23 for reversal_main.py's own M3-reversal-agreement exit
         check (see that module's own docstring)."""
         info = self._open.get(ticket)

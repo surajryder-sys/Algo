@@ -19,13 +19,27 @@ no-exemptions scope Component 1 (exit_manager_bias.py) already uses.
 
 M1 BACK (re-added 2026-09-23, same day it was removed -- user: "can we
 add back this level touch plus m1 cisd confirmation as well"):
-_CISD_TIMEFRAMES is (1, 3) again -- M1 tried first each cycle, M3 a
-fallback when M1 doesn't qualify, same shape and same order as the
-original M3-FALLBACK design. (Historical note: for a brief window the
-same day this was M3-only, (3,) -- that shape is gone. See git history
-around 2026-09-23 for the full back-and-forth.) The touch-arming
-mechanism and the close-side validity check are unchanged throughout
-all of this, only which CISD timeframe(s) get checked has moved.
+_CISD_TIMEFRAMES was (1, 3) -- M1 tried first each cycle, M3 a fallback
+when M1 didn't qualify. (Historical note: for a brief window the same day
+this was M3-only, (3,) -- that shape is gone. See git history around
+2026-09-23 for the full back-and-forth.)
+
+M1 CISD REPLACED BY M1 STRUCTURE FLIP (2026-09-24, user: "a touch on HTF
+with M1 dual atr structure flip or M3 cisd (cancel m1 cisd completely)"):
+the two confirmation triggers checked each cycle are now (1) a genuine M1
+ATR-dual structure FLIP, confirmed on the EXACT bar it just happened
+(flip_state.fresh_flip_direction() -- same "privileged, momentary"
+one-shot contract as fresh_cisd(), confirmed with the user rather than
+the STANDING/cumulative with_direction_flip_after() contract
+sl_manager.py's own trailing use already relies on) and (2) a fresh M3
+CISD confirmation, unchanged. M1 CISD is gone entirely -- no fallback to
+it under any circumstance. Uses the SAME BridgeBarFlipTracker instance
+already held for this component's own HTF states (rt.tracker) -- M1 is
+simply a new timeframe key in that same tracker's internal dict, no
+separate state file needed. The touch-arming mechanism and the
+close-side validity check (below) are unchanged and now apply uniformly
+to BOTH trigger types -- the flip's own confirming bar close substitutes
+for the CISD candle's own close in that check.
 
 CISD-CANDLE CLOSE-SIDE VALIDITY (added 2026-09-23, user's own worked
 example: "4312 was 2h support, m1 bullish cisd close qualifying below
@@ -100,7 +114,7 @@ from typing import TYPE_CHECKING, Optional
 
 import MetaTrader5 as mt5
 
-from v7_sentinel import broker, cisd_bridge, decision_log, htf_levels, telegram_alerts, trade_journal
+from v7_sentinel import broker, cisd_bridge, decision_log, flip_state, htf_levels, telegram_alerts, trade_journal
 from v7_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v7_sentinel.reversal_entry import scan_touches
 
@@ -108,7 +122,6 @@ if TYPE_CHECKING:
     from v7_sentinel.exit_manager_config import ExitManagerSymbolConfig, WatchedSource
 
 _DIR_LABEL = {1: "BUY", -1: "SELL"}
-_CISD_TIMEFRAMES = (1, 3)  # M1 tried first, M3 fallback (re-added 2026-09-23) -- see module docstring's "M1 BACK" section
 
 # D1 through M15, plus M10, M5, and M3 (widened 2026-09-24, user's own words -- see
 # module docstring's own SCOPE section).
@@ -136,14 +149,17 @@ def _compute_ltf_states(symbol: str, tracker: BridgeBarFlipTracker) -> dict[int,
 
 
 def _close_position(cfg: "ExitManagerSymbolConfig", position, source: "WatchedSource",
-                    level_tf: int, level_source: str, cisd_tf: int, cisd_direction: str,
-                    confirm_time: int) -> None:
+                    level_tf: int, level_source: str, trigger_desc: str, confirm_time: int) -> None:
+    """trigger_desc: a pre-formatted description of whichever of the two
+    confirmation triggers fired -- "M1 structure FLIP (bullish)" or
+    "M3 bearish CISD" -- see module docstring's own M1 CISD REPLACED BY
+    M1 STRUCTURE FLIP section."""
     direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
     print(f"[V7S-XM-LTF] closing {source.name} #{position.ticket} ({_DIR_LABEL[direction]}) -- "
-          f"M{level_tf}/{level_source} touch + fresh M{cisd_tf} {cisd_direction} CISD confirmed after it opened")
-    detail = {"rule": "HTF touch + M3 CISD (LTF exit)", "level_timeframe": level_tf,
-              "level_source": level_source, "cisd_timeframe": cisd_tf, "cisd": cisd_direction,
-              "cisd_confirm_time": confirm_time, "position_open_time": position.time}
+          f"M{level_tf}/{level_source} touch + fresh {trigger_desc} confirmed after it opened")
+    detail = {"rule": "HTF touch + M1 flip or M3 CISD (LTF exit)", "level_timeframe": level_tf,
+              "level_source": level_source, "trigger": trigger_desc,
+              "confirm_time": confirm_time, "position_open_time": position.time}
     if not cfg.enable_trading:
         print("[V7S-XM-LTF] enable_trading is false -- decision only, no order sent")
         decision_log.log(cfg.decision_log_file, "ltf_close_decision_only", ticket=position.ticket,
@@ -157,7 +173,7 @@ def _close_position(cfg: "ExitManagerSymbolConfig", position, source: "WatchedSo
         telegram_alerts.send_if_configured(
             cfg.alerts_bot_token, cfg.alerts_chat_id,
             f"[V7S] EXIT FAILED: {source.name} #{position.ticket} ({_DIR_LABEL[direction]}) -- "
-            f"LTFEXIT (M{level_tf}/{level_source} touch + M{cisd_tf} {cisd_direction} CISD) -- "
+            f"LTFEXIT (M{level_tf}/{level_source} touch + {trigger_desc}) -- "
             f"retcode={result.retcode} {result.comment}")
         return
     decision_log.log(cfg.decision_log_file, "ltf_close_filled", ticket=position.ticket, target=source.name,
@@ -167,7 +183,7 @@ def _close_position(cfg: "ExitManagerSymbolConfig", position, source: "WatchedSo
     telegram_alerts.send_if_configured(
         cfg.alerts_bot_token, cfg.alerts_chat_id,
         f"[V7S] EXIT: {source.name} #{position.ticket} ({_DIR_LABEL[direction]}) closed -- "
-        f"LTFEXIT (M{level_tf}/{level_source} touch + fresh M{cisd_tf} {cisd_direction} CISD confirmed after it opened)")
+        f"LTFEXIT (M{level_tf}/{level_source} touch + fresh {trigger_desc} confirmed after it opened)")
 
 
 def run_once(cfg: "ExitManagerSymbolConfig", rt: LTFExitRuntime) -> None:
@@ -186,51 +202,61 @@ def run_once(cfg: "ExitManagerSymbolConfig", rt: LTFExitRuntime) -> None:
         rt.last_tick_msc = int(tick.time_msc) if tick is not None else 0
     scan_touches(htf_states, rt.store, bid, ask, bid_low, ask_high)
 
-    # M1 tried first; M3 only gets a chance if M1 has no fresh, matching-direction CISD this
-    # cycle (see module docstring's own "M1 BACK" section) -- both share the same rt.store.
-    for cisd_tf in _CISD_TIMEFRAMES:
-        cisd = cisd_bridge.fresh_cisd(cfg.symbol, cisd_tf)
-        if cisd is None:
-            continue
+    # Two independent confirmation triggers, both checked every cycle (OR) -- M1 structure FLIP
+    # first, M3 CISD second (order is arbitrary, no fallback relationship between them any more).
+    # See module docstring's own M1 CISD REPLACED BY M1 STRUCTURE FLIP section. Both produce a
+    # uniform (direction, confirm_close, confirm_time, trigger_desc) tuple so the rest of this
+    # function stays agnostic to which one actually fired.
+    candidates: list[tuple[int, float, int, str]] = []
+    m1_fs = rt.tracker.update(cfg.symbol, 1)   # same tracker instance as the HTF states above -- M1 is just a new key
+    m1_flip_direction = flip_state.fresh_flip_direction(m1_fs)
+    if m1_flip_direction is not None:
+        flip_confirm_time = m1_fs.last_event.bar_time + 1 * 60
+        candidates.append((m1_flip_direction, m1_fs.last_close, flip_confirm_time,
+                          f"M1 structure FLIP ({'bullish' if m1_flip_direction == 1 else 'bearish'})"))
+    cisd = cisd_bridge.fresh_cisd(cfg.symbol, 3)
+    if cisd is not None:
         cisd_direction = cisd_bridge.direction_of(cisd)
+        cisd_confirm_time = cisd.bar_time + 3 * 60
+        candidates.append((cisd_direction, cisd.close, cisd_confirm_time, f"M3 {cisd.last_cisd} CISD"))
 
-        # Any ONE armed level in the SAME direction as this CISD is enough to
-        # validate it -- see module docstring (no is_traded()/mark_traded()
-        # gating here, unlike RM-STR's own entry use of this same store) --
-        # AND the CISD candle's own close must have actually reclaimed/broken
-        # back past THAT level (close-side validity, see module docstring).
+    for direction, confirm_close, confirm_time, trigger_desc in candidates:
+        # Any ONE armed level in the SAME direction as this trigger is enough to validate it --
+        # see module docstring (no is_traded()/mark_traded() gating here, unlike RM-STR's own
+        # entry use of this same store) -- AND the trigger's own confirming bar close must have
+        # actually reclaimed/broken back past THAT level (close-side validity, see module
+        # docstring -- applies uniformly to both the CISD candle's close and the flip bar's own).
         triggering = next(
             (
                 (tf, level.source)
                 for tf, state in htf_states.items() if state is not None
                 for level in state.levels
-                if (1 if level.role == "SUPPORT" else -1) == cisd_direction
+                if (1 if level.role == "SUPPORT" else -1) == direction
                 and rt.store.is_touched(tf, level.source, level.line_no, level.value, level.role)
-                and ((cisd.close > level.value) if cisd_direction == 1 else (cisd.close < level.value))
+                and ((confirm_close > level.value) if direction == 1 else (confirm_close < level.value))
             ),
             None,
         )
         if triggering is None:
-            continue   # this CISD timeframe doesn't qualify -- fall through to the next one
+            continue   # this trigger doesn't qualify -- fall through to the next candidate
         level_tf, level_source = triggering
 
-        confirm_time = cisd.bar_time + cisd_tf * 60  # real close time of the confirming candle
-        opposite_type = mt5.POSITION_TYPE_SELL if cisd_direction == 1 else mt5.POSITION_TYPE_BUY
+        opposite_type = mt5.POSITION_TYPE_SELL if direction == 1 else mt5.POSITION_TYPE_BUY
         for source in cfg.sources:
             for position in broker.get_positions(cfg.symbol, source.magic_number):
                 if position.type != opposite_type:
                     continue
                 if position.time >= confirm_time:
-                    continue   # opened at/after this CISD's own confirm time -- "already existing", not after
+                    continue   # opened at/after this trigger's own confirm time -- "already existing", not after
                 own_tp = source.own_tp_lookup(position.ticket) if source.own_tp_lookup else None
                 if broker.is_paused_by_manual_tp(position, own_tp):
-                    direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+                    position_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
                     print(f"[V7S-XM-LTF] {source.name} #{position.ticket} has a manual TP set -- "
                           f"skipping auto-close (user is watching it manually)")
                     telegram_alerts.send_if_configured(
                         cfg.alerts_bot_token, cfg.alerts_chat_id,
                         f"[V7S] EM SKIPPED (manual TP set): {source.name} #{position.ticket} "
-                        f"({_DIR_LABEL[direction]}) -- would have closed via LTFEXIT "
-                        f"(M{level_tf}/{level_source} touch + M{cisd_tf} {cisd.last_cisd} CISD)")
+                        f"({_DIR_LABEL[position_direction]}) -- would have closed via LTFEXIT "
+                        f"(M{level_tf}/{level_source} touch + {trigger_desc})")
                     continue
-                _close_position(cfg, position, source, level_tf, level_source, cisd_tf, cisd.last_cisd, confirm_time)
+                _close_position(cfg, position, source, level_tf, level_source, trigger_desc, confirm_time)

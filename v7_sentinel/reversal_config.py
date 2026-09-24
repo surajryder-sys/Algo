@@ -87,6 +87,14 @@ class RMSymbolConfig:
     # is its own separate, V7S-owned store/file).
     nlb_nsb_block_state_file: str
 
+    # Merged TV+MT5 OB-zone store for M15/M5/M3 (ict_ob_block.py, Data
+    # Manager's own ict_ob_watcher.py) -- read-only. RM-ICT's own
+    # find_ict_signals() scans this ALONGSIDE nlb_nsb_block_state_file
+    # above (2026-09-24, "reversal trades... fired based on Mt5 zones as
+    # well") -- see reversal_ict.py's own docstring for why this needs no
+    # separate cross-source dedup mechanism of its own.
+    ict_ob_block_state_file: str
+
     # ICT Guard -- applied to STR's own entries only (see ict_guard.py),
     # RM-ICT is deliberately exempt (its own entries are already sourced
     # FROM these exact zones).
@@ -196,6 +204,7 @@ def load_symbol_config(symbol: str) -> RMSymbolConfig:
         ict_sl_state_file=config.state_file_for("reversal_manager_ict_sl_state", symbol),
         ict_eligibility_state_file=config.state_file_for("reversal_manager_ict_eligibility", symbol),
         nlb_nsb_block_state_file=config.state_file_for("nlb_nsb_block", symbol),
+        ict_ob_block_state_file=config.state_file_for("ict_ob_block", symbol),
         ict_guard_buffer_points=float(os.getenv(prefix + "ICT_GUARD_BUFFER_POINTS", str(d["ict_guard_buffer_points"]))),
         ict_guard_sticky_state_file=config.state_file_for("reversal_manager_ict_guard_sticky", symbol),
         ict_sl_override_points=float(os.getenv(prefix + "ICT_SL_OVERRIDE_POINTS", str(d["ict_sl_override_points"]))),

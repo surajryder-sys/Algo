@@ -26,8 +26,9 @@ Extended the same way to OB zones (see ZONE SOURCE below): a bullish/demand
 zone (role "no_short_buffer") is SUPPORT-like -> pairs with hammer; a
 bearish/supply zone ("no_long_buffer") is RESISTANCE-like -> pairs with
 star. "Opposite" is relative to the confirmed signal direction, same
-convention components 1/2 already use -- across every manager
-(TM-STR/RM-STR/RM-ICT alike), no exemptions.
+convention components 1/2 already use. (Originally applied across every
+manager, no exemptions -- SCOPED TO SCALPER ONLY 2026-09-24, see the
+SCALPER-ONLY REWORK section further down.)
 
 TOUCH LOGIC (HTF lines same-candle-only, OB zones virgin-as-of + same-or-
 previous-candle) -- fully shared with scalper_main.py (the Scalper manager,
@@ -55,6 +56,38 @@ Also carries the same two guards components 1/2 already use:
     telegram_alerts.send_if_configured().
   - "already-existing" guard: only a position opened BEFORE the pattern
     candle's own CLOSE time (bar_time + tf_minutes*60) qualifies.
+
+SCALPER-ONLY REWORK (2026-09-24, user: "EA Candle Exit shouldn't close
+positions, turn it off, scalper positions can close on opposite side
+candle signal, H signal can be close by S signal on m3 or m5, or m1 dual
+atr flip or M3 cisd, candle exit not applicable for any other trade
+managers apart from scalper"): this ENTIRE component now only ever
+closes SCALPER's own positions -- TM-STR/RM-STR/RM-ICT are no longer
+touched by it at all (component 1/2/4 still cover them; this one is
+Scalper-exclusive going forward). Three independent triggers, all OR'd,
+all scoped to Scalper only:
+  1. OPPOSITE PATTERN + TOUCH (the ORIGINAL mechanism above, unchanged --
+     confirmed with the user this STILL needs the touch, same as before):
+     a Hammer position closed by a later Star (or vice versa) on M3/M5,
+     with that opposite pattern candle also touching an HTF line or OB
+     zone of the matching role.
+  2. M1 STRUCTURE FLIP, fresh (this exact bar) -- flip_state.
+     fresh_flip_direction(), same "privileged, momentary" one-shot
+     contract as fresh_cisd() (confirmed with the user 2026-09-24 for
+     exit_manager_ltf.py's own identical new trigger, applied here too
+     for consistency). NO touch required -- deliberately simpler/faster
+     than trigger 1, matching component 4's own existing precedent of
+     giving Scalper progressively faster, less-gated exits layered on
+     top of the shared ones.
+  3. M3 CISD, fresh, matching direction -- also no touch required. Note:
+     this overlaps with component 4's own existing Scalper-only M3/M5
+     CISD exit (exit_manager_bias.run_once_scalper) -- harmless, not a
+     bug: whichever of the two independent checks runs first in a given
+     cycle closes the position, the other then simply finds nothing left
+     to close.
+  Trigger 1 keeps its own BridgeBarFlipTracker (rt.tracker, D1-M5, for
+  the HTF-line sub-check) -- trigger 2 reuses that SAME instance for M1
+  (a new timeframe key in its internal dict, no separate state needed).
 """
 from __future__ import annotations
 
@@ -63,7 +96,8 @@ from typing import TYPE_CHECKING, Optional
 
 import MetaTrader5 as mt5
 
-from v7_sentinel import broker, candle_touch, decision_log, rates, telegram_alerts, trade_journal
+from v7_sentinel import broker, candle_touch, cisd_bridge, decision_log, flip_state, rates, telegram_alerts, \
+    trade_journal
 from v7_sentinel.bridge import HammerStar, read_hammer_star
 from v7_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v7_sentinel.nlb_nsb_block import BlockStore
@@ -138,29 +172,113 @@ def _close_position(cfg: "ExitManagerSymbolConfig", position, source: "WatchedSo
         f"CANDLEEXIT-{sub_tag} (M{pattern_tf} {pattern_name} touched {trigger_label})")
 
 
+def _scalper_source(cfg: "ExitManagerSymbolConfig") -> "WatchedSource | None":
+    return next((s for s in cfg.sources if s.name == "SCALPER"), None)
+
+
 def _close_opposite_positions(cfg: "ExitManagerSymbolConfig", direction: int, confirm_time: int,
                               pattern_tf: int, pattern_name: str, sub_tag: str, trigger_label: str,
                               detail_extra: dict) -> None:
+    """SCALPER-ONLY (2026-09-24, see module docstring) -- was every
+    cfg.sources before; now only ever closes Scalper's own positions."""
+    source = _scalper_source(cfg)
+    if source is None:
+        return
     opposite_type = mt5.POSITION_TYPE_SELL if direction == 1 else mt5.POSITION_TYPE_BUY
-    for source in cfg.sources:
-        for position in broker.get_positions(cfg.symbol, source.magic_number):
-            if position.type != opposite_type:
-                continue
-            if position.time >= confirm_time:
-                continue   # opened at/after the pattern candle's own close -- "already existing", not after
-            own_tp = source.own_tp_lookup(position.ticket) if source.own_tp_lookup else None
-            if broker.is_paused_by_manual_tp(position, own_tp):
-                pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
-                print(f"[V7S-XM-CANDLE] {source.name} #{position.ticket} has a manual TP set -- "
-                      f"skipping auto-close (user is watching it manually)")
-                telegram_alerts.send_if_configured(
-                    cfg.alerts_bot_token, cfg.alerts_chat_id,
-                    f"[V7S] EM SKIPPED (manual TP set): {source.name} #{position.ticket} "
-                    f"({_DIR_LABEL[pos_direction]}) -- would have closed via CANDLEEXIT-{sub_tag} "
-                    f"(M{pattern_tf} {pattern_name} touched {trigger_label})")
-                continue
-            _close_position(cfg, position, source, pattern_tf, pattern_name, sub_tag, trigger_label,
-                            confirm_time, detail_extra)
+    for position in broker.get_positions(cfg.symbol, source.magic_number):
+        if position.type != opposite_type:
+            continue
+        if position.time >= confirm_time:
+            continue   # opened at/after the pattern candle's own close -- "already existing", not after
+        own_tp = source.own_tp_lookup(position.ticket) if source.own_tp_lookup else None
+        if broker.is_paused_by_manual_tp(position, own_tp):
+            pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+            print(f"[V7S-XM-CANDLE] {source.name} #{position.ticket} has a manual TP set -- "
+                  f"skipping auto-close (user is watching it manually)")
+            telegram_alerts.send_if_configured(
+                cfg.alerts_bot_token, cfg.alerts_chat_id,
+                f"[V7S] EM SKIPPED (manual TP set): {source.name} #{position.ticket} "
+                f"({_DIR_LABEL[pos_direction]}) -- would have closed via CANDLEEXIT-{sub_tag} "
+                f"(M{pattern_tf} {pattern_name} touched {trigger_label})")
+            continue
+        _close_position(cfg, position, source, pattern_tf, pattern_name, sub_tag, trigger_label,
+                        confirm_time, detail_extra)
+
+
+def _close_scalper_simple(cfg: "ExitManagerSymbolConfig", direction: int, confirm_time: int,
+                          trigger_tag: str, trigger_label: str) -> None:
+    """Triggers 2/3 (M1 structure FLIP / M3 CISD, see module docstring's
+    own SCALPER-ONLY REWORK section) -- no touch, no pattern, just a
+    direction match against Scalper's own opposite-direction positions."""
+    source = _scalper_source(cfg)
+    if source is None:
+        return
+    opposite_type = mt5.POSITION_TYPE_SELL if direction == 1 else mt5.POSITION_TYPE_BUY
+    for position in broker.get_positions(cfg.symbol, source.magic_number):
+        if position.type != opposite_type:
+            continue
+        if position.time >= confirm_time:
+            continue   # opened at/after this trigger's own confirm time -- "already existing", not after
+        own_tp = source.own_tp_lookup(position.ticket) if source.own_tp_lookup else None
+        if broker.is_paused_by_manual_tp(position, own_tp):
+            pos_direction = 1 if position.type == mt5.POSITION_TYPE_BUY else -1
+            print(f"[V7S-XM-CANDLE] {source.name} #{position.ticket} has a manual TP set -- "
+                  f"skipping auto-close (user is watching it manually)")
+            telegram_alerts.send_if_configured(
+                cfg.alerts_bot_token, cfg.alerts_chat_id,
+                f"[V7S] EM SKIPPED (manual TP set): {source.name} #{position.ticket} "
+                f"({_DIR_LABEL[pos_direction]}) -- would have closed via CANDLEEXIT-{trigger_tag} "
+                f"({trigger_label})")
+            continue
+        pos_direction = -direction   # position.type == opposite_type by construction above
+        print(f"[V7S-XM-CANDLE] closing {source.name} #{position.ticket} "
+              f"({_DIR_LABEL[pos_direction]}) -- {trigger_label}")
+        detail = {"rule": f"{trigger_label} (EA-CandleExit, Scalper-only)", "trigger": trigger_tag,
+                  "confirm_time": confirm_time, "position_open_time": position.time}
+        if not cfg.enable_trading:
+            print("[V7S-XM-CANDLE] enable_trading is false -- decision only, no order sent")
+            decision_log.log(cfg.decision_log_file, "candle_close_decision_only", ticket=position.ticket,
+                             target=source.name, direction=_DIR_LABEL[pos_direction], **detail)
+            continue
+        result = broker.close_position(cfg.symbol, position, cfg.deviation_points,
+                                       comment=f"V7S-XM-CANDLE-{trigger_tag}-SQ")
+        if not result.ok:
+            print(f"[V7S-XM-CANDLE] close failed: retcode={result.retcode} comment={result.comment}")
+            decision_log.log(cfg.decision_log_file, "candle_close_failed", ticket=position.ticket,
+                             target=source.name, retcode=result.retcode)
+            telegram_alerts.send_if_configured(
+                cfg.alerts_bot_token, cfg.alerts_chat_id,
+                f"[V7S] EXIT FAILED: {source.name} #{position.ticket} ({_DIR_LABEL[pos_direction]}) -- "
+                f"CANDLEEXIT-{trigger_tag} ({trigger_label}) -- retcode={result.retcode} {result.comment}")
+            continue
+        decision_log.log(cfg.decision_log_file, "candle_close_filled", ticket=position.ticket, target=source.name,
+                         direction=_DIR_LABEL[pos_direction], **detail)
+        trade_journal.TradeJournal(source.journal_file, source.name, cfg.symbol).exit_requested(
+            position.ticket, f"CANDLEEXIT-{trigger_tag}", detail)
+        telegram_alerts.send_if_configured(
+            cfg.alerts_bot_token, cfg.alerts_chat_id,
+            f"[V7S] EXIT: {source.name} #{position.ticket} ({_DIR_LABEL[pos_direction]}) closed -- "
+            f"CANDLEEXIT-{trigger_tag} ({trigger_label})")
+
+
+def _check_m1_flip(cfg: "ExitManagerSymbolConfig", rt: "CandleExitRuntime") -> None:
+    m1_fs = rt.tracker.update(cfg.symbol, 1)   # same tracker as the HTF states -- M1 is just a new key
+    direction = flip_state.fresh_flip_direction(m1_fs)
+    if direction is None:
+        return
+    confirm_time = m1_fs.last_event.bar_time + 1 * 60
+    label = f"M1 structure FLIP ({'bullish' if direction == 1 else 'bearish'})"
+    _close_scalper_simple(cfg, direction, confirm_time, "M1FLIP", label)
+
+
+def _check_m3_cisd(cfg: "ExitManagerSymbolConfig") -> None:
+    cisd = cisd_bridge.fresh_cisd(cfg.symbol, 3)
+    if cisd is None:
+        return
+    direction = cisd_bridge.direction_of(cisd)
+    confirm_time = cisd.bar_time + 3 * 60
+    label = f"M3 {cisd.last_cisd} CISD"
+    _close_scalper_simple(cfg, direction, confirm_time, "M3CD", label)
 
 
 def _check_htf_lines(cfg: "ExitManagerSymbolConfig", htf_states: dict, pattern_tf: int, hs: HammerStar,
@@ -218,3 +336,7 @@ def run_once(cfg: "ExitManagerSymbolConfig", rt: CandleExitRuntime) -> None:
         if candle_touch.is_star(hs):
             _check_htf_lines(cfg, htf_states, tf, hs, _STAR_ROLE, _STAR_DIRECTION, "star")
             _check_zones(cfg, block, tf, hs, _STAR_DIRECTION, "star")
+
+    # Triggers 2/3 (Scalper-only, no touch needed) -- see module docstring's own SCALPER-ONLY REWORK section.
+    _check_m1_flip(cfg, rt)
+    _check_m3_cisd(cfg)

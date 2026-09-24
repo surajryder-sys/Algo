@@ -128,8 +128,11 @@ ENTRY_BRIDGE_LAG_ALERT_SECONDS = 30.0
 
 
 def _cisd_tf_from_trigger(trigger: str) -> Optional[int]:
-    """"M3CD" -> 3, "M1CD-DIRECT" -> 1 -- the CISD timeframe embedded in every trigger tag this
-    module uses. None if it doesn't match the expected shape (defensive; every real trigger does)."""
+    """"M3CD" -> 3 -- the CISD timeframe embedded in every CISD-based trigger tag this module
+    uses. None for a non-CISD trigger (e.g. "M1FLIP"/"M1FLIP-DIRECT", 2026-09-24 -- structure
+    flips have no CISD bridge of their own to report a lag against, so the bridge-lag alert
+    below simply never applies to them, by design) or anything else that doesn't match the
+    expected "M{n}CD..." shape."""
     if not trigger.startswith("M") or "CD" not in trigger:
         return None
     try:
@@ -212,8 +215,8 @@ def _open_position(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, c
     if journal is not None and result.ticket is not None:
         journal.entry(result.ticket, _DIR_LABEL[direction], lots, sl, comment, logic or {})
     # STR signals carry timeframe_minutes (HTF line's own tf); ICT signals instead carry
-    # timeframe_name (the zone's own base tf, e.g. "H1") + trigger (the CISD tf that fired it,
-    # e.g. "M1CD") -- see reversal_entry.ReversalSignal / reversal_ict.ICTSignal.
+    # timeframe_name (the zone's own base tf, e.g. "H1") + trigger (whichever confirmation fired
+    # it, e.g. "M3CD" or "M1FLIP") -- see reversal_entry.ReversalSignal / reversal_ict.ICTSignal.
     tf_minutes = (logic or {}).get("timeframe_minutes")
     tf_name = (logic or {}).get("timeframe_name")
     trigger = (logic or {}).get("trigger")
@@ -228,12 +231,13 @@ def _open_position(cfg: RMSymbolConfig, sticky: ict_guard.ICTGuardStickyStore, c
         f"[V7S] ENTRY: RM-{component} {_DIR_LABEL[direction]} {cfg.symbol} #{result.ticket} ({tag}) -- "
         f"{tf_desc} -- {(logic or {}).get('rule', ref_desc)} -- sl={sl:.3f}")
 
-    # Bridge-lag alert (see module's own ENTRY_BRIDGE_LAG_ALERT_SECONDS docstring) -- skipped for
-    # M1CD-DIRECT, whose confirm_bar_time is a STANDING cisd, not a fresh-this-bar confirmation,
-    # so an "old" bar_time there is by design, not evidence of any bridge lag.
+    # Bridge-lag alert (see module's own ENTRY_BRIDGE_LAG_ALERT_SECONDS docstring) -- only ever
+    # applies to a genuine CISD-based trigger (M3CD/M5CD); _cisd_tf_from_trigger() already returns
+    # None for M1FLIP/M1FLIP-DIRECT (no CISD bridge of their own to be lagging), so those are
+    # naturally skipped here with no extra check needed.
     confirm_bar_time = (logic or {}).get("confirm_bar_time")
     cisd_tf = _cisd_tf_from_trigger(trigger) if trigger else None
-    if confirm_bar_time is not None and cisd_tf and trigger != "M1CD-DIRECT":
+    if confirm_bar_time is not None and cisd_tf:
         bar_close_time = confirm_bar_time + cisd_tf * 60
         lag = time.time() - bar_close_time
         if lag > ENTRY_BRIDGE_LAG_ALERT_SECONDS:
@@ -335,7 +339,7 @@ def _check_m3_reversal_exit(cfg: RMSymbolConfig, component: str, position, track
 
     RULE, precisely:
       1. This position's own entry_trigger must be EXACTLY "M3CD" (not
-         M5CD, M1CD, or M1CD-DIRECT) -- only M3-triggered entries qualify.
+         M5CD, M1FLIP, or M1FLIP-DIRECT) -- only M3-triggered entries qualify.
       2. A FRESH M3 CISD (cisd_bridge.fresh_cisd(), not a standing state --
          a genuine new confirmation event, "same m3 reverses") in the
          OPPOSITE direction to the position.
@@ -600,24 +604,30 @@ def run_once(rt: _SymbolRuntime) -> None:
     # condition (sideways_trapper.py); RM-STR's own entry/touch logic never uses M15 for anything else.
     m15_fs = rt.tracker.update(cfg.symbol, 15) if rt.tracker is not None else None
     m15_structure = m15_fs.confirmed.value if m15_fs is not None else None
-    # M5 structure -- ADDED 2026-09-22, feeds ONLY RM-ICT's own M1-CISD gate below (see
+    # M5 structure -- ADDED 2026-09-22, feeds ONLY RM-ICT's own M1-FLIP gate below (see
     # reversal_ict._check_zone()'s own docstring); RM-STR's own logic never uses this.
     m5_fs = rt.tracker.update(cfg.symbol, 5) if rt.tracker is not None else None
     m5_structure = m5_fs.confirmed.value if m5_fs is not None else None
+    # M1 structure FLIP state -- feeds ONLY RM-ICT's own M5-zone exception pool (2026-09-24,
+    # replaced an M1 CISD confirmation there, see reversal_ict._check_zone()'s own docstring).
+    # Same tracker instance as M5/M15 above -- M1 is just a new timeframe key in its own dict.
+    m1_fs = rt.tracker.update(cfg.symbol, 1) if rt.tracker is not None else None
 
     str_signals = reversal_entry.find_signals(cfg.symbol, htf_states, rt.store, cfg.sl_buffer, bid, ask,
                                               rt.trapper_str, cfg.sideways_trap_min_distance_points, m15_structure)
     # RM-ICT (second component) -- OB-zone (NLB/NSB Block) touch +
-    # post-touch CISD confirmation, fully independent of the M15/tracker
+    # post-touch confirmation, fully independent of the M15/tracker
     # machinery STR uses. See reversal_ict.py's own docstring for the
     # full entry rule (a complete redesign, 2026-09-18 -- no longer the
-    # M15-Primary-Structure-gated system). m5_structure/m15_structure feed
-    # ONLY the M1-CISD gate (2026-09-22) -- every other confirmation
-    # timeframe (M3/M5) is unaffected by them.
-    ict_signals = reversal_ict.find_ict_signals(cfg.symbol, cfg.nlb_nsb_block_state_file, rt.ict_eligibility,
+    # M15-Primary-Structure-gated system). m1_fs/m5_structure/m15_structure
+    # feed ONLY the M1-FLIP gate/direct-fire (2026-09-22, mechanism
+    # changed 2026-09-24) -- every other confirmation timeframe (M3/M5) is
+    # unaffected by them.
+    ict_signals = reversal_ict.find_ict_signals(cfg.symbol, cfg.nlb_nsb_block_state_file,
+                                                cfg.ict_ob_block_state_file, rt.ict_eligibility,
                                                 cfg.sl_buffer, bid, ask, cfg.ict_sl_override_points,
                                                 cfg.ict_touch_max_age_minutes,
-                                                m5_structure=m5_structure, m15_structure=m15_structure)
+                                                m1_fs=m1_fs, m5_structure=m5_structure, m15_structure=m15_structure)
 
     # Session Manager -- daily no-new-trade windows (session_manager.py). Touch-arming/eligibility
     # syncing above already happened regardless; this only ever discards signals that would

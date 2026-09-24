@@ -1,5 +1,5 @@
-"""V7-Sentinel Data Manager -- consolidates tv_scraper + NLB/NSB Watcher
-into one process, as two plain OS threads.
+"""V7-Sentinel Data Manager -- consolidates tv_scraper + NLB/NSB Watcher +
+ICT Block Watcher into one process, as three plain OS threads.
 
 Built 2026-09-24 as part of the V6S -> V7S architecture consolidation
 (see trade_manager_main.py's own docstring for the full incident/
@@ -28,6 +28,15 @@ failure before scraper.py's own inner loop even starts) kills that whole
 process outright. In V7S, it should only kill and restart that ONE
 thread, never take Data Manager itself down.
 
+THIRD THREAD (2026-09-24, ict_ob_watcher -- see that module's own
+docstring): drives ict_ob_block.ICTBlockStore, the merged TV+MT5 OB-zone
+store RM-ICT's new MT5-zone entries and the new ICT Exit component both
+read read-only. Has its OWN MT5 connection (mt5.initialize() is
+idempotent, same pattern nlb_nsb_watcher already uses) -- kept a
+separate thread rather than folded into nlb_nsb_watcher's own loop since
+that module's job is specifically the H4-M10 NLB/NSB Block, a different
+store with different scope; this keeps both single-purpose.
+
 Run with: python -m v7_sentinel.data_manager
 """
 from __future__ import annotations
@@ -35,7 +44,7 @@ from __future__ import annotations
 import threading
 import time
 
-from v7_sentinel import nlb_nsb_watcher
+from v7_sentinel import ict_ob_watcher, nlb_nsb_watcher
 from v7_sentinel.tv_scraper import scraper as tv_scraper
 
 _RESTART_DELAY_SECONDS = 5.0
@@ -59,17 +68,30 @@ def _run_nlb_nsb_watcher() -> None:
             time.sleep(_RESTART_DELAY_SECONDS)
 
 
+def _run_ict_ob_watcher() -> None:
+    while True:
+        try:
+            ict_ob_watcher.main()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[V7S-DM-ICTBLOCK] FATAL, restarting thread loop in {_RESTART_DELAY_SECONDS:.0f}s: {exc!r}")
+            time.sleep(_RESTART_DELAY_SECONDS)
+
+
 def main() -> None:
-    print("[V7S-DM] starting -- sub-components: tv_scraper (thread), nlb_nsb_watcher (thread)")
+    print("[V7S-DM] starting -- sub-components: tv_scraper (thread), nlb_nsb_watcher (thread), "
+          "ict_ob_watcher (thread)")
     t1 = threading.Thread(target=_run_tv_scraper, name="v7s-dm-tvz", daemon=True)
     t2 = threading.Thread(target=_run_nlb_nsb_watcher, name="v7s-dm-nlbnsb", daemon=True)
+    t3 = threading.Thread(target=_run_ict_ob_watcher, name="v7s-dm-ictblock", daemon=True)
     t1.start()
     t2.start()
+    t3.start()
     # daemon=True so Ctrl+C / process exit doesn't hang on a stuck thread; join() here just
-    # keeps the process itself alive as long as either thread is (both restart on their own
+    # keeps the process itself alive as long as any thread is (all restart on their own
     # exceptions, so in practice this blocks forever under normal operation).
     t1.join()
     t2.join()
+    t3.join()
 
 
 if __name__ == "__main__":

@@ -223,3 +223,27 @@ def with_direction_flip_after(state: Optional[FlipStateResult], direction: int, 
     if event.confirmed.value != direction:
         return False
     return event.bar_time + tf_minutes * 60 > position_open_time
+
+
+def fresh_flip_direction(state: Optional[FlipStateResult]) -> Optional[int]:
+    """The direction (1 bull, -1 bear) of a genuine FLIP confirmed on the
+    EXACT bar that just closed -- None if there's no baseline, the last
+    event was a TRAP_RESOLVED (not a flip), or that event isn't from
+    THIS cycle's freshest bar (state.event_just_happened()). Added
+    2026-09-24 for exit_manager_ltf.py's own M1-structure-flip trigger
+    (replacing an M1 CISD confirmation) and exit_manager_candle.py's own
+    Scalper-only M1-flip exit -- same "privileged, momentary" one-shot
+    contract cisd_bridge.fresh_cisd() already uses: an OLDER flip, even
+    one still structurally in force, does not count once a newer bar has
+    closed without a fresh event of its own. Unlike
+    with_direction_flip_after() above (a STANDING check against a fixed
+    reference direction/time, built for sl_manager.py's own ongoing
+    trailing use), this is direction-agnostic and freshness-only -- the
+    caller decides what to do with whichever direction comes back."""
+    if state is None or state.last_event is None:
+        return None
+    if state.last_event.event_type != EventType.FLIP:
+        return None
+    if not state.event_just_happened():
+        return None
+    return state.last_event.confirmed.value

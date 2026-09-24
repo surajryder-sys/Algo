@@ -42,8 +42,8 @@ NO try/except between them there, only one level up around the whole
 symbol; found while designing this file, see the V7S consolidation plan).
 
 PER-SUB-COMPONENT HEARTBEATS (2026-09-24, user's own choice over V6S's
-coarser 4-file scheme): 8 heartbeat files -- TM-STR, RM-STR, RM-ICT,
-Scalper, EM-Bias, EM-LTF, EM-Candle, EM-Scalper-M3M5 -- written right
+coarser 4-file scheme): 9 heartbeat files -- TM-STR, RM-STR, RM-ICT,
+Scalper, EM-Bias, EM-LTF, EM-Candle, EM-Scalper-M3M5, EM-ICT -- written right
 after each guarded call, success or caught exception, same "written
 unconditionally" convention as every other heartbeat in this project
 (a hung/dead sub-component is what heartbeat staleness catches; a raised-
@@ -68,6 +68,7 @@ from v7_sentinel import (
     config,
     exit_manager_bias,
     exit_manager_candle,
+    exit_manager_ict,
     exit_manager_ltf,
     heartbeat,
     reversal_main,
@@ -87,6 +88,7 @@ class _SymbolRuntime:
     em_cfg: "object"
     em_ltf: "exit_manager_ltf.LTFExitRuntime"
     em_candle: "exit_manager_candle.CandleExitRuntime"
+    em_ict: "exit_manager_ict.ICTExitRuntime"
     em_zone_alert: "zone_touch_alert.ZoneTouchAlertRuntime"
 
 
@@ -100,6 +102,7 @@ def _build_runtime(symbol: str) -> _SymbolRuntime:
         em_cfg=em_cfg,
         em_ltf=exit_manager_ltf.build_runtime(em_cfg),
         em_candle=exit_manager_candle.build_runtime(em_cfg),
+        em_ict=exit_manager_ict.build_runtime(em_cfg),
         em_zone_alert=zone_touch_alert.build_runtime(),
     )
 
@@ -133,6 +136,7 @@ def run_once(rt: _SymbolRuntime) -> None:
                 lambda: exit_manager_candle.run_once(rt.em_cfg, rt.em_candle))
     _run_guarded("EM-SCALPER-M3M5", rt.em_cfg.heartbeat_file_scalper_exit,
                 lambda: exit_manager_bias.run_once_scalper(rt.em_cfg))
+    _run_guarded("EM-ICT", rt.em_cfg.heartbeat_file_ict, lambda: exit_manager_ict.run_once(rt.em_cfg, rt.em_ict))
 
     # Alert-only, sends no orders -- no heartbeat needed (not gated by enable_trading either).
     try:
