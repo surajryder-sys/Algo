@@ -1,0 +1,182 @@
+"""V7-Sentinel Scalper -- main loop. Built 2026-09-22 (user's own rule, see
+scalper_config.py's own docstring for the exact words). One runtime bundle
+PER SYMBOL in config.ACTIVE_SYMBOLS, same multi-instrument shape as
+trend_main.py/reversal_main.py.
+
+Run with: python -m v7_sentinel.scalper_main
+
+THE RULE, in full:
+  - ENTRY: the same hammer/star + HTF-line-or-virgin-OB-zone touch signal
+    EA-CandleExit uses to CLOSE trades, reused here to OPEN one instead --
+    see candle_touch.py's own docstring for the complete pattern/pairing/
+    scope/touch rule, and scalper_entry.py's own docstring for how it's
+    applied to entries specifically (SL/TP calculation, one-trade-per-
+    pattern-event eligibility).
+  - LOTS: 0.05 fixed (scalper_config.py).
+  - SL: the pattern candle's own low (BUY) / high (SELL), +/- a 2.0-point
+    buffer.
+  - TP: a broker-side TP at a fixed 1:1 R:R from the SL distance -- the
+    ONLY V7S manager that ever places one (see broker.send_market_order's
+    own tp= docstring). Recorded in scalper_own_tp.ScalperOwnTPStore on
+    every fill so Exit Manager can tell "Scalper's own untouched TP" apart
+    from "the user has since changed it" (broker.is_paused_by_manual_tp).
+  - EXIT: no independent exit logic lives here at all -- a Scalper trade
+    closes via ITS OWN broker-side TP hitting, its own SL hitting, OR any
+    Exit Manager component's own close (bias flip / LTF touch / CandleExit
+    STR or ICT), exactly like every other manager's positions -- Scalper
+    is simply a 4th WatchedSource in exit_manager_config.py now. This file
+    never itself closes a position.
+
+Safety: V7S_SCALPER_{SYMBOL}_ENABLE_TRADING must be explicitly true for any
+order to actually be sent; left unset (default false) every decision is
+printed and logged but nothing touches the account.
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Optional
+
+from v7_sentinel import broker, config, decision_log, heartbeat, position_size_manager, scalper_entry, session_manager, telegram_alerts, trade_journal
+from v7_sentinel.bridge_bar_flip import BridgeBarFlipTracker
+from v7_sentinel.nlb_nsb_block import BlockStore
+from v7_sentinel.reversal_config import load_symbol_config as load_rm_config
+from v7_sentinel.scalper_config import ScalperSymbolConfig, load_symbol_config
+from v7_sentinel.scalper_own_tp import ScalperOwnTPStore
+
+_DIR_LABEL = {1: "BUY", -1: "SELL"}
+
+
+def _entry_comment(sig: scalper_entry.ScalperSignal) -> str:
+    """e.g. "V7S-SC-STR-H2-M3-H" -- sub_tag (STR line / ICT zone), the BASE
+    timeframe (the touched line/zone's own -- "H2", "M15", ...), the
+    EXECUTION timeframe (the pattern candle's own -- always M3 or M5), and
+    the pattern letter (H hammer / S star). Made explicit 2026-09-23 (user:
+    "comment should be clear with base and execution timeframe" -- the
+    original "V7S-SC-STR-H" didn't say WHICH line/zone or WHICH pattern
+    timeframe fired). Comfortably under MT5's 31-character comment limit
+    even for the longest base name ("V7S-SC-ICT-M30-M3-H" = 20 chars)."""
+    pattern_letter = "H" if sig.pattern_name == "hammer" else "S"
+    return f"V7S-SC-{sig.sub_tag}-{sig.base_timeframe_name}-M{sig.pattern_tf}-{pattern_letter}"
+
+
+@dataclass
+class _SymbolRuntime:
+    cfg: ScalperSymbolConfig
+    tracker: BridgeBarFlipTracker
+    eligibility: scalper_entry.ScalperEligibilityStore
+    own_tp: ScalperOwnTPStore
+    block_state_file: str                 # RM-ICT's own Block -- read-only, same source EA-CandleExit uses
+    journal: trade_journal.TradeJournal
+    session_watch: session_manager.SessionWindowWatch = field(default_factory=session_manager.SessionWindowWatch)  # daily no-new-trade windows
+
+
+def _build_runtime(symbol: str) -> _SymbolRuntime:
+    cfg = load_symbol_config(symbol)
+    return _SymbolRuntime(
+        cfg=cfg,
+        tracker=BridgeBarFlipTracker(cfg.bridge_bar_flip_state_file),
+        eligibility=scalper_entry.ScalperEligibilityStore(cfg.eligibility_state_file),
+        own_tp=ScalperOwnTPStore(cfg.own_tp_state_file),
+        block_state_file=load_rm_config(symbol).nlb_nsb_block_state_file,
+        journal=trade_journal.TradeJournal(cfg.trade_journal_file, "SCALPER", symbol),
+    )
+
+
+def _open_position(cfg: ScalperSymbolConfig, sig: scalper_entry.ScalperSignal, journal: trade_journal.TradeJournal,
+                   own_tp: ScalperOwnTPStore) -> bool:
+    """True if the entry went through (filled, or enable_trading is False
+    so it's decision-only) -- False only on a genuine order rejection,
+    same "caller must not mark the event handled on False" contract
+    trend_main._open_position() uses."""
+    comment = _entry_comment(sig)
+    print(f"[V7S-SC-ENTRY] {cfg.symbol} {_DIR_LABEL[sig.direction]} -- {sig.pattern_name} on M{sig.pattern_tf} "
+          f"(execution tf) touched {sig.sub_tag} {sig.base_timeframe_name} (base tf, {sig.trigger_label}) "
+          f"sl={sig.sl:.3f} tp={sig.tp:.3f}")
+    # Position Size Manager -- halved lots during the 23:00-04:00 IST window (position_size_manager.py).
+    # Scalper's own TP stays a fixed 1:1 R:R off the SL distance regardless -- unaffected by lot size
+    # ("scalper to follow tp" -- user's own words, 2026-09-24: no change to its exit behavior).
+    lots = cfg.night_lots if position_size_manager.is_night() else cfg.lots
+    detail = {"rule": "hammer/star + touch (Scalper)", "pattern": sig.pattern_name, "sub_source": sig.sub_tag,
+              "execution_timeframe": f"M{sig.pattern_tf}", "base_timeframe": sig.base_timeframe_name,
+              "trigger": sig.trigger_label, "bar_time": sig.bar_time, "sl": sig.sl, "tp": sig.tp, "lots": lots}
+    if not cfg.enable_trading:
+        print("[V7S-SC-ENTRY] enable_trading is false -- decision only, no order sent")
+        decision_log.log(cfg.decision_log_file, "entry_decision_only", direction=_DIR_LABEL[sig.direction], **detail)
+        return True
+    result = broker.send_market_order(cfg.symbol, sig.direction, lots, sig.sl, cfg.magic_number,
+                                      cfg.deviation_points, comment, tp=sig.tp)
+    if not result.ok:
+        print(f"[V7S-SC-ENTRY] order_send failed: retcode={result.retcode} comment={result.comment}")
+        decision_log.log(cfg.decision_log_file, "entry_failed", direction=_DIR_LABEL[sig.direction],
+                         retcode=result.retcode, broker_comment=result.comment, **detail)
+        return False
+    print(f"[V7S-SC-ENTRY] filled, ticket={result.ticket}")
+    decision_log.log(cfg.decision_log_file, "entry_filled", direction=_DIR_LABEL[sig.direction],
+                     ticket=result.ticket, **detail)
+    if result.ticket is not None:
+        journal.entry(result.ticket, _DIR_LABEL[sig.direction], lots, sig.sl, comment, detail)
+        own_tp.set(result.ticket, sig.tp)
+    telegram_alerts.send_if_configured(
+        cfg.alerts_bot_token, cfg.alerts_chat_id,
+        f"[V7S] ENTRY: SCALPER {_DIR_LABEL[sig.direction]} {cfg.symbol} #{result.ticket} -- "
+        f"{sig.pattern_name} on M{sig.pattern_tf} (execution tf) touched {sig.sub_tag} "
+        f"{sig.base_timeframe_name} (base tf, {sig.trigger_label}) -- sl={sig.sl:.3f} tp={sig.tp:.3f}")
+    return True
+
+
+def run_once(rt: _SymbolRuntime) -> None:
+    cfg = rt.cfg
+    bid, ask = broker.get_tick_price(cfg.symbol)
+    block = BlockStore(rt.block_state_file)   # read-only, RM-ICT's own Block, never written to here
+
+    # Session Manager -- daily no-new-trade windows (session_manager.py). Scalper has no
+    # independent exit logic of its own (see module docstring), so this only ever suppresses
+    # NEW entries; a position opened before a window began is left entirely alone by this file
+    # regardless, same as always.
+    session_blocked, session_window, session_event = rt.session_watch.update()
+    if session_event == "entered":
+        msg = f"[V7S-SC] {cfg.symbol} entering session window '{session_window}' -- new entries PAUSED until it ends."
+        print(msg)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, msg)
+    elif session_event == "left":
+        msg = f"[V7S-SC] {cfg.symbol} session window ended -- new entries resumed."
+        print(msg)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, msg)
+    if session_blocked:
+        return
+
+    sig = scalper_entry.find_signal(cfg.symbol, rt.tracker, block, rt.eligibility, cfg.sl_buffer, cfg.risk_reward,
+                                    bid, ask)
+    if sig is None:
+        return
+    if _open_position(cfg, sig, rt.journal, rt.own_tp):
+        rt.eligibility.mark_traded(sig.pattern_tf, sig.pattern_name, sig.bar_time)
+
+    open_tickets = [p.ticket for p in broker.get_positions(cfg.symbol, cfg.magic_number)]
+    rt.journal.reconcile(open_tickets)
+
+
+def main() -> None:
+    runtimes = [_build_runtime(symbol) for symbol in config.ACTIVE_SYMBOLS]
+    for rt in runtimes:
+        print(f"[V7S-SC] {rt.cfg.symbol} starting -- magic={rt.cfg.magic_number} lots={rt.cfg.lots} "
+              f"sl_buffer={rt.cfg.sl_buffer} risk_reward={rt.cfg.risk_reward} enable_trading={rt.cfg.enable_trading} "
+              f"poll={rt.cfg.poll_seconds}s")
+        broker.connect(rt.cfg.symbol, rt.cfg.mt5_terminal_path, rt.cfg.mt5_login, rt.cfg.mt5_password,
+                       rt.cfg.mt5_server)
+    try:
+        while True:
+            for rt in runtimes:
+                try:
+                    run_once(rt)
+                except Exception as exc:  # noqa: BLE001 -- keep the loop alive, log and continue
+                    print(f"[V7S-SC] {rt.cfg.symbol} cycle error: {exc!r}")
+                heartbeat.write(rt.cfg.heartbeat_file)
+            time.sleep(min(rt.cfg.poll_seconds for rt in runtimes))
+    finally:
+        broker.shutdown()
+
+
+if __name__ == "__main__":
+    main()
