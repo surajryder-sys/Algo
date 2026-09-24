@@ -169,6 +169,11 @@ v5s_reversal_manager_bridge_flip_state.json
 v6s_*.json
 v6s_*.jsonl
 
+# v7_sentinel -- same convention, v7s_ prefix (see v7_sentinel/config.py's
+# own state_file_for()).
+v7s_*.json
+v7s_*.jsonl
+
 # MQL5 compiled binaries + MetaEditor compile logs -- only .mq5 source is
 # versioned (see mql5/ convention), these are always regenerated locally.
 mql5/*.ex5

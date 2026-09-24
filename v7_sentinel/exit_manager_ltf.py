@@ -45,14 +45,19 @@ armed but whose confirming CISD candle closed on the wrong side is not a
 match -- another armed level (if any) may still qualify independently.
 
 SCOPE -- "all supports and resistances of all timeframes till M15" (user's own
-words): D1, H4, H2, H1, M30, M15 -- htf_levels.compute_htf_state(), the exact
-same ATR-dual + Supertrend level source RM-STR's own entry reads, just a
-SMALLER slice of RM-STR's own 8-timeframe scope (LTF_HTF_TIMEFRAMES below
-deliberately drops M10/M5 -- this component has nothing to do with sub-M15
-levels). Its own LevelEligibilityStore/BridgeBarFlipTracker instances are
-SEPARATE from RM-STR's own (own state files, see exit_manager_config.py) --
-two independent processes reading the same bridge/rates data, never sharing
-state.
+words) WIDENED 2026-09-24 to also include M10, M5, and M3 (user: "add M5 with
+ATR and supertrend / add M3 with ATR and supertrend", then "add M10 as
+well"): D1, H4, H2, H1, M30, M15, M10, M5, M3 -- htf_levels.compute_htf_state(),
+the exact same ATR-dual + Supertrend level source RM-STR's own entry reads.
+LTF_HTF_TIMEFRAMES below now includes one timeframe (M3) outside RM-STR's own
+8-timeframe scope (htf_levels.HTF_TIMEFRAMES_MINUTES has no M3), so it's no
+longer a strict subset of it either way. M10/M5/M3 are all bridge-only
+(bridge.BRIDGE_ONLY_TIMEFRAMES) except M10, which is native copy_rates same as
+D1-M30 -- either way, htf_levels.compute_htf_state() already handles the
+branching, nothing extra needed here. Its own LevelEligibilityStore/
+BridgeBarFlipTracker instances are SEPARATE from RM-STR's own (own state
+files, see exit_manager_config.py) -- two independent processes reading the
+same bridge/rates data, never sharing state.
 
 MAIN POINT (user's own emphasis): "EM component not to execute its logic if
 tp is set -- if tp is set then user is manually watching it, if tp is
@@ -105,10 +110,9 @@ if TYPE_CHECKING:
 _DIR_LABEL = {1: "BUY", -1: "SELL"}
 _CISD_TIMEFRAMES = (1, 3)  # M1 tried first, M3 fallback (re-added 2026-09-23) -- see module docstring's "M1 BACK" section
 
-# "all supports and resistances of all timeframes till M15" -- D1 through
-# M15, NOT RM-STR's own full 8-timeframe scope (htf_levels.HTF_TIMEFRAMES_MINUTES
-# also includes M10/M5, deliberately excluded here).
-LTF_HTF_TIMEFRAMES = (1440, 240, 120, 60, 30, 15)
+# D1 through M15, plus M10, M5, and M3 (widened 2026-09-24, user's own words -- see
+# module docstring's own SCOPE section).
+LTF_HTF_TIMEFRAMES = (1440, 240, 120, 60, 30, 15, 10, 5, 3)
 
 
 @dataclass
