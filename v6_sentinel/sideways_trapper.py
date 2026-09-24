@@ -48,6 +48,8 @@ import json
 from pathlib import Path
 from typing import Optional
 
+_DIR_LABEL = {1: "BUY", -1: "SELL"}
+
 
 class SidewaysTrapper:
     def __init__(self, path: str):
@@ -55,6 +57,16 @@ class SidewaysTrapper:
         # "1" / "-1" -> {"price": float, "m15_structure": int}
         self._state: dict[str, dict] = {}
         self._load()
+        # Set by blocks() whenever it actually blocks a signal this cycle, for the caller to
+        # surface (print/decision_log/Telegram) once per outer cycle -- added 2026-09-24, user:
+        # "can i know the reason of skipped trades... extend same alert to telegram." blocks()
+        # itself has no cfg/telegram access (stays a small, dependency-free state object), so it
+        # just records WHY here; trend_main.py/reversal_main.py read and clear it after calling
+        # find_signal()/find_signals(). Overwritten on every blocking call -- if several
+        # candidates block in the same cycle, only the last one is reported (same "collapse to
+        # one alert per cycle, not one per candidate" convention reversal_main.py's own
+        # redundant-signal alert already uses for the identical spam risk).
+        self.last_block_reason: Optional[str] = None
 
     def _load(self) -> None:
         if not self._path.exists():
@@ -90,4 +102,10 @@ class SidewaysTrapper:
             del self._state[str(direction)]   # a genuine M15 flip since this was recorded -- clear it
             self._save()
             return False
-        return abs(entry_price - entry["price"]) < min_distance
+        distance = abs(entry_price - entry["price"])
+        blocked = distance < min_distance
+        if blocked:
+            self.last_block_reason = (
+                f"{_DIR_LABEL[direction]} @ {entry_price:.3f} is only {distance:.1f} points from the last "
+                f"recorded loss @ {entry['price']:.3f} -- needs {min_distance:.1f}+ points")
+        return blocked

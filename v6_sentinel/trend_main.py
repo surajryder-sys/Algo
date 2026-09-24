@@ -101,7 +101,7 @@ from typing import Optional
 
 import MetaTrader5 as mt5
 
-from v6_sentinel import alerts, bridge, bridge_flip, broker, cisd_bridge, config, decision_log, flip_state, heartbeat, position_size_manager, rates, session_manager, sideways_trapper, sl_manager, telegram_alerts, trade_journal, trade_manager, trend_bias, trend_entry
+from v6_sentinel import bridge, bridge_flip, broker, cisd_bridge, config, decision_log, flip_state, heartbeat, position_size_manager, rates, session_manager, sideways_trapper, sl_manager, telegram_alerts, trade_journal, trade_manager, trend_bias, trend_entry
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.flip_state import far_near_line
 from v6_sentinel.trend_config import TMSymbolConfig, load_symbol_config
@@ -422,12 +422,12 @@ def run_once(rt: _SymbolRuntime) -> None:
                f"M{cfg.bias_timeframe} chart/indicator.")
         print(msg)
         decision_log.log(cfg.decision_log_file, "bias_feed_stale", bias_timeframe=cfg.bias_timeframe)
-        alerts.send_alert(msg)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, msg)
     elif feed_event == "recovered":
         msg = f"[V6S-TM] {cfg.symbol} M{cfg.bias_timeframe} ATR/CISD bridge is fresh again -- new entries resumed."
         print(msg)
         decision_log.log(cfg.decision_log_file, "bias_feed_recovered", bias_timeframe=cfg.bias_timeframe)
-        alerts.send_alert(msg)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, msg)
 
     # The M5 ATR strong/weak state (1 strong, -1 weak, None unknown) -- read every cycle so the
     # persisted tracker stays warm -- and its own feed watch (see the docstring).
@@ -443,12 +443,12 @@ def run_once(rt: _SymbolRuntime) -> None:
                f"Check the M{cfg.squareoff_timeframe} chart/indicator.")
         print(msg)
         decision_log.log(cfg.decision_log_file, "state_feed_stale", timeframe=cfg.squareoff_timeframe)
-        alerts.send_alert(msg)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, msg)
     elif state_event == "recovered":
         msg = f"[V6S-TM] {cfg.symbol} M{cfg.squareoff_timeframe} ATR bridge is fresh again -- M5 exits resumed."
         print(msg)
         decision_log.log(cfg.decision_log_file, "state_feed_recovered", timeframe=cfg.squareoff_timeframe)
-        alerts.send_alert(msg)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, msg)
 
     open_tickets = {p.ticket for p in broker.get_positions(cfg.symbol, cfg.magic_number)}
     if rt.journal is not None:
@@ -537,11 +537,30 @@ def run_once(rt: _SymbolRuntime) -> None:
                           f"{_DIR_LABEL[pos_direction]} is already open on #{position.ticket} -- marked handled")
                     decision_log.log(cfg.decision_log_file, "redundant_signal", direction=_DIR_LABEL[sig.direction],
                                      trigger=sig.trigger, existing_ticket=position.ticket)
+                    telegram_alerts.send_if_configured(
+                        cfg.alerts_bot_token, cfg.alerts_chat_id,
+                        f"[V6S] SKIPPED: TM-STR {_DIR_LABEL[sig.direction]} {cfg.symbol} ({sig.trigger}) -- "
+                        f"a {_DIR_LABEL[pos_direction]} is already open on #{position.ticket}, no new entry")
                 else:
                     # An opposite trade is somehow still open (its bias-flip close failed):
                     # don't stack, and don't consume the event -- retry next cycle.
                     print(f"[V6S-TM] {sig.trigger} qualifies ({_DIR_LABEL[sig.direction]}) but an opposite "
                           f"position #{position.ticket} is still open -- not entering this cycle")
+                    telegram_alerts.send_if_configured(
+                        cfg.alerts_bot_token, cfg.alerts_chat_id,
+                        f"[V6S] SKIPPED: TM-STR {_DIR_LABEL[sig.direction]} {cfg.symbol} ({sig.trigger}) -- "
+                        f"an opposite #{position.ticket} is still open (its own close may have failed), "
+                        f"retrying next cycle")
+
+    # Sideways Trapper block visibility (2026-09-24) -- see SidewaysTrapper.last_block_reason's
+    # own docstring. blocks() has no cfg/telegram access itself, so it just records WHY; this is
+    # where that gets surfaced, once per cycle, then cleared.
+    if rt.trapper is not None and rt.trapper.last_block_reason is not None:
+        msg = f"[V6S-TM] {cfg.symbol} Sideways Trapper blocked entry -- {rt.trapper.last_block_reason}"
+        print(msg)
+        decision_log.log(cfg.decision_log_file, "trapper_blocked", reason=rt.trapper.last_block_reason)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, f"[V6S] SKIPPED: {msg}")
+        rt.trapper.last_block_reason = None
 
     # 4. Manage whatever is open (independent of whether a gate exists right now).
     position = _current_position(cfg)

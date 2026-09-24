@@ -91,9 +91,10 @@ be):
     the prefix is purely for readability, not needed to tell them apart
     programmatically.
   - Alerts: a qualifying-but-not-acted-on signal (the "ignore" case
-    above) pushes to Telegram (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID in
-    .env, same shared bot every component in this repo already uses) --
-    best-effort, never crashes the loop.
+    above) pushes to Telegram via the shared V6S alerts bot
+    (V6S_ALERTS_TELEGRAM_BOT_TOKEN/CHAT_ID in .env -- the only Telegram
+    bot V6-Sentinel uses anywhere, 2026-09-24) -- best-effort, never
+    crashes the loop.
 
 Safety: each symbol's own enable_trading (reversal_config.py,
 V6S_RM_{SYMBOL}_ENABLE_TRADING) must be explicitly true in .env for any
@@ -113,7 +114,6 @@ import MetaTrader5 as mt5
 from v6_sentinel import broker, cisd_bridge, config, decision_log, flip_state, heartbeat, htf_levels, ict_guard, position_size_manager, reversal_entry, reversal_ict, session_manager, sideways_trapper, sl_manager, telegram_alerts, trade_journal, trade_manager
 from v6_sentinel.bridge_bar_flip import BridgeBarFlipTracker
 from v6_sentinel.bridge_flip import m3_far_line
-from v6_sentinel.alerts import send_alert as _send_alert
 from v6_sentinel.reversal_config import RMSymbolConfig, load_symbol_config
 
 _DIR_LABEL = {1: "BUY", -1: "SELL"}
@@ -709,7 +709,22 @@ def run_once(rt: _SymbolRuntime) -> None:
         msg = (f"[V6S-{component}] {cfg.symbol} {_DIR_LABEL[direction]} qualifies e.g. {first_tag}{extra} but a "
               f"position is already open on #{ticket} -- marked traded, no new entry")
         print(msg)
-        _send_alert(msg)
+        # Switched to the shared V6S alerts bot (2026-09-24) -- was _send_alert() (the OLDER,
+        # separate TELEGRAM_BOT_TOKEN bot every other alert in this project has since moved off
+        # of), which meant this alert landed in a DIFFERENT Telegram conversation than every
+        # entry/exit/bridge-lag/session alert, easy to miss entirely.
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, f"[V6S] SKIPPED: {msg}")
+
+    # Sideways Trapper block visibility (2026-09-24, RM-STR only -- see sideways_trapper.py's own
+    # docstring, this component never applies to ICT) -- see SidewaysTrapper.last_block_reason's
+    # own docstring for why this is read/cleared here rather than inside blocks() itself.
+    if rt.trapper_str is not None and rt.trapper_str.last_block_reason is not None:
+        msg = f"[V6S-STR] {cfg.symbol} Sideways Trapper blocked entry -- {rt.trapper_str.last_block_reason}"
+        print(msg)
+        decision_log.log(cfg.decision_log_file, "trapper_blocked", component="STR",
+                         reason=rt.trapper_str.last_block_reason)
+        telegram_alerts.send_if_configured(cfg.alerts_bot_token, cfg.alerts_chat_id, f"[V6S] SKIPPED: {msg}")
+        rt.trapper_str.last_block_reason = None
 
     # EVERY open position of each component is managed (SL trailing + partials), not just the first --
     # normally at most one per component now that any opposite signal squares off the other one again,
