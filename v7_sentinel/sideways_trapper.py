@@ -41,6 +41,24 @@ reset it").
 No fallback: if the current M15 structure can't be read (bridge/tracker has
 nothing yet), the existing block just stays in effect unchanged -- never
 guessed away.
+
+ALERT DEBOUNCE (2026-09-25, live bug: Telegram got a fresh "SKIPPED...
+Sideways Trapper blocked entry" message on effectively every poll cycle
+-- 158 near-identical lines in one log, one per second, only the live
+price digits changing -- for as long as a touch+CISD signal kept
+re-qualifying while price sat within min_distance of a recorded loss).
+blocks() must keep returning True every cycle unconditionally -- the
+actual skip-this-signal behavior was always correct and must not
+change -- but last_block_reason (the ALERT-worthiness signal the caller
+surfaces once then clears) previously got re-set on every single call,
+so the caller saw a "new" reason every cycle and re-alerted every time,
+the same class of spam this project's own Watchdog explicitly avoids
+via state-transition-only alerting. last_block_reason now only gets set
+once per distinct blocking EPISODE -- the first call against a given
+recorded-loss price, not every subsequent call against that same price
+-- via self._alerted_price, cleared alongside self._state whenever a
+genuine M15 flip clears the block (so a later, genuinely new block
+against the same old price still alerts again).
 """
 from __future__ import annotations
 
@@ -67,6 +85,9 @@ class SidewaysTrapper:
         # one alert per cycle, not one per candidate" convention reversal_main.py's own
         # redundant-signal alert already uses for the identical spam risk).
         self.last_block_reason: Optional[str] = None
+        # Per direction, the recorded-loss price we've already surfaced an alert for -- see
+        # module docstring's own ALERT DEBOUNCE section. "1"/"-1" -> price, same keying as _state.
+        self._alerted_price: dict[str, float] = {}
 
     def _load(self) -> None:
         if not self._path.exists():
@@ -100,12 +121,17 @@ class SidewaysTrapper:
         if (m15_structure is not None and recorded_structure is not None
                 and m15_structure != recorded_structure):
             del self._state[str(direction)]   # a genuine M15 flip since this was recorded -- clear it
+            self._alerted_price.pop(str(direction), None)   # so a later block against the same old price alerts again
             self._save()
             return False
         distance = abs(entry_price - entry["price"])
         blocked = distance < min_distance
-        if blocked:
+        if blocked and self._alerted_price.get(str(direction)) != entry["price"]:
+            # Only surface an alert once per distinct blocking episode -- see module docstring's
+            # own ALERT DEBOUNCE section. `blocked` itself is returned below unconditionally either
+            # way, so the actual skip-this-signal behavior is unaffected by this.
             self.last_block_reason = (
                 f"{_DIR_LABEL[direction]} @ {entry_price:.3f} is only {distance:.1f} points from the last "
                 f"recorded loss @ {entry['price']:.3f} -- needs {min_distance:.1f}+ points")
+            self._alerted_price[str(direction)] = entry["price"]
         return blocked
