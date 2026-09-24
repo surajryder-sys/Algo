@@ -138,7 +138,8 @@ class ICTSignal:
     timeframe_name: str          # "H1"
     zone_top: float
     zone_btm: float
-    trigger: str                  # "M1CD" | "M3CD" | "M5CD" | "M1CD-DIRECT" -- whichever CISD timeframe fired first
+    role: str                     # "no_short_buffer" (demand/bull) | "no_long_buffer" (supply/bear) -- the zone's own role, threaded through to mark_traded() so overlaps_traded() can stay role-aware (see ICTEligibilityStore's own docstring, 2026-09-24 fix)
+    trigger: str                   # "M1CD" | "M3CD" | "M5CD" | "M1CD-DIRECT" -- whichever CISD timeframe fired first
     sl: float
     sl_source: str                  # "ZONE" (plain zone edge) | "M5/ATR2" | "M3/ST" | "SWING" (only when it replaced a too-far zone SL with a tighter one)
     confirm_bar_time: int              # the CISD's own bar_time -- see trend_main.py's ENTRY_BRIDGE_LAG_ALERT_SECONDS. For "M1CD-DIRECT" this is the STANDING cisd's bar_time, not a fresh confirmation -- reversal_main.py's lag check skips that trigger.
@@ -149,7 +150,7 @@ class ICTEligibilityStore:
     component has already traded -- see module docstring for why this
     is a SEPARATE file from the Block's own, not written back into it.
 
-    ALSO persists each traded zone's own (top, btm) range -- a real V5S
+    ALSO persists each traded zone's own (top, btm, role) -- a real V5S
     incident: the exact same real price level fired an RM-ICT trade
     TWICE in one day, ~16 hours apart -- not a dedup failure by zone_id,
     the two firings genuinely had different zone_ids, because
@@ -165,11 +166,27 @@ class ICTEligibilityStore:
     before this field existed carry None for their own range (no
     historical top/btm was ever recorded for them) -- they simply never
     gain overlap protection retroactively, which is fine; this store
-    isn't pruned at all, so old entries stay forever either way."""
+    isn't pruned at all, so old entries stay forever either way.
+
+    ROLE-AWARE (fixed 2026-09-24, real live incident: an already-traded
+    BULLISH zone was silently blocking THREE separate BEARISH zones --
+    M30/H1/H2, all touched within minutes of each other -- purely
+    because their price ranges overlapped; overlaps_traded() never
+    checked role at all, so it treated "the same level rediscovered"
+    (its actual purpose) the same as "a completely different, opposite-
+    direction zone that happens to sit at a similar price" (a real,
+    common occurrence in any ranging market). Now the traded range also
+    carries the zone's own role, and only a match of the SAME role
+    counts as an overlap -- a bullish/demand zone can never block a
+    bearish/supply one again, or vice versa. Entries saved before this
+    fix (a bare (top, btm) pair, no role) are loaded with role=None and
+    can never match going forward -- same "no retroactive protection"
+    policy this store's own docstring already established for the
+    top/btm-less entries above."""
 
     def __init__(self, path: str):
         self._path = Path(path)
-        self._traded: dict[str, Optional[tuple]] = {}
+        self._traded: dict[str, Optional[tuple]] = {}   # zone_id -> (top, btm, role) | None
         self._load()
 
     def _load(self) -> None:
@@ -182,7 +199,17 @@ class ICTEligibilityStore:
                 # strings, no range ever recorded.
                 self._traded = {zid: None for zid in raw}
             else:
-                self._traded = {zid: (tuple(v) if v is not None else None) for zid, v in raw.items()}
+                loaded: dict[str, Optional[tuple]] = {}
+                for zid, v in raw.items():
+                    if v is None:
+                        loaded[zid] = None
+                    elif len(v) >= 3:
+                        loaded[zid] = (v[0], v[1], v[2])
+                    else:
+                        # Pre-role format (top, btm) -- role unknown, never matches the
+                        # role-aware overlap check below (see class docstring's own ROLE-AWARE section).
+                        loaded[zid] = (v[0], v[1], None)
+                self._traded = loaded
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             self._traded = {}
 
@@ -193,23 +220,28 @@ class ICTEligibilityStore:
     def is_traded(self, zone_id: str) -> bool:
         return zone_id in self._traded
 
-    def mark_traded(self, zone_id: str, top: Optional[float] = None, btm: Optional[float] = None) -> None:
+    def mark_traded(self, zone_id: str, top: Optional[float] = None, btm: Optional[float] = None,
+                    role: Optional[str] = None) -> None:
         if zone_id not in self._traded:
-            self._traded[zone_id] = (top, btm) if top is not None and btm is not None else None
+            self._traded[zone_id] = (top, btm, role) if top is not None and btm is not None else None
             self._save()
 
-    def overlaps_traded(self, top: float, btm: float, min_overlap_fraction: float = 0.6) -> Optional[str]:
-        """Returns the zone_id of an already-traded zone whose own range
-        overlaps [btm, top] by at least min_overlap_fraction of the
-        SMALLER of the two ranges, or None if nothing overlaps that
-        much. Fractional (not exact-match) deliberately -- a re-detected
-        copy of the same real level isn't guaranteed to read pixel-
-        identical top/btm on rediscovery, just substantially the same
-        range."""
+    def overlaps_traded(self, top: float, btm: float, role: str, min_overlap_fraction: float = 0.6) -> Optional[str]:
+        """Returns the zone_id of an already-traded zone of the SAME role
+        whose own range overlaps [btm, top] by at least
+        min_overlap_fraction of the SMALLER of the two ranges, or None if
+        nothing overlaps that much. Fractional (not exact-match)
+        deliberately -- a re-detected copy of the same real level isn't
+        guaranteed to read pixel-identical top/btm on rediscovery, just
+        substantially the same range. Role-checked (2026-09-24, see class
+        docstring) -- a different or unknown-role entry never matches,
+        no matter how much its range overlaps."""
         for zone_id, rng in self._traded.items():
             if rng is None:
                 continue
-            traded_top, traded_btm = rng
+            traded_top, traded_btm, traded_role = rng
+            if traded_role != role:
+                continue
             overlap = min(top, traded_top) - max(btm, traded_btm)
             if overlap <= 0:
                 continue
@@ -319,7 +351,7 @@ def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibi
             continue
         if eligibility.is_traded(zone.zone_id):
             continue
-        dup = eligibility.overlaps_traded(zone.top, zone.btm)
+        dup = eligibility.overlaps_traded(zone.top, zone.btm, zone.role)
         if dup is not None:
             print(f"[V6S-ICT] zone {zone.zone_id} [{zone.btm:.3f}-{zone.top:.3f}] skipped -- "
                   f"substantially overlaps already-traded zone {dup}")
@@ -346,7 +378,7 @@ def find_ict_signals(symbol: str, block_state_file: str, eligibility: ICTEligibi
 
         signals.append(ICTSignal(
             direction=direction, zone_id=zone.zone_id, timeframe_name=zone.timeframe_name,
-            zone_top=zone.top, zone_btm=zone.btm, trigger=trigger, sl=sl, sl_source=sl_source,
+            zone_top=zone.top, zone_btm=zone.btm, role=zone.role, trigger=trigger, sl=sl, sl_source=sl_source,
             confirm_bar_time=cisd.bar_time,
         ))
 

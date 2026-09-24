@@ -695,8 +695,8 @@ def run_once(rt: _SymbolRuntime) -> None:
     for sig in ict_signals:
         _process_signal(cfg, rt.sticky, "ICT", cfg.ict_magic_number, sig.direction, sig.sl, _ict_tag(sig),
                         f"zone=[{sig.zone_btm:.3f}-{sig.zone_top:.3f}]",
-                        lambda zid=sig.zone_id, top=sig.zone_top, btm=sig.zone_btm:
-                            rt.ict_eligibility.mark_traded(zid, top, btm),
+                        lambda zid=sig.zone_id, top=sig.zone_top, btm=sig.zone_btm, role=sig.role:
+                            rt.ict_eligibility.mark_traded(zid, top, btm, role),
                         lambda direction, tag, ref_desc, ticket: _on_redundant("ICT", direction, tag, ref_desc, ticket),
                         rt.journal_ict, {**dataclasses.asdict(sig), "rule": "OB zone touch + CISD",
                                          "direction": _DIR_LABEL[sig.direction], "bid": bid, "ask": ask},
