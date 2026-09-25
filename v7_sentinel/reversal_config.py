@@ -74,6 +74,12 @@ class RMSymbolConfig:
 
     heartbeat_file: str
     decision_log_file: str
+    # Shared BridgeBarFlipTracker state (M1/M5/M15 structure reads) -- NOT STR-only despite living
+    # right next to STR's own now-removed fields before; RM-ICT's own M1-FLIP gate, the M3-reversal
+    # early exit, and the TYPE2 booking gate all still need it. Mis-scoped as STR-only during the
+    # 2026-09-25 removal and briefly dropped -- caught immediately on restart (AttributeError),
+    # restored here.
+    bridge_bar_flip_state_file: str
 
     # RM-ICT component (OB-zone-based, reversal_ict.py) -- the only Reversal Manager component now.
     ict_magic_number: int
@@ -183,6 +189,7 @@ def load_symbol_config(symbol: str) -> RMSymbolConfig:
                                                       str(d["type2_partial2_trigger_points"]))),
         heartbeat_file=config.state_file_for("reversal_manager_heartbeat", symbol),
         decision_log_file=config.state_file_for("reversal_manager_decision_log", symbol, ext="jsonl"),
+        bridge_bar_flip_state_file=config.state_file_for("reversal_manager_bridge_bar_flip_state", symbol),
         ict_magic_number=int(os.getenv(prefix + "ICT_MAGIC_NUMBER", str(d["ict_magic_number"]))),
         ict_state_file=config.state_file_for("reversal_manager_ict_state", symbol),
         ict_sl_state_file=config.state_file_for("reversal_manager_ict_sl_state", symbol),
