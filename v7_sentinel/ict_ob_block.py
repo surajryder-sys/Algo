@@ -145,15 +145,24 @@ def _zone_id(source: str, symbol: str, timeframe: str, direction: str, start_tim
     return f"{source}|{symbol}|{timeframe}|{direction}|{start_time}"
 
 
+_MAX_INVALIDATED_TOMBSTONES = 500  # small, bounded, FIFO-capped -- see nlb_nsb_block.py's own
+                                     # identically-purposed TOMBSTONES section; this store ported
+                                     # the same fix 2026-09-25 for the same seed/invalidate loop bug.
+
+
 class ICTBlockStore:
     """One instance per symbol (see config.state_file_for()). See module
     docstring for the full seeding/tracking design."""
 
     def __init__(self, path: str):
         self._path = Path(path)
+        self._invalidated_path = self._path.with_name(f"{self._path.stem}_invalidated{self._path.suffix}")
         self._zones: dict[str, ICTZone] = {}
         self._announced_rejections: set[str] = set()
+        # zone_id -> True, insertion-ordered -- see nlb_nsb_block.py's own TOMBSTONES section.
+        self._invalidated: dict[str, bool] = {}
         self._load()
+        self._load_invalidated()
 
     def _load(self) -> None:
         if not self._path.exists():
@@ -171,6 +180,22 @@ class ICTBlockStore:
 
     def _save(self) -> None:
         self._path.write_text(json.dumps({zid: asdict(z) for zid, z in self._zones.items()}))
+
+    def _load_invalidated(self) -> None:
+        if not self._invalidated_path.exists():
+            return
+        try:
+            self._invalidated = {zid: True for zid in json.loads(self._invalidated_path.read_text())}
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            self._invalidated = {}
+
+    def _save_invalidated(self) -> None:
+        self._invalidated_path.write_text(json.dumps(list(self._invalidated.keys())))
+
+    def _mark_invalidated(self, zid: str) -> None:
+        self._invalidated[zid] = True
+        while len(self._invalidated) > _MAX_INVALIDATED_TOMBSTONES:
+            del self._invalidated[next(iter(self._invalidated))]   # evict oldest (FIFO)
 
     def _announce_rejection(self, key: str, message: str) -> None:
         if key not in self._announced_rejections:
@@ -233,6 +258,8 @@ class ICTBlockStore:
                     zid = _zone_id("tv", symbol, tf, direction, start_time)
                     if zid in self._zones:
                         continue
+                    if zid in self._invalidated:
+                        continue  # already invalidated once -- never re-seed, see nlb_nsb_block.py's TOMBSTONES section
                     top, btm = float(z["top"]), float(z["btm"])
                     if self._has_near_duplicate(symbol, tf, direction, top, btm):
                         continue
@@ -266,6 +293,8 @@ class ICTBlockStore:
                     zid = _zone_id("mt5", symbol, tf, direction, z.start_time)
                     if zid in self._zones:
                         continue
+                    if zid in self._invalidated:
+                        continue  # already invalidated once -- never re-seed, see nlb_nsb_block.py's TOMBSTONES section
                     self._zones[zid] = ICTZone(
                         symbol=symbol, timeframe=tf, timeframe_name=TIMEFRAME_NAMES[tf], source="mt5",
                         direction=direction, role=_role_for(direction), top=z.high, btm=z.low,
@@ -291,6 +320,7 @@ class ICTBlockStore:
             if z.direction == "bull":
                 if bid < z.btm:
                     del self._zones[zid]
+                    self._mark_invalidated(zid)
                     invalidated.append(zid)
                     changed = True
                     continue
@@ -301,6 +331,7 @@ class ICTBlockStore:
             else:
                 if ask > z.top:
                     del self._zones[zid]
+                    self._mark_invalidated(zid)
                     invalidated.append(zid)
                     changed = True
                     continue
@@ -311,6 +342,8 @@ class ICTBlockStore:
 
         if changed:
             self._save()
+        if invalidated:
+            self._save_invalidated()
         return newly_retested, invalidated
 
     def zones(self) -> list[ICTZone]:
