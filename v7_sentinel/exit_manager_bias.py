@@ -47,19 +47,10 @@ guard working (or not) rather than inferring it from the absence of a close.
 Applies per symbol; `sources` (exit_manager_config.WatchedSource) is only used to
 know which journal file to write the closed trade's own "why" into.
 
-SCALPER-ONLY M3/M5 VARIANT (run_once_scalper(), added 2026-09-23, user's own
-words: "scalper trade can be exited when a m5/m3 opposite cisd event occurs"):
-a SEPARATE, additional rule -- Scalper is already covered by the shared M5/M15
-rule above (it's an ordinary entry in `sources`), but its own entries are
-M3/M5 pattern-based (see scalper_entry.py), so this gives it a faster,
-matching-granularity exit too: a fresh OPPOSITE M3 or M5 CISD closes ONLY
-Scalper's own open positions. Every other manager (TM-STR/RM-STR/RM-ICT) is
-completely unaffected -- this is not a broadening of the shared rule, just
-one more independent watcher scoped to Scalper alone. Both variants share
-the exact same underlying mechanics (_run()) -- fresh-CISD-after-entry,
-manual-TP guard, decision log, Telegram alerts -- just different scope
-(all sources vs. Scalper only), CISD timeframes, and log/comment/journal
-tags, so the two never get confused for each other in any log.
+SCALPER-ONLY M3/M5 VARIANT (run_once_scalper()) REMOVED 2026-09-25 along with
+Scalper itself -- see v7_sentinel's own CLAUDE.md-adjacent plan history for the
+removal. This module's shared run_once() below is untouched by that removal;
+it never had any Scalper-specific code of its own.
 """
 from __future__ import annotations
 
@@ -74,7 +65,6 @@ if TYPE_CHECKING:
 
 _DIR_LABEL = {1: "BUY", -1: "SELL"}
 CISD_TIMEFRAMES = (5, 15)          # M5 and M15, the SHARED rule -- every manager, either tf alone is sufficient
-SCALPER_CISD_TIMEFRAMES = (3, 5)     # M3 and M5, SCALPER-ONLY (see module docstring)
 
 
 def _source_for(cfg: "ExitManagerSymbolConfig", magic_number: int) -> "WatchedSource | None":
@@ -147,12 +137,3 @@ def _run(cfg: "ExitManagerSymbolConfig", sources: Sequence["WatchedSource"], cis
 def run_once(cfg: "ExitManagerSymbolConfig") -> None:
     _run(cfg, cfg.sources, CISD_TIMEFRAMES, log_tag="V7S-XM-BIAS", reason="BIASEXIT", comment="V7S-XM-BIAS-SQ",
         rule_desc="opposite fresh M5/M15 CISD (bias exit)")
-
-
-def run_once_scalper(cfg: "ExitManagerSymbolConfig") -> None:
-    """See module docstring's own SCALPER-ONLY M3/M5 VARIANT section."""
-    scalper_source = next((s for s in cfg.sources if s.name == "SCALPER"), None)
-    if scalper_source is None:
-        return
-    _run(cfg, [scalper_source], SCALPER_CISD_TIMEFRAMES, log_tag="V7S-XM-SC", reason="SCALPEREXIT",
-        comment="V7S-XM-SC-CISD-SQ", rule_desc="opposite fresh M3/M5 CISD (scalper-only exit)")

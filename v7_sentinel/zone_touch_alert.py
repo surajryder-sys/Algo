@@ -14,8 +14,8 @@ use, see each of their own docstrings).
 RULE:
   - ZONE SOURCE: the SAME OB zone Block RM-ICT itself reads
     (nlb_nsb_block.BlockStore, cfg.ict_block_state_file) -- read-only,
-    same relationship component 3 (exit_manager_candle.py) already has to
-    it.
+    same relationship component 3 (exit_manager_ict.py, ICT Exit) already
+    has to it.
   - "ONLY UNTESTED (VIRGIN) ZONES": zone.retested == False -- same filter
     component 3's own zone check uses (see that module's docstring for why
     BlockZone has no separate "virgin" field; retested IS the tested/

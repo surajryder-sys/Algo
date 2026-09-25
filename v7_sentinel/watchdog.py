@@ -30,7 +30,7 @@ alone is enough to flag it:
      one transient blip never pages anyone. This check is per PROCESS
      (one shared run.log per process, since all of a process's own sub-
      components print into the same redirected output) -- it can say
-     "Trade Manager is failing" but not which of its 7 sub-components,
+     "Trade Manager is failing" but not which of its sub-components,
      that's what signal 2 is for.
 
   2. DEAD SUB-COMPONENT. Each process now monitors SEVERAL heartbeat
@@ -38,9 +38,10 @@ alone is enough to flag it:
      grained than V6S's 5-file scheme -- Data Manager: tv_scraper +
      NLB/NSB Watcher + ICT Block Watcher; Trade Manager: TM-STR, RM-ICT
      (RM-STR removed 2026-09-25, see reversal_main.py's own docstring),
-     Scalper, and EM's own 5 components). ANY one of a process's own
-     heartbeats going stale (no update in _HEARTBEAT_STALE_SECONDS) marks
-     that WHOLE process
+     and EM's own 3 components (Scalper and its two dedicated EM
+     components removed 2026-09-25 along with Scalper itself)). ANY one
+     of a process's own heartbeats going stale (no update in
+     _HEARTBEAT_STALE_SECONDS) marks that WHOLE process
      unhealthy, naming exactly which sub-component(s) went quiet.
      Confirmed live in the V6S incident this was built for: heartbeats
      update every loop regardless of whether that loop errored, so a
@@ -114,13 +115,11 @@ _PROCESSES: list[_Monitored] = [
     _Monitored("Trade Manager", "v7s_trade_manager_run.log", (
         ("TM-STR", "v7s_trend_manager_heartbeat_XAUUSD.json"),
         ("RM-ICT", "v7s_reversal_manager_heartbeat_XAUUSD.json"),
-        ("Scalper", "v7s_scalper_heartbeat_XAUUSD.json"),
         ("EM-Bias", "v7s_exit_manager_heartbeat_bias_XAUUSD.json"),
         ("EM-LTF", "v7s_exit_manager_heartbeat_ltf_XAUUSD.json"),
-        ("EM-Candle", "v7s_exit_manager_heartbeat_candle_XAUUSD.json"),
-        ("EM-Scalper-M3M5", "v7s_exit_manager_heartbeat_scalper_exit_XAUUSD.json"),
         # ICT Exit (2026-09-24) -- see exit_manager_ict.py's own docstring.
         ("EM-ICT", "v7s_exit_manager_heartbeat_ict_XAUUSD.json"),
+        # Scalper, EM-Candle, EM-Scalper-M3M5 removed 2026-09-25 (Scalper removed entirely).
     )),
 ]
 
