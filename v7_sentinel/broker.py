@@ -16,10 +16,15 @@ symbol-parametrized.
 from __future__ import annotations
 
 import datetime as dt
+import time
 from dataclasses import dataclass
 from typing import Optional
 
 import MetaTrader5 as mt5
+
+# See get_tick_price()'s own docstring for why this retries.
+_TICK_RETRY_ATTEMPTS = 3
+_TICK_RETRY_DELAY_SECONDS = 0.2
 
 
 def connect(symbol: str, terminal_path: Optional[str] = None, login: Optional[int] = None,
@@ -42,11 +47,26 @@ def shutdown() -> None:
 
 
 def get_tick_price(symbol: str) -> tuple[float, float]:
-    """Returns (bid, ask)."""
-    tick = mt5.symbol_info_tick(symbol)
-    if tick is None:
-        raise RuntimeError(f"No tick for {symbol}: {mt5.last_error()}")
-    return tick.bid, tick.ask
+    """Returns (bid, ask). Retries a few times, briefly, on a failed read
+    (2026-09-25, live bug: TM-STR/RM-STR+ICT/Scalper/EM-LTF were aborting
+    their entire cycle on effectively every single poll for hours, each
+    one just ONE unretried mt5.symbol_info_tick() call returning None
+    with error -10001 "IPC send failed" -- meanwhile copy_rates-based
+    reads on that SAME held connection kept working the whole time, and a
+    brand-new connection worked instantly too, so this reads as a
+    transient per-call hiccup, not a dead connection). No retry existed
+    before this -- a single failed call immediately raised and killed
+    that whole cycle, which then just repeated the identical failure
+    next cycle, forever, until something external cleared it."""
+    last_error = None
+    for attempt in range(_TICK_RETRY_ATTEMPTS):
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is not None:
+            return tick.bid, tick.ask
+        last_error = mt5.last_error()
+        if attempt < _TICK_RETRY_ATTEMPTS - 1:
+            time.sleep(_TICK_RETRY_DELAY_SECONDS)
+    raise RuntimeError(f"No tick for {symbol}: {last_error}")
 
 
 def price_extremes_since(symbol: str, since_msc: int) -> tuple[Optional[float], Optional[float], int]:
