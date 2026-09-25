@@ -45,12 +45,16 @@ re-seeded or overwritten once known here):
   - TV side: read the SAME raw scraper store nlb_nsb_block.py reads, but
     for TIMEFRAMES ("15", "5", "3") instead of that module's own 7. A
     zone whose own "formed_time_confirmed" reads False is never seeded
-    (same scrape-artifact guard nlb_nsb_block.py already uses). NOT
-    pruned when the scraper stops reporting it -- nlb_nsb_block.py
-    reversed that same policy 2026-09-21 ("a zone still on the chart just
-    fell out of the scraper's own top-4-per-side view isn't
-    invalidated") and this store follows that same, newer, more
-    considered policy rather than V5S's own older per-source pruning.
+    (same scrape-artifact guard nlb_nsb_block.py already uses). PRUNED
+    when the scraper's own current top-4-per-side view no longer
+    includes it (reinstated 2026-09-25, same reversal and for the same
+    reason as nlb_nsb_block.py's own sync_from_scraper() -- see that
+    method's own docstring for the full incident: zones up to 7 weeks
+    old, spanning long-gone price regimes, sitting in a block forever
+    with nothing to remove them, confirmed live via a Telegram alert for
+    an OB zone the user could not find anywhere on the actual chart).
+    MT5-sourced zones are NOT pruned this way -- a different, independent
+    indicator, not "the scraper" this policy is about.
   - MT5 side: read ob_bridge_lite.read_lite() for each of the 3
     timeframes. No formed_time_confirmed concept for this source (not a
     scrape, no wall-clock-guess fallback exists) -- always seeds.
@@ -204,22 +208,26 @@ class ICTBlockStore:
                 return z.zone_id
         return None
 
-    def sync(self, tv_zone_state_file: str, symbol: str) -> int:
+    def sync(self, tv_zone_state_file: str, symbol: str) -> tuple[int, int]:
         """Seeds every zone either source currently reports that this
-        block has never seen before (by its own stable id). Returns the
-        count added. See module docstring -- no pruning by absence for
-        either source."""
-        added = self._sync_tv(tv_zone_state_file, symbol) + self._sync_mt5(symbol)
-        if added:
+        block has never seen before (by its own stable id), and prunes any
+        TV-sourced zone the scraper's own current top-4-per-side view no
+        longer includes (see module docstring's own PRUNED section -- MT5-
+        sourced zones are never pruned this way). Returns (added, pruned)."""
+        tv_added, pruned = self._sync_tv(tv_zone_state_file, symbol)
+        added = tv_added + self._sync_mt5(symbol)
+        if added or pruned:
             self._save()
-        return added
+        return added, pruned
 
-    def _sync_tv(self, zone_state_file: str, symbol: str) -> int:
+    def _sync_tv(self, zone_state_file: str, symbol: str) -> tuple[int, int]:
         raw = ob_levels._load_zone_store(zone_state_file)
         added = 0
+        pruned = 0
         for tf in TIMEFRAMES:
             for direction in ("bull", "bear"):
                 key = f"{symbol}|{tf}|{direction}"
+                live_zone_ids: set[str] = set()
                 for z in raw.get(key, {}).values():
                     if not z.get("formed_time_confirmed", True):
                         continue   # wall-clock guess, not a real Pine hint -- see module docstring
@@ -231,6 +239,7 @@ class ICTBlockStore:
                             f"start_time isn't a valid {TIMEFRAME_NAMES[tf]} candle boundary")
                         continue
                     zid = _zone_id("tv", symbol, tf, direction, start_time)
+                    live_zone_ids.add(zid)   # counts as "currently on chart" for the prune pass below
                     if zid in self._zones:
                         continue
                     top, btm = float(z["top"]), float(z["btm"])
@@ -253,7 +262,19 @@ class ICTBlockStore:
                         retested_source="seed" if not virgin else "", zone_id=zid,
                     )
                     added += 1
-        return added
+
+                # Prune any TV-sourced zone in THIS (tf, direction) bucket the scraper's own
+                # current view no longer includes -- MT5-sourced zones in the SAME bucket are
+                # untouched (a different, independent indicator, not "the scraper").
+                stale = [zid for zid, z2 in self._zones.items()
+                        if z2.source == "tv" and z2.symbol == symbol and z2.timeframe == tf
+                        and z2.direction == direction and zid not in live_zone_ids]
+                for zid in stale:
+                    zone = self._zones.pop(zid)
+                    print(f"[V7S-ICTBLOCK] zone {zid} [{zone.btm:.3f}-{zone.top:.3f}] PRUNED -- "
+                          f"scraper no longer reports it (not on chart anymore)")
+                    pruned += 1
+        return added, pruned
 
     def _sync_mt5(self, symbol: str) -> int:
         added = 0

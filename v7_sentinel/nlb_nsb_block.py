@@ -310,41 +310,49 @@ class BlockStore:
 
     def sync_from_scraper(self, zone_state_file: str, symbol: str = "XAUUSD") -> tuple[int, int]:
         """Seeds every zone the scraper currently reports that this block
-        has never seen before (by its own stable id). Returns (added, pruned)
-        -- pruned is always 0 now, kept only so callers don't need to change
-        (see PRUNING REMOVED below).
+        has never seen before (by its own stable id), then prunes any zone
+        in this block that the scraper's OWN current top-4-per-side view no
+        longer includes. Returns (added, pruned).
 
-        PRUNING REMOVED (2026-09-21, reversing the 2026-09-18 change below --
-        user's own words: "we will delete zones when the zones are invalidated
-        from scraper, a newer zone in tv_scraper could make a zone not appear
-        in chart, that doesnt mean the invalidation, its because the indicator
-        we have set only 4 bullish and 4 bearish ob's to show on chart").
-        Confirmed live: this Block used to delete a zone the instant the
-        scraper's raw dict stopped including it, which is display churn, NOT
-        invalidation -- the indicator only ever reports its own top-4-per-side
-        view, so a real, still-untested zone routinely gets pushed out of that
-        view by a newer one forming elsewhere. That was deleting zones RIGHT
-        as they were touched and waiting for a CISD confirmation (confirmed:
-        one M30 zone alone flickered through 819 seed/invalidate cycles this
-        way, three real touches, zero trades). A zone now leaves this Block
-        for exactly ONE reason: LIVE MT5 price genuinely trading through its
-        far edge (update_live() below) -- the scraper's own view of what's
-        "currently on chart" no longer has any say in it. (Previous design,
-        2026-09-18: "at any point of given time, scraper should give us the
-        data of only 4 bullish ob's and 4 bearish ob's... no other zones
-        should be kept" -- prompted by V5S holding 232 stale zones against a
-        handful ever visible; that V5S problem doesn't recur here because a
-        zone still only ever gets ADDED once and still only ever gets removed
-        by a real, live invalidation, never re-accumulating duplicates.)
+        PRUNING-BY-ABSENCE REINSTATED (2026-09-25, reversing the 2026-09-21
+        change below -- user, after a real live incident: a Telegram alert
+        fired off an M10 "OB zone touch" the user could not find anywhere on
+        the actual chart; traced to a zone still sitting in this block with
+        formed_time 18 days old -- and a full audit of the M10 bucket alone
+        turned up TEN zones ranging from 4 days to 7 WEEKS old, spanning
+        price levels from the 3800s to the 4400s, i.e. completely different
+        market regimes, none of them anywhere on the current chart. The
+        2026-09-21 "never prune by absence" policy has no answer for a zone
+        this stale -- it only ever intended to protect a zone that's still
+        genuinely on the chart but got pushed out of the scraper's own
+        top-4 view by a NEWER one forming elsewhere, not one that's been
+        irrelevant for weeks. User's own words this time: "we need always
+        4 bullish ob's and max 4 bearish ob's in data manager what we see
+        on chart other than these we dont want anything to be there" --
+        i.e. exactly match the scraper's own current top-4-per-side view,
+        nothing held that isn't in it right now.
 
-        Already-traded eligibility (ICTEligibilityStore) is unaffected either
-        way -- it stores its own top/btm range independently at trade time,
-        not a live reference into this store."""
+        KNOWN TRADEOFF (why this was removed in the first place, 2026-09-21):
+        the scraper only ever reports its own top-4-per-side view, so a
+        real, still-untested zone CAN get pushed out of that view by a
+        newer one forming elsewhere and pruned here mid-touch, before a
+        CISD confirmation arrives -- confirmed live before, one M30 zone
+        flickered through 819 seed/invalidate cycles this way, three real
+        touches, zero trades. Reinstated anyway per the user's own explicit
+        instruction above, accepting that tradeoff as the lesser problem
+        now that stale zones spanning WEEKS and entirely different price
+        regimes have been confirmed live. Already-traded eligibility
+        (ICTEligibilityStore) is unaffected either way -- it stores its own
+        top/btm range independently at trade time, not a live reference
+        into this store, so a zone pruned here mid-flicker was never at
+        risk of re-trading under a churned identity regardless."""
         raw = ob_levels._load_zone_store(zone_state_file)
         added = 0
+        pruned = 0
         for tf in ob_levels.TIMEFRAMES:
             for direction in ("bull", "bear"):
                 key = f"{symbol}|{tf}|{direction}"
+                live_zone_ids: set[str] = set()
                 for z in raw.get(key, {}).values():
                     if not z.get("formed_time_confirmed", True):
                         # A real V5S incident: an RM-ICT trade fired off
@@ -374,6 +382,7 @@ class BlockStore:
                             f"candle boundary, provably not a genuine zone for this timeframe")
                         continue
                     zid = _zone_id(symbol, tf, direction, start_time)
+                    live_zone_ids.add(zid)   # counts as "currently on chart" for the prune pass below
                     if zid in self._zones:
                         continue  # already ours -- our own state governs from here, not the scraper's
                     top = float(z["top"])
@@ -419,9 +428,20 @@ class BlockStore:
                     )
                     added += 1
 
-        if added:
+                # Prune anything in THIS (tf, direction) bucket the scraper's own current
+                # top-4-per-side view no longer includes -- see this method's own docstring.
+                stale = [zid for zid, z2 in self._zones.items()
+                        if z2.symbol == symbol and z2.timeframe == tf and z2.direction == direction
+                        and zid not in live_zone_ids]
+                for zid in stale:
+                    zone = self._zones.pop(zid)
+                    print(f"[V7S-BLOCK] zone {zid} [{zone.btm:.3f}-{zone.top:.3f}] PRUNED -- "
+                          f"scraper no longer reports it (not on chart anymore)")
+                    pruned += 1
+
+        if added or pruned:
             self._save()
-        return added, 0
+        return added, pruned
 
     def update_live(self, bid: float, ask: float, now: Optional[int] = None,
                     bid_low: Optional[float] = None, ask_high: Optional[float] = None) -> tuple[list[str], list[str]]:

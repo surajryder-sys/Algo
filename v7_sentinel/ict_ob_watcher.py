@@ -60,9 +60,11 @@ _last_tick_msc: dict[str, int] = {}   # per symbol: time_msc of the newest tick 
 
 
 def run_once(cfg: WatcherSymbolConfig, store: ICTBlockStore) -> None:
-    added = store.sync(cfg.zone_state_file, cfg.symbol)
+    added, pruned = store.sync(cfg.zone_state_file, cfg.symbol)
     if added:
         print(f"[V7S-ICTBLOCK] {cfg.symbol} seeded {added} new zone(s)")
+    if pruned:
+        print(f"[V7S-ICTBLOCK] {cfg.symbol} pruned {pruned} zone(s) no longer on chart")
 
     tick = mt5.symbol_info_tick(cfg.symbol)
     if tick is None:
