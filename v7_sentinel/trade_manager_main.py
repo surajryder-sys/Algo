@@ -11,7 +11,7 @@ independent MT5 connections, any one of which can silently degrade
 while the others look fine.
 
 This file structurally removes that failure mode for the trading side:
-TM-STR, RM-STR, RM-ICT, Scalper, and Exit Manager's own 4 components
+TM-STR, RM-ICT, Scalper, and Exit Manager's own 5 components
 (+ its zone-touch alert) all run in ONE process on ONE shared MT5
 connection instead of 4 separate ones. `broker.py` is a stateless
 wrapper around the process-global `MetaTrader5` package -- `mt5.
@@ -30,7 +30,7 @@ run via this consolidated entry point, but still there for isolated
 debugging if ever needed -- `python -m v7_sentinel.trend_main` still works
 on its own, just isn't how this process is normally run).
 
-ORDER PER CYCLE: entries first (TM-STR, RM-STR+ICT, Scalper), then Exit
+ORDER PER CYCLE: entries first (TM-STR, RM-ICT, Scalper), then Exit
 Manager's components (which only ever CLOSE). Today's 4 separate V6S
 processes race with no defined relative order at all; this is strictly
 more deterministic, not a behavior change worth flagging beyond this
@@ -42,8 +42,9 @@ NO try/except between them there, only one level up around the whole
 symbol; found while designing this file, see the V7S consolidation plan).
 
 PER-SUB-COMPONENT HEARTBEATS (2026-09-24, user's own choice over V6S's
-coarser 4-file scheme): 9 heartbeat files -- TM-STR, RM-STR, RM-ICT,
-Scalper, EM-Bias, EM-LTF, EM-Candle, EM-Scalper-M3M5, EM-ICT -- written right
+coarser 4-file scheme): 8 heartbeat files -- TM-STR, RM-ICT,
+Scalper, EM-Bias, EM-LTF, EM-Candle, EM-Scalper-M3M5, EM-ICT (RM-STR's
+own heartbeat retired along with the rest of it, 2026-09-25) -- written right
 after each guarded call, success or caught exception, same "written
 unconditionally" convention as every other heartbeat in this project
 (a hung/dead sub-component is what heartbeat staleness catches; a raised-
@@ -125,7 +126,7 @@ def run_once(rt: _SymbolRuntime) -> None:
     # Entries first (today's 4 separate V6S processes race with no defined order at all --
     # this is strictly more deterministic, see module docstring).
     _run_guarded("TM-STR", rt.tm.cfg.heartbeat_file, lambda: trend_main.run_once(rt.tm))
-    _run_guarded("RM-STR+ICT", rt.rm.cfg.heartbeat_file, lambda: reversal_main.run_once(rt.rm))
+    _run_guarded("RM-ICT", rt.rm.cfg.heartbeat_file, lambda: reversal_main.run_once(rt.rm))
     _run_guarded("SCALPER", rt.sc.cfg.heartbeat_file, lambda: scalper_main.run_once(rt.sc))
 
     # Then Exit Manager's own components -- these only ever CLOSE, never open.
@@ -149,7 +150,7 @@ def main() -> None:
     runtimes = [_build_runtime(symbol) for symbol in config.ACTIVE_SYMBOLS]
     for rt in runtimes:
         print(f"[V7S-TR] {rt.symbol} starting -- TM-STR magic={rt.tm.cfg.magic_number} "
-              f"RM-STR magic={rt.rm.cfg.magic_number} RM-ICT magic={rt.rm.cfg.ict_magic_number} "
+              f"RM-ICT magic={rt.rm.cfg.ict_magic_number} "
               f"SCALPER magic={rt.sc.cfg.magic_number} -- "
               f"enable_trading TM={rt.tm.cfg.enable_trading} RM={rt.rm.cfg.enable_trading} "
               f"SC={rt.sc.cfg.enable_trading} EM={rt.em_cfg.enable_trading}")

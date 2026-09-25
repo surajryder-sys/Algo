@@ -124,9 +124,9 @@ def _sources_for(symbol: str) -> tuple[WatchedSource, ...]:
     rm = reversal_config.load_symbol_config(symbol)
     sc = scalper_config.load_symbol_config(symbol)
     scalper_own_tp = ScalperOwnTPStore(sc.own_tp_state_file)
+    # RM-STR removed 2026-09-25 (see reversal_main.py's own docstring) -- no longer a watched source.
     return (
         WatchedSource("TM-STR", tm.magic_number, tm.trade_journal_file),
-        WatchedSource("RM-STR", rm.magic_number, rm.str_trade_journal_file),
         WatchedSource("RM-ICT", rm.ict_magic_number, rm.ict_trade_journal_file),
         WatchedSource("SCALPER", sc.magic_number, sc.trade_journal_file, own_tp_lookup=scalper_own_tp.get),
     )

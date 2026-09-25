@@ -1,4 +1,4 @@
-"""Configuration for V7-Sentinel's Reversal Manager (RM-STR + RM-ICT).
+"""Configuration for V7-Sentinel's Reversal Manager (RM-ICT).
 Ported from v5_sentinel/reversal_config.py (2026-09-18) but reshaped for
 V7S's multi-instrument design (see config.py): instead of one flat
 RMConfig read straight from global V5S_RM_* env vars, this module builds
@@ -9,6 +9,14 @@ crypto lineage added BTCUSD/ETHUSD) -- load_symbol_config() raises
 clearly for any symbol without one, rather than silently reusing
 XAUUSD's own thresholds for an instrument they were never tuned for.
 
+RM-STR REMOVED (2026-09-25, user: "lets remove RM-STR completely, we
+dont want reversal manager based based on ATR") -- this config used to
+carry a full second set of fields for RM-STR (magic_number, state_file,
+sl_state_file, levels_state_file, bridge_bar_flip_state_file,
+sideways_trap_min_distance_points, sideways_trapper_state_file,
+str_trade_journal_file), all gone now. Its own magic number, 26092402,
+is retired -- never reused for anything else.
+
 MAGIC NUMBERS -- deliberately DIFFERENT from V5-Sentinel's own
 (26090701/26090702), confirmed with the user 2026-09-18: V5S is still
 running live on the same MT5 account, so V7S must never share a magic
@@ -16,7 +24,7 @@ number with it -- doing so would let V7S's own position-management code
 (square-off, SL trailing, partial booking) see V5S's REAL live positions
 as its own the moment it queries broker.get_positions(symbol, magic),
 and potentially modify/close them once V7S's own trading is ever
-enabled. V7S's RM-STR/RM-ICT use 26091801/26091802 instead.
+enabled. V7S's RM-ICT uses 26092403.
 
 Safety: enable_trading must be explicitly set to true (per-symbol env
 var) for any order to actually be sent/modified/cancelled for THAT
@@ -60,22 +68,14 @@ class RMSymbolConfig:
     partial2_fraction: float
     # TYPE 2 booking (2026-09-23) -- wider trigger points used INSTEAD of the two above whenever
     # M5+M15 structure both agree with the open trade's own direction; same fractions either way.
-    # See trade_manager.py's own module docstring for the full rule. Shared by both STR and ICT.
+    # See trade_manager.py's own module docstring for the full rule.
     type2_partial1_trigger_points: float
     type2_partial2_trigger_points: float
 
-    # STR component (HTF-levels-based, reversal_entry.py).
-    magic_number: int
-    state_file: str
-    sl_state_file: str
-    levels_state_file: str
-    bridge_bar_flip_state_file: str   # persisted ATR flip tracker for the bridge-sourced HTFs (M15/M5)
     heartbeat_file: str
+    decision_log_file: str
 
-    # RM-ICT component (OB-zone-based, reversal_ict.py) -- FULLY
-    # INDEPENDENT from STR (own magic number, own position slot, own
-    # SL/Trade Manager state files, matching V5S's own confirmed design:
-    # the two never square each other off or share a position).
+    # RM-ICT component (OB-zone-based, reversal_ict.py) -- the only Reversal Manager component now.
     ict_magic_number: int
     ict_state_file: str
     ict_sl_state_file: str
@@ -95,9 +95,9 @@ class RMSymbolConfig:
     # separate cross-source dedup mechanism of its own.
     ict_ob_block_state_file: str
 
-    # ICT Guard -- applied to STR's own entries only (see ict_guard.py),
-    # RM-ICT is deliberately exempt (its own entries are already sourced
-    # FROM these exact zones).
+    # ICT Guard -- deliberately not applied right now (see ict_guard.py /
+    # reversal_main.py's own _open_position() docstring); `sticky` is
+    # still threaded through so reinstating it later is a small change.
     ict_guard_buffer_points: float
     ict_guard_sticky_state_file: str
 
@@ -113,17 +113,7 @@ class RMSymbolConfig:
     # for the same stale-retest bug). Seed-copied retests never count. See reversal_ict.py.
     ict_touch_max_age_minutes: float
 
-    # Sideways Trapper (user, 2026-09-22, after a real M5-chop loss cluster -- see
-    # sideways_trapper.py's own docstring): RM-STR only. After a SL_HIT in one direction,
-    # the next qualifying trade in THAT SAME direction is skipped unless its own entry price
-    # is at least this many points away from the one that just got stopped -- cleared early
-    # by a genuine M15 structure flip, otherwise it just stands until it's beaten.
-    sideways_trap_min_distance_points: float
-    sideways_trapper_state_file: str
-
-    decision_log_file: str
-    str_trade_journal_file: str        # per-trade entry/exit logic, one per component -- see trade_journal.py
-    ict_trade_journal_file: str
+    ict_trade_journal_file: str        # per-trade entry/exit logic -- see trade_journal.py
 
     mt5_terminal_path: str | None
     mt5_login: int | None
@@ -135,10 +125,10 @@ class RMSymbolConfig:
 
 
 # Deliberately-tuned defaults, one entry per symbol that's actually been
-# tuned for RM-STR/RM-ICT -- XAUUSD's values are carried over unchanged
-# from V5-Sentinel's own confirmed design (only the two magic numbers
-# differ, see module docstring). Adding a new symbol means adding its
-# OWN entry here after deliberate tuning, not inheriting XAUUSD's.
+# tuned for RM-ICT -- XAUUSD's values are carried over unchanged from
+# V5-Sentinel's own confirmed design (only the magic number differs, see
+# module docstring). Adding a new symbol means adding its OWN entry here
+# after deliberate tuning, not inheriting XAUUSD's.
 _SYMBOL_DEFAULTS: dict[str, dict] = {
     "XAUUSD": dict(
         lots=0.06,     # 0.06 (user, 2026-09-21): at 0.01 the 70%/15%/15% partial scheme degenerates -> 0.04/0.01/0.01
@@ -152,12 +142,10 @@ _SYMBOL_DEFAULTS: dict[str, dict] = {
         partial2_fraction=0.15,
         type2_partial1_trigger_points=15.0,   # user's own explicit numbers, 2026-09-23
         type2_partial2_trigger_points=20.0,
-        magic_number=26092402,   # V7S -- independent from V6S's 26091801
         ict_magic_number=26092403,   # V7S -- independent from V6S's 26091802
         ict_guard_buffer_points=5.0,
         ict_sl_override_points=15.0,
         ict_touch_max_age_minutes=30.0,
-        sideways_trap_min_distance_points=5.0,
     ),
 }
 
@@ -193,12 +181,8 @@ def load_symbol_config(symbol: str) -> RMSymbolConfig:
                                                       str(d["type2_partial1_trigger_points"]))),
         type2_partial2_trigger_points=float(os.getenv(prefix + "TYPE2_PARTIAL2_TRIGGER_POINTS",
                                                       str(d["type2_partial2_trigger_points"]))),
-        magic_number=int(os.getenv(prefix + "MAGIC_NUMBER", str(d["magic_number"]))),
-        state_file=config.state_file_for("reversal_manager_state", symbol),
-        sl_state_file=config.state_file_for("reversal_manager_sl_state", symbol),
-        levels_state_file=config.state_file_for("reversal_manager_levels_state", symbol),
-        bridge_bar_flip_state_file=config.state_file_for("reversal_manager_bridge_bar_flip_state", symbol),
         heartbeat_file=config.state_file_for("reversal_manager_heartbeat", symbol),
+        decision_log_file=config.state_file_for("reversal_manager_decision_log", symbol, ext="jsonl"),
         ict_magic_number=int(os.getenv(prefix + "ICT_MAGIC_NUMBER", str(d["ict_magic_number"]))),
         ict_state_file=config.state_file_for("reversal_manager_ict_state", symbol),
         ict_sl_state_file=config.state_file_for("reversal_manager_ict_sl_state", symbol),
@@ -209,11 +193,6 @@ def load_symbol_config(symbol: str) -> RMSymbolConfig:
         ict_guard_sticky_state_file=config.state_file_for("reversal_manager_ict_guard_sticky", symbol),
         ict_sl_override_points=float(os.getenv(prefix + "ICT_SL_OVERRIDE_POINTS", str(d["ict_sl_override_points"]))),
         ict_touch_max_age_minutes=float(os.getenv(prefix + "ICT_TOUCH_MAX_AGE_MINUTES", str(d["ict_touch_max_age_minutes"]))),
-        sideways_trap_min_distance_points=float(os.getenv(prefix + "SIDEWAYS_TRAP_MIN_DISTANCE_POINTS",
-                                                          str(d["sideways_trap_min_distance_points"]))),
-        sideways_trapper_state_file=config.state_file_for("reversal_manager_sideways_trapper", symbol),
-        decision_log_file=config.state_file_for("reversal_manager_decision_log", symbol, ext="jsonl"),
-        str_trade_journal_file=config.state_file_for("reversal_manager_str_trade_journal", symbol, ext="jsonl"),
         ict_trade_journal_file=config.state_file_for("reversal_manager_ict_trade_journal", symbol, ext="jsonl"),
         mt5_terminal_path=config.MT5_TERMINAL_PATH,
         mt5_login=config.MT5_LOGIN,
