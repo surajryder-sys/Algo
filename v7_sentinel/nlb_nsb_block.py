@@ -93,41 +93,6 @@ update) -- a standalone process (V7S's own nlb_nsb_watcher, not yet
 built) actually drives update_live() off real MT5 ticks every cycle,
 and whatever consumes this block (an ICT Guard safeguard, RM-ICT) reads
 it independently.
-
-TOMBSTONES -- ONCE INVALIDATED, NEVER RE-SEEDED (2026-09-25, live bug:
-a zone that had already been invalidated by live price kept getting
-re-seeded from the scraper's own raw view and immediately re-invalidated
-again, every single poll cycle, forever -- confirmed live, one zone
-alone produced 50+ seed/invalidate line pairs before the scraper's own
-top-4-per-side view happened to rotate it out on its own; a second,
-different zone started the exact same loop right after. Root cause:
-"NO MORE PRUNING-BY-ABSENCE" above means the scraper reporting a zone
-that's already been deleted here is expected and normal -- but the
-block had zero memory that it had EVER seen and invalidated that exact
-zone_id, so sync_from_scraper() treated it as genuinely new every time.
-An invalidated zone can never legitimately become a fresh, untested
-candidate again under that same identity (it means live price already
-traded through its far edge), so skipping re-seeding it is a pure
-no-op removal of wasted churn -- it never changes what a real,
-still-live zone does. Also a real cost beyond noise: this was
-continuous, unbounded Python-level work (dict/file churn) every single
-poll cycle in a background thread shared with tv_scraper's own -- a
-plausible contributor to that thread's own periodic multi-minute
-staleness under GIL contention.
-
-Tombstones are a small, capped, FIFO-evicted set (_MAX_INVALIDATED_
-TOMBSTONES, 500 zone_ids -- comfortably more than this store's own
-realistic churn, at a few tens of KB on disk, never growing further)
-persisted to a companion file next to this store's own state file --
-deliberately NOT folded into the same file/format as self._zones, to
-avoid any migration risk to the widely-read main zones file. A capped
-FIFO (not time-based expiry) sidesteps needing to reason about how long
-a zone could plausibly linger in the scraper's own top-4-per-side view
-per timeframe (that window can differ enormously between, say, M5 and
-H4) -- the cap is generous enough that eviction only ever matters after
-hundreds of genuinely distinct invalidations, by which point the
-evicted entry's own scraper visibility has certainly long since rotated
-away too.
 """
 from __future__ import annotations
 
@@ -177,8 +142,6 @@ _TIMEFRAME_OFFSET = {"240": 3600, "120": 3600, "60": 0, "30": 0, "15": 0, "10": 
 # real zones (paired entries like ...1786082400/...1786082401) -- NOT
 # corruption, tolerated rather than rejected.
 _ALIGNMENT_TOLERANCE_SECONDS = 1
-
-_MAX_INVALIDATED_TOMBSTONES = 500  # see module docstring's own TOMBSTONES section
 
 
 def _is_aligned_to_timeframe(start_time: int, timeframe: str) -> bool:
@@ -264,7 +227,6 @@ class BlockStore:
 
     def __init__(self, path: str):
         self._path = Path(path)
-        self._invalidated_path = self._path.with_name(f"{self._path.stem}_invalidated{self._path.suffix}")
         self._zones: dict[str, BlockZone] = {}
         # Rejections already announced this process lifetime. A rejected zone
         # is never added to self._zones, so sync_from_scraper() sees it again
@@ -273,32 +235,12 @@ class BlockStore:
         # in ~95s). In-memory only on purpose: a restart re-announcing once
         # is useful, not noise.
         self._announced_rejections: set[str] = set()
-        # zone_id -> True, insertion-ordered (Python dict) so the OLDEST entry is evict-first once
-        # over _MAX_INVALIDATED_TOMBSTONES -- see module docstring's own TOMBSTONES section.
-        self._invalidated: dict[str, bool] = {}
         self._load()
-        self._load_invalidated()
 
     def _announce_rejection(self, key: str, message: str) -> None:
         if key not in self._announced_rejections:
             self._announced_rejections.add(key)
             print(message)
-
-    def _load_invalidated(self) -> None:
-        if not self._invalidated_path.exists():
-            return
-        try:
-            self._invalidated = {zid: True for zid in json.loads(self._invalidated_path.read_text())}
-        except (json.JSONDecodeError, OSError, TypeError, ValueError):
-            self._invalidated = {}
-
-    def _save_invalidated(self) -> None:
-        self._invalidated_path.write_text(json.dumps(list(self._invalidated.keys())))
-
-    def _mark_invalidated(self, zid: str) -> None:
-        self._invalidated[zid] = True
-        while len(self._invalidated) > _MAX_INVALIDATED_TOMBSTONES:
-            del self._invalidated[next(iter(self._invalidated))]   # evict oldest (FIFO)
 
     def _load(self) -> None:
         if not self._path.exists():
@@ -434,8 +376,6 @@ class BlockStore:
                     zid = _zone_id(symbol, tf, direction, start_time)
                     if zid in self._zones:
                         continue  # already ours -- our own state governs from here, not the scraper's
-                    if zid in self._invalidated:
-                        continue  # already invalidated once -- never re-seed, see TOMBSTONES section
                     top = float(z["top"])
                     btm = float(z["btm"])
                     if self._has_near_duplicate(symbol, tf, direction, top, btm):
@@ -505,7 +445,6 @@ class BlockStore:
                 # Invalidated the instant price trades below the BOTTOM.
                 if bid < z.btm:
                     del self._zones[zid]
-                    self._mark_invalidated(zid)
                     invalidated.append(zid)
                     changed = True
                     continue
@@ -518,7 +457,6 @@ class BlockStore:
                 # Invalidated the instant price trades above the TOP.
                 if ask > z.top:
                     del self._zones[zid]
-                    self._mark_invalidated(zid)
                     invalidated.append(zid)
                     changed = True
                     continue
@@ -529,8 +467,6 @@ class BlockStore:
 
         if changed:
             self._save()
-        if invalidated:
-            self._save_invalidated()
         return newly_retested, invalidated
 
     def zones(self) -> list[BlockZone]:
