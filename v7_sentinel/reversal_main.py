@@ -14,16 +14,17 @@ TWO fully independent components sharing this process -- RM-STR (HTF
 ATR-dual/Supertrend line touch + CISD confirmation, magic 26092402) and
 RM-ICT (OB zone touch + CISD confirmation, magic 26092403). RM-STR's own
 entry approach is gone entirely, not just disabled -- its own
-touch-scanning (reversal_entry.py's find_signals()/_check_level(), now
-removed from that module too -- only its shared scan_touches() utility
-remains, still used by exit_manager_ltf.py), its own position-management
-loop, its own Sideways Trapper usage, and the cross-component
-square-off feature (added 2026-09-22 specifically so STR and ICT could
-close each other's opposite position) are all gone -- with only ICT
-left, there is no "other component" to cross-close against. Confirmed 0
-open RM-STR positions before removal, so nothing was orphaned. Magic
-26092402 is retired -- this process will never place another order under
-it.
+touch-scanning (reversal_entry.py's find_signals()/_check_level()), its
+own position-management loop, its own Sideways Trapper usage, and the
+cross-component square-off feature (added 2026-09-22 specifically so STR
+and ICT could close each other's opposite position) are all gone -- with
+only ICT left, there is no "other component" to cross-close against.
+Confirmed 0 open RM-STR positions before removal, so nothing was
+orphaned. Magic 26092402 is retired -- this process will never place
+another order under it. reversal_entry.py itself (its shared
+scan_touches() utility survived the RM-STR removal only because
+exit_manager_ltf.py still used it) was deleted entirely 2026-09-25 once
+EM-LTF itself was removed and that utility lost its last caller.
 
 M3-REVERSAL-TRADE EARLY EXIT (added 2026-09-23, see _check_m3_reversal_exit's
 own docstring for the full rule): a position entered on a fresh M3 CISD

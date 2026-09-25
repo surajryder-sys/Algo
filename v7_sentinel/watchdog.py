@@ -38,8 +38,9 @@ alone is enough to flag it:
      grained than V6S's 5-file scheme -- Data Manager: tv_scraper +
      NLB/NSB Watcher + ICT Block Watcher; Trade Manager: TM-STR, RM-ICT
      (RM-STR removed 2026-09-25, see reversal_main.py's own docstring),
-     and EM's own 3 components (Scalper and its two dedicated EM
-     components removed 2026-09-25 along with Scalper itself)). ANY one
+     and EM's own ICT Exit component (its only one left -- Scalper's two
+     dedicated EM components, LTF Exit, and Bias Exit were all removed
+     2026-09-25, see exit_manager.py's own docstring)). ANY one
      of a process's own heartbeats going stale (no update in
      _HEARTBEAT_STALE_SECONDS) marks that WHOLE process
      unhealthy, naming exactly which sub-component(s) went quiet.
@@ -115,11 +116,12 @@ _PROCESSES: list[_Monitored] = [
     _Monitored("Trade Manager", "v7s_trade_manager_run.log", (
         ("TM-STR", "v7s_trend_manager_heartbeat_XAUUSD.json"),
         ("RM-ICT", "v7s_reversal_manager_heartbeat_XAUUSD.json"),
-        ("EM-Bias", "v7s_exit_manager_heartbeat_bias_XAUUSD.json"),
-        ("EM-LTF", "v7s_exit_manager_heartbeat_ltf_XAUUSD.json"),
-        # ICT Exit (2026-09-24) -- see exit_manager_ict.py's own docstring.
+        # ICT Exit (2026-09-24) -- see exit_manager_ict.py's own docstring. Exit Manager's
+        # only remaining component (Bias removed 2026-09-25 on request, "cisd is only for
+        # entry, we are taking out of exit"; LTF removed 2026-09-25 too, see exit_manager.py's
+        # own docstring; Scalper, EM-Candle, EM-Scalper-M3M5 removed 2026-09-25 along with
+        # Scalper itself).
         ("EM-ICT", "v7s_exit_manager_heartbeat_ict_XAUUSD.json"),
-        # Scalper, EM-Candle, EM-Scalper-M3M5 removed 2026-09-25 (Scalper removed entirely).
     )),
 ]
 

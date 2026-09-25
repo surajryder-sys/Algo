@@ -42,8 +42,8 @@ NO try/except between them there, only one level up around the whole
 symbol; found while designing this file, see the V7S consolidation plan).
 
 PER-SUB-COMPONENT HEARTBEATS (2026-09-24, user's own choice over V6S's
-coarser 4-file scheme): 5 heartbeat files -- TM-STR, RM-ICT, EM-Bias,
-EM-LTF, EM-ICT -- written right after each guarded call, success or
+coarser 4-file scheme): 3 heartbeat files -- TM-STR, RM-ICT,
+EM-ICT -- written right after each guarded call, success or
 caught exception, same "written unconditionally" convention as every
 other heartbeat in this project (a hung/dead sub-component is what
 heartbeat staleness catches; a raised-and-caught exception is what this
@@ -51,12 +51,16 @@ component's own run.log + Watchdog's failure-signature check catches).
 RM-STR's own heartbeat retired 2026-09-25 along with the rest of it;
 Scalper, EM-Candle, and EM-Scalper-M3M5's heartbeats retired 2026-09-25
 along with Scalper itself (magic 26092404 is retired, never reused, same
-convention as RM-STR's 26092402). This only fully protects against a
-RAISED exception, not a true infinite-loop hang inside one sub-component
--- a genuine hang inside `fn()` would stall every LATER sub-component in
-that same cycle too, since all 5 run sequentially in one thread; the only
-way around that is a per-call timeout, which is a real feature addition
-beyond this consolidation, not built here.
+convention as RM-STR's 26092402); EM-LTF's own heartbeat retired
+2026-09-25 too, on request (see exit_manager.py's own docstring for what
+else went with it); EM-Bias's own heartbeat retired 2026-09-25 too, on
+request (user: "cisd is only for entry, we are taking out of exit") --
+ICT Exit is now Exit Manager's only component. This only fully protects
+against a RAISED exception, not a true infinite-loop hang inside one
+sub-component -- a genuine hang inside `fn()` would stall every LATER
+sub-component in that same cycle too, since all 3 run sequentially in one
+thread; the only way around that is a per-call timeout, which is a real
+feature addition beyond this consolidation, not built here.
 
 Run with: python -m v7_sentinel.trade_manager_main
 """
@@ -69,9 +73,7 @@ from typing import Callable
 from v7_sentinel import (
     broker,
     config,
-    exit_manager_bias,
     exit_manager_ict,
-    exit_manager_ltf,
     heartbeat,
     reversal_main,
     trend_main,
@@ -86,7 +88,6 @@ class _SymbolRuntime:
     tm: "trend_main._SymbolRuntime"
     rm: "reversal_main._SymbolRuntime"
     em_cfg: "object"
-    em_ltf: "exit_manager_ltf.LTFExitRuntime"
     em_ict: "exit_manager_ict.ICTExitRuntime"
     em_zone_alert: "zone_touch_alert.ZoneTouchAlertRuntime"
 
@@ -98,7 +99,6 @@ def _build_runtime(symbol: str) -> _SymbolRuntime:
         tm=trend_main._build_runtime(symbol),
         rm=reversal_main._build_runtime(symbol),
         em_cfg=em_cfg,
-        em_ltf=exit_manager_ltf.build_runtime(em_cfg),
         em_ict=exit_manager_ict.build_runtime(em_cfg),
         em_zone_alert=zone_touch_alert.build_runtime(),
     )
@@ -124,10 +124,7 @@ def run_once(rt: _SymbolRuntime) -> None:
     _run_guarded("TM-STR", rt.tm.cfg.heartbeat_file, lambda: trend_main.run_once(rt.tm))
     _run_guarded("RM-ICT", rt.rm.cfg.heartbeat_file, lambda: reversal_main.run_once(rt.rm))
 
-    # Then Exit Manager's own components -- these only ever CLOSE, never open.
-    _run_guarded("EM-BIAS", rt.em_cfg.heartbeat_file_bias, lambda: exit_manager_bias.run_once(rt.em_cfg))
-    _run_guarded("EM-LTF", rt.em_cfg.heartbeat_file_ltf,
-                lambda: exit_manager_ltf.run_once(rt.em_cfg, rt.em_ltf))
+    # Then Exit Manager's own component -- only ever CLOSEs, never opens.
     _run_guarded("EM-ICT", rt.em_cfg.heartbeat_file_ict, lambda: exit_manager_ict.run_once(rt.em_cfg, rt.em_ict))
 
     # Alert-only, sends no orders -- no heartbeat needed (not gated by enable_trading either).

@@ -4,8 +4,7 @@ files can never drift out of sync with the bots that own them.
 
 WATCHED COMPONENTS (per symbol): TM-STR, RM-ICT. Each is a
 WatchedSource: its name (the "component" string its trade journal uses), its magic number, and
-its trade journal file (trade_journal.py) -- used by exit_manager_bias.py to know which journal
-to write a closed trade's "why" into. TM-ICT is not built yet; when it is, it is one more entry
+its trade journal file (trade_journal.py). TM-ICT is not built yet; when it is, it is one more entry
 in _sources_for(). RM-STR (removed 2026-09-25) and SCALPER (removed 2026-09-25, along with
 Scalper itself and its two dedicated Exit Manager components) used to be watched sources here
 too.
@@ -16,30 +15,32 @@ has_manual_tp(), for any future manager that places its own broker-side TP at en
 removed 2026-09-25, was the only one that ever used this -- see broker.py's own
 is_paused_by_manual_tp() docstring for why the distinction matters). No current source sets it.
 
-Rebuilt 2026-09-21 (user: "lets re build the exit manager from the beginning") for
-exit_manager_bias.py's Bias Exit Manager (component 1). No per-source ranking/timeframe
-field any more -- that belonged to the earlier entry-watching design and no longer applies;
-see exit_manager_bias.py's own docstring for the current rule.
+Rebuilt 2026-09-21 (user: "lets re build the exit manager from the beginning"). No per-source
+ranking/timeframe field any more -- that belonged to the earlier entry-watching design and no
+longer applies.
 
-ltf_levels_state_file / ltf_bridge_bar_flip_state_file (2026-09-22): component 2's
-(exit_manager_ltf.py) OWN LevelEligibilityStore/BridgeBarFlipTracker state, deliberately
-SEPARATE from every other component's own tracker/store, even though several read the same
-underlying bridge/rates data.
+LTF Exit Manager (exit_manager_ltf.py, plus its own ltf_levels_state_file/
+ltf_bridge_bar_flip_state_file fields here) was removed entirely 2026-09-25, on request --
+see exit_manager.py's own module docstring for what else went with it (reversal_entry.py,
+htf_levels.py). Bias Exit Manager (exit_manager_bias.py, plus its own heartbeat_file_bias field
+here) was removed entirely 2026-09-25 too, on request (user: "cisd is only for entry, we are
+taking out of exit") -- ICT Exit (below) is now the only component left, and the only one that
+ever uses CISD, strictly as a touch confirmation, never as a standalone close signal.
 
 ict_block_state_file (2026-09-22, "add virgin zones as well from ict"): the SAME Block file
-RM-ICT itself reads (reversal_config's own nlb_nsb_block_state_file) -- component 3 (ICT Exit)
+RM-ICT itself reads (reversal_config's own nlb_nsb_block_state_file) -- ICT Exit
 reads it too, never writes to it, exactly like RM-ICT's own read-only relationship to it, for
 its own >M5 tier.
 
 ict_ob_block_state_file (2026-09-24, ICT Exit): the merged TV+MT5 OB-zone store for M15/M5/M3
-(ict_ob_block.py, Data Manager's own ict_ob_watcher.py) -- component 3's own fast (M3/M5) tier
+(ict_ob_block.py, Data Manager's own ict_ob_watcher.py) -- ICT Exit's own fast (M3/M5) tier
 data source, read-only, same file RM-ICT's new MT5-zone entries also read.
 
 alerts_bot_token / alerts_chat_id (2026-09-22, renamed from zone_touch_alerts_* the same day
 once the user asked for EXIT alerts on the same bot too -- "also send me exit alerts and
 their logic too"): ONE shared Telegram bot for every alert-only (non-trading) notification
-this component sends -- zone_touch_alert.py's own touch alerts AND the exit alert each
-component's own _close_position() sends on every REAL fill. Left unset (both None, the
+this component sends -- zone_touch_alert.py's own touch alerts AND the exit alert ICT Exit's
+own _close_position() sends on every REAL fill. Left unset (both None, the
 default with no env vars set) disables ALL of these at once -- same "unset means off"
 convention enable_trading itself uses, but none of these ever send an order either way, only
 a message. telegram_alerts.send_if_configured() is the shared guarded-send helper every one
@@ -86,12 +87,10 @@ class ExitManagerSymbolConfig:
     enable_trading: bool
     sources: tuple[WatchedSource, ...]
 
-    ltf_levels_state_file: str            # component 2 (LTF Exit Manager) -- own touch-arming store
-    ltf_bridge_bar_flip_state_file: str     # component 2 -- own M15 ATR flip tracker
-    ict_block_state_file: str                   # component 3 -- reads RM-ICT's own OB zone Block (read-only)
-    ict_ob_block_state_file: str                  # component 3 (ICT Exit) -- merged TV+MT5 M15/M5/M3 store (read-only)
-    ict_exit_touch_max_age_minutes: float           # component 3 -- see exit_manager_ict.py's own TOUCH VALIDITY section
-    ict_exit_bridge_bar_flip_state_file: str          # component 3 -- own M1 structure-flip tracker (2026-09-24)
+    ict_block_state_file: str                   # reads RM-ICT's own OB zone Block (read-only)
+    ict_ob_block_state_file: str                  # ICT Exit -- merged TV+MT5 M15/M5/M3 store (read-only)
+    ict_exit_touch_max_age_minutes: float           # see exit_manager_ict.py's own TOUCH VALIDITY section
+    ict_exit_bridge_bar_flip_state_file: str          # own M1 structure-flip tracker (2026-09-24)
 
     alerts_bot_token: str | None       # shared Telegram bot for zone-touch + exit alerts, see above
     alerts_chat_id: str | None
@@ -99,8 +98,6 @@ class ExitManagerSymbolConfig:
     heartbeat_file: str               # combined -- written by exit_manager.py's own standalone main()
     # Per-sub-component heartbeats (2026-09-24, V7S only) -- used by trade_manager_main.py's
     # consolidated loop for finer-grained Watchdog visibility than the single combined file above.
-    heartbeat_file_bias: str
-    heartbeat_file_ltf: str
     heartbeat_file_ict: str
     decision_log_file: str
 
@@ -129,8 +126,6 @@ def load_symbol_config(symbol: str) -> ExitManagerSymbolConfig:
         deviation_points=int(os.getenv(prefix + "DEVIATION_POINTS", "30")),
         enable_trading=_env_bool(prefix + "ENABLE_TRADING", False),
         sources=_sources_for(symbol),
-        ltf_levels_state_file=config.state_file_for("exit_manager_ltf_levels", symbol),
-        ltf_bridge_bar_flip_state_file=config.state_file_for("exit_manager_ltf_bridge_bar_flip", symbol),
         ict_block_state_file=reversal_config.load_symbol_config(symbol).nlb_nsb_block_state_file,
         ict_ob_block_state_file=config.state_file_for("ict_ob_block", symbol),
         ict_exit_touch_max_age_minutes=float(os.getenv(prefix + "ICT_EXIT_TOUCH_MAX_AGE_MINUTES", "30")),
@@ -138,8 +133,6 @@ def load_symbol_config(symbol: str) -> ExitManagerSymbolConfig:
         alerts_bot_token=os.getenv("V7S_ALERTS_TELEGRAM_BOT_TOKEN") or None,
         alerts_chat_id=os.getenv("V7S_ALERTS_TELEGRAM_CHAT_ID") or None,
         heartbeat_file=config.state_file_for("exit_manager_heartbeat", symbol),
-        heartbeat_file_bias=config.state_file_for("exit_manager_heartbeat_bias", symbol),
-        heartbeat_file_ltf=config.state_file_for("exit_manager_heartbeat_ltf", symbol),
         heartbeat_file_ict=config.state_file_for("exit_manager_heartbeat_ict", symbol),
         decision_log_file=config.state_file_for("exit_manager_decision_log", symbol, ext="jsonl"),
         mt5_terminal_path=config.MT5_TERMINAL_PATH,
