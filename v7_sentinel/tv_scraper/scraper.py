@@ -496,12 +496,29 @@ def _pane_data_signature(symbol: str, parsed) -> tuple:
     return (symbol, _zone_signature(parsed.bull_zones), _zone_signature(parsed.bear_zones))
 
 
+# Diagnostic only (2026-09-25, live bug: this process's own heartbeat was going stale for
+# 170-210s at a time, recovering on its own, no exception ever logged -- meaning SOME step in
+# here was periodically just slow, not hanging or crashing). Prints nothing when a step is
+# normal speed -- only surfaces the ones that were actually slow, so the next stall's own log
+# will show exactly which step and which pane it happened in.
+_SLOW_STEP_SECONDS = 3.0
+
+
+def _timed(pane_label: str, step_name: str, fn):
+    t0 = time.time()
+    result = fn()
+    elapsed = time.time() - t0
+    if elapsed > _SLOW_STEP_SECONDS:
+        print(f"[V7S-TVZ][{pane_label}] SLOW: {step_name} took {elapsed:.1f}s")
+    return result
+
+
 def run_once_pane(page: Page, zones: ZoneStore, first_seen: FirstSeenStore,
                    retested: RetestTracker, live: LiveSnapshotStore,
                    mitigation_track: MitigationTrackStore,
                    pane_label: str, x_fraction: float, y_fraction: float, configured_symbol: str,
                    configured_timeframe: str, zone_history_log_path: Optional[str] = None) -> None:
-    _focus_pane(page, x_fraction, y_fraction)
+    _timed(pane_label, "_focus_pane", lambda: _focus_pane(page, x_fraction, y_fraction))
     # The Data Window sidebar doesn't repaint for the newly-focused pane
     # instantly -- a short wait for TradingView to actually repaint avoids
     # capturing the PREVIOUSLY focused pane's still-displayed data.
@@ -521,8 +538,8 @@ def run_once_pane(page: Page, zones: ZoneStore, first_seen: FirstSeenStore,
     # backstop that catches this regardless of whether this alone fixes
     # it.
     time.sleep(1.5)
-    _open_data_window(page)
-    text = _collect_data_window_text(page)
+    _timed(pane_label, "_open_data_window", lambda: _open_data_window(page))
+    text = _timed(pane_label, "_collect_data_window_text", lambda: _collect_data_window_text(page))
     parsed = parse_data_window(text)
 
     if parsed.atr is None and not parsed.bull_zones and not parsed.bear_zones:
@@ -532,8 +549,8 @@ def run_once_pane(page: Page, zones: ZoneStore, first_seen: FirstSeenStore,
         # Data Window tab may have reverted to Object Tree, or the click
         # above landed wrong -- self-heal by reopening and re-reading once
         # before giving up on this pane for this cycle.
-        _open_data_window(page)
-        text = _collect_data_window_text(page)
+        _timed(pane_label, "_open_data_window (retry)", lambda: _open_data_window(page))
+        text = _timed(pane_label, "_collect_data_window_text (retry)", lambda: _collect_data_window_text(page))
         parsed = parse_data_window(text)
 
     if parsed.symbol is None:
@@ -559,7 +576,7 @@ def run_once_pane(page: Page, zones: ZoneStore, first_seen: FirstSeenStore,
     # second, cheap read a short moment later that must AGREE with the
     # first is a direct check on the data itself.
     time.sleep(0.3)
-    confirm_text = page.evaluate("document.body.innerText")
+    confirm_text = _timed(pane_label, "confirm_read", lambda: page.evaluate("document.body.innerText"))
     confirm_parsed = parse_data_window(confirm_text)
     if not _parsed_values_agree(parsed, confirm_parsed):
         print(f"[V7S-TVZ][{pane_label}] {symbol} {timeframe}: zone values still settling "
@@ -745,11 +762,18 @@ def main() -> None:
         print(f"[V7S-TVZ] polling every {cfg.poll_seconds}s -- Ctrl+C to stop")
         try:
             while True:
+                cycle_start = time.time()
                 try:
                     run_once(page, zones, first_seen, retested, live, mitigation_track,
                              cfg.symbol, cfg.timeframe, panes, cfg.zone_history_log_file)
                 except Exception as exc:
                     print(f"[V7S-TVZ] ERROR: {exc}")
+                # Catches slowness spread thin across many panes/steps, none individually over
+                # _SLOW_STEP_SECONDS on its own -- see that constant's own docstring.
+                cycle_elapsed = time.time() - cycle_start
+                if cycle_elapsed > _SLOW_STEP_SECONDS * 3:
+                    print(f"[V7S-TVZ] SLOW CYCLE: whole poll took {cycle_elapsed:.1f}s "
+                          f"(no single step above {_SLOW_STEP_SECONDS:.0f}s -- spread across many)")
                 heartbeat.write(cfg.heartbeat_file)
                 time.sleep(cfg.poll_seconds)
         except KeyboardInterrupt:
