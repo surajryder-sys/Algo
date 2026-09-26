@@ -842,38 +842,43 @@ def read_all_major_minor(symbol: str, **kwargs) -> dict[int, Optional[MajorMinor
 
 
 # ===================== Dynamic Zones =====================
-# Direct port of mql5/Dynamic Zones.mq5 (itself a port of the "Dynamic
-# Zone - Suraj v5" Pine script -- confirmed against the user's own pasted
-# Pine source 2026-09-27, identical math, no discrepancy). ONE zone
-# timeframe (default D1, matching the script's own InpZoneTF default) --
-# "static for all timeframes" (user, 2026-09-27): this is not computed
-# per-timeframe the way Major/Minor is; one quad is the constant
-# reference regardless of what else looks at it.
-#
-# From the zone timeframe's CURRENT bar (deliberately NOT dropped the way
-# every other reader above drops the still-forming last bar -- the whole
-# point here is today's own OPEN, fixed the moment the new bar starts):
-#   Z1 = open + SMA(high-low, DEFAULT_DZ_SHORT_LEN)[previous COMPLETED bars] / 2
+# Direct port of mql5/Dynamic_Zones_CISD_MajorMinor.mq5's own Dynamic Zones
+# block (itself a port of the "Dynamic Zone - Suraj v5" Pine script --
+# confirmed against the user's own pasted Pine source 2026-09-27, identical
+# math, no discrepancy):
+#   Z1 = open + SMA(high-low, DEFAULT_DZ_SHORT_LEN)/2   of the preceding sessions
 #   Z2 = open + SMA(high-low, DEFAULT_DZ_LONG_LEN)/2
 #   Z3 = open - SMA(high-low, DEFAULT_DZ_SHORT_LEN)/2
 #   Z4 = open - SMA(high-low, DEFAULT_DZ_LONG_LEN)/2
+#
+# SESSION BOUNDARY (2026-09-27, matches the MQL5 side's own fix, same day):
+# NOT MT5's native D1 bar (timestamped 00:00 UTC -- confirmed live via the
+# MQL5 investigation that this is just a label, not the real session
+# boundary) and NOT a fixed UTC hour either (the user's own live observation:
+# "in winters it moves one hour, as per daylight savings... so count as a
+# start whenever we have a break after the candle close, if a new candle
+# starts after some break its always a new session"). A session boundary
+# here is ANY gap of more than one hour between consecutive H1 bars --
+# self-adjusting across DST and any other schedule quirk, since the break
+# itself defines the boundary rather than an assumed clock hour. See
+# _dz_find_session_starts() below -- direct port of the MQL5 file's own
+# DZ_FindSessionStarts()/DZ_CalcZone().
+#
 # "Dynamic zones plots when market opens and they stay, they are again
-# plotted next day" (user, 2026-09-27) -- confirmed this is the actual
-# design, not a bug: the anchor (open) and the SMA inputs (the N bars
-# BEFORE it) are both fixed until the zone bar itself changes, i.e. once
-# per day for the D1 default.
+# plotted next day" (user, 2026-09-27): the anchor (open) and the SMA
+# inputs (the N sessions BEFORE it) are both fixed until the CURRENT
+# session itself changes -- i.e. until the next real gap.
 
 DEFAULT_DZ_SHORT_LEN = 5
 DEFAULT_DZ_LONG_LEN = 10
-DEFAULT_DZ_ZONE_TF_MINUTES = 1440   # D1, matching the script's own default
+_DZ_EXPECTED_BAR_SECONDS = 3600   # H1 -- one bar's own normal spacing; a bigger gap is a session boundary
 
 
 @dataclass(frozen=True)
 class DynamicZoneSnapshot:
     symbol: str
-    timeframe_minutes: int    # the ZONE timeframe this was computed from (D1 by default)
     updated: int
-    zone_bar_time: int          # this zone bar's own open time -- the cache/change-detection key
+    session_start_time: int      # the CURRENT session's own first H1 bar's open time -- the cache/change-detection key
     open: float
     z1: float
     z2: float
@@ -881,38 +886,65 @@ class DynamicZoneSnapshot:
     z4: float
 
 
+def _dz_find_session_starts(h_time: list[int]) -> list[int]:
+    """Every session-start bar INDEX within h_time (ascending, oldest-first).
+    Index 0 always counts (nothing to compare it against); every other index
+    i is a session start iff the gap since bar i-1 exceeds one normal H1
+    bar's own spacing -- direct port of the MQL5 file's own
+    DZ_FindSessionStarts()."""
+    if not h_time:
+        return []
+    starts = [0]
+    for i in range(1, len(h_time)):
+        if h_time[i] - h_time[i - 1] > _DZ_EXPECTED_BAR_SECONDS:
+            starts.append(i)
+    return starts
+
+
 def read_dynamic_zones(
     symbol: str,
-    tf_minutes: int = DEFAULT_DZ_ZONE_TF_MINUTES,
     short_len: int = DEFAULT_DZ_SHORT_LEN,
     long_len: int = DEFAULT_DZ_LONG_LEN,
 ) -> Optional[DynamicZoneSnapshot]:
-    """Dynamic Zone snapshot from the zone timeframe's CURRENT (possibly
-    still-forming) bar -- None if the timeframe isn't recognized or there
-    isn't enough history for even the longer of the two SMAs."""
-    tf_const = _TIMEFRAME_CONST.get(tf_minutes)
-    if tf_const is None:
-        return None
-
+    """Dynamic Zone snapshot from the CURRENT (possibly still-forming, gap-
+    delimited) session -- None if there aren't at least max(short_len,
+    long_len) COMPLETE prior sessions in the fetched H1 history."""
     max_len = max(short_len, long_len)
-    rates = mt5.copy_rates_from_pos(symbol, tf_const, 0, max_len + 1)
-    if rates is None or len(rates) < max_len + 1:
+    need_bars = (max_len + 5) * 24   # sessions are gap-delimited, not calendar days, so weekends cost no extra margin
+
+    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, need_bars)
+    if rates is None or len(rates) == 0:
         return None
 
-    current = rates[0]   # position 0 -- the CURRENT zone bar, deliberately kept (see module note above)
-    o = float(current["open"])
+    h_time = [int(r["time"]) for r in rates]
+    starts = _dz_find_session_starts(h_time)
+    session_idx = len(starts) - 1   # the last (current, possibly still-forming) session
+    if session_idx < max_len:
+        return None   # not enough PRIOR complete sessions fetched
 
-    # Positions 1..max_len are the previous COMPLETED zone bars, nearest first --
-    # matches the MQL5 script's own shift+k convention exactly.
-    ranges = [float(rates[k]["high"]) - float(rates[k]["low"]) for k in range(1, max_len + 1)]
-    half_short = sum(ranges[:short_len]) / short_len / 2.0
-    half_long = sum(ranges[:long_len]) / long_len / 2.0
+    today_begin = starts[session_idx]
+    o = float(rates[today_begin]["open"])
+
+    sum_short = 0.0
+    sum_long = 0.0
+    for k in range(1, max_len + 1):
+        s = session_idx - k
+        seg_begin, seg_end = starts[s], starts[s + 1] - 1   # s+1 always valid: s+1 <= session_idx <= len(starts)-1
+        hi = max(float(rates[b]["high"]) for b in range(seg_begin, seg_end + 1))
+        lo = min(float(rates[b]["low"]) for b in range(seg_begin, seg_end + 1))
+        r = hi - lo
+        if k <= short_len:
+            sum_short += r
+        if k <= long_len:
+            sum_long += r
+
+    half_short = sum_short / short_len / 2.0
+    half_long = sum_long / long_len / 2.0
 
     return DynamicZoneSnapshot(
         symbol=symbol,
-        timeframe_minutes=tf_minutes,
         updated=int(time.time()),
-        zone_bar_time=int(current["time"]),
+        session_start_time=h_time[today_begin],
         open=o,
         z1=o + half_short,
         z2=o + half_long,
