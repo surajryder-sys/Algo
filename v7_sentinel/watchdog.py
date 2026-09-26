@@ -115,6 +115,10 @@ _PROCESSES: list[_Monitored] = [
         # Major/Minor Watcher (2026-09-26) -- see major_minor_watcher.py's own docstring.
         # Data-import only right now; its own ~60s cadence is normal, not a health concern.
         ("Major/Minor Watcher", "v7s_major_minor_watcher_heartbeat_XAUUSD.json"),
+        # Dynamic Zones Watcher (2026-09-27) -- see dynamic_zones_watcher.py's own docstring.
+        # Separate from Major/Minor; its own state file legitimately only changes once a
+        # day, but the heartbeat itself still updates every ~60s cycle regardless.
+        ("Dynamic Zones Watcher", "v7s_dynamic_zones_watcher_heartbeat_XAUUSD.json"),
     )),
     _Monitored("Trade Manager", "v7s_trade_manager_run.log", (
         ("TM-STR", "v7s_trend_manager_heartbeat_XAUUSD.json"),

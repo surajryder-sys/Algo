@@ -44,6 +44,13 @@ own MUCH slower cadence (~60s, vs. the 1s main poll) since a single
 recompute takes ~9 seconds -- this is exactly why it's a separate
 thread rather than folded into any of the other three.
 
+FIFTH THREAD (2026-09-27, dynamic_zones_watcher -- see that module's own
+docstring): recomputes and persists the Dynamic Zone (Z1-Z4) band, data-
+import only, deliberately SEPARATE from major_minor_watcher (user's own
+words: "this is seperate"). Recomputes far less often in practice (only
+actually changes once per day -- see that module's own CACHING note),
+but still polls/writes its own heartbeat on the same ~60s cadence.
+
 Run with: python -m v7_sentinel.data_manager
 """
 from __future__ import annotations
@@ -51,7 +58,7 @@ from __future__ import annotations
 import threading
 import time
 
-from v7_sentinel import ict_ob_watcher, major_minor_watcher, nlb_nsb_watcher
+from v7_sentinel import dynamic_zones_watcher, ict_ob_watcher, major_minor_watcher, nlb_nsb_watcher
 from v7_sentinel.tv_scraper import scraper as tv_scraper
 
 _RESTART_DELAY_SECONDS = 5.0
@@ -93,17 +100,28 @@ def _run_major_minor_watcher() -> None:
             time.sleep(_RESTART_DELAY_SECONDS)
 
 
+def _run_dynamic_zones_watcher() -> None:
+    while True:
+        try:
+            dynamic_zones_watcher.main()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[V7S-DM-DYNZONE] FATAL, restarting thread loop in {_RESTART_DELAY_SECONDS:.0f}s: {exc!r}")
+            time.sleep(_RESTART_DELAY_SECONDS)
+
+
 def main() -> None:
     print("[V7S-DM] starting -- sub-components: tv_scraper (thread), nlb_nsb_watcher (thread), "
-          "ict_ob_watcher (thread), major_minor_watcher (thread)")
+          "ict_ob_watcher (thread), major_minor_watcher (thread), dynamic_zones_watcher (thread)")
     t1 = threading.Thread(target=_run_tv_scraper, name="v7s-dm-tvz", daemon=True)
     t2 = threading.Thread(target=_run_nlb_nsb_watcher, name="v7s-dm-nlbnsb", daemon=True)
     t3 = threading.Thread(target=_run_ict_ob_watcher, name="v7s-dm-ictblock", daemon=True)
     t4 = threading.Thread(target=_run_major_minor_watcher, name="v7s-dm-majorminor", daemon=True)
+    t5 = threading.Thread(target=_run_dynamic_zones_watcher, name="v7s-dm-dynzone", daemon=True)
     t1.start()
     t2.start()
     t3.start()
     t4.start()
+    t5.start()
     # daemon=True so Ctrl+C / process exit doesn't hang on a stuck thread; join() here just
     # keeps the process itself alive as long as any thread is (all restart on their own
     # exceptions, so in practice this blocks forever under normal operation).
@@ -111,6 +129,7 @@ def main() -> None:
     t2.join()
     t3.join()
     t4.join()
+    t5.join()
 
 
 if __name__ == "__main__":

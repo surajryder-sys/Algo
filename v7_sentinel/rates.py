@@ -839,3 +839,83 @@ def read_all_major_minor(symbol: str, **kwargs) -> dict[int, Optional[MajorMinor
     timeframe_minutes. A None value for a timeframe means that one didn't
     have enough bar history -- other timeframes are unaffected."""
     return {tf: read_major_minor(symbol, tf, **kwargs) for tf in TARGET_TIMEFRAMES_MINUTES}
+
+
+# ===================== Dynamic Zones =====================
+# Direct port of mql5/Dynamic Zones.mq5 (itself a port of the "Dynamic
+# Zone - Suraj v5" Pine script -- confirmed against the user's own pasted
+# Pine source 2026-09-27, identical math, no discrepancy). ONE zone
+# timeframe (default D1, matching the script's own InpZoneTF default) --
+# "static for all timeframes" (user, 2026-09-27): this is not computed
+# per-timeframe the way Major/Minor is; one quad is the constant
+# reference regardless of what else looks at it.
+#
+# From the zone timeframe's CURRENT bar (deliberately NOT dropped the way
+# every other reader above drops the still-forming last bar -- the whole
+# point here is today's own OPEN, fixed the moment the new bar starts):
+#   Z1 = open + SMA(high-low, DEFAULT_DZ_SHORT_LEN)[previous COMPLETED bars] / 2
+#   Z2 = open + SMA(high-low, DEFAULT_DZ_LONG_LEN)/2
+#   Z3 = open - SMA(high-low, DEFAULT_DZ_SHORT_LEN)/2
+#   Z4 = open - SMA(high-low, DEFAULT_DZ_LONG_LEN)/2
+# "Dynamic zones plots when market opens and they stay, they are again
+# plotted next day" (user, 2026-09-27) -- confirmed this is the actual
+# design, not a bug: the anchor (open) and the SMA inputs (the N bars
+# BEFORE it) are both fixed until the zone bar itself changes, i.e. once
+# per day for the D1 default.
+
+DEFAULT_DZ_SHORT_LEN = 5
+DEFAULT_DZ_LONG_LEN = 10
+DEFAULT_DZ_ZONE_TF_MINUTES = 1440   # D1, matching the script's own default
+
+
+@dataclass(frozen=True)
+class DynamicZoneSnapshot:
+    symbol: str
+    timeframe_minutes: int    # the ZONE timeframe this was computed from (D1 by default)
+    updated: int
+    zone_bar_time: int          # this zone bar's own open time -- the cache/change-detection key
+    open: float
+    z1: float
+    z2: float
+    z3: float
+    z4: float
+
+
+def read_dynamic_zones(
+    symbol: str,
+    tf_minutes: int = DEFAULT_DZ_ZONE_TF_MINUTES,
+    short_len: int = DEFAULT_DZ_SHORT_LEN,
+    long_len: int = DEFAULT_DZ_LONG_LEN,
+) -> Optional[DynamicZoneSnapshot]:
+    """Dynamic Zone snapshot from the zone timeframe's CURRENT (possibly
+    still-forming) bar -- None if the timeframe isn't recognized or there
+    isn't enough history for even the longer of the two SMAs."""
+    tf_const = _TIMEFRAME_CONST.get(tf_minutes)
+    if tf_const is None:
+        return None
+
+    max_len = max(short_len, long_len)
+    rates = mt5.copy_rates_from_pos(symbol, tf_const, 0, max_len + 1)
+    if rates is None or len(rates) < max_len + 1:
+        return None
+
+    current = rates[0]   # position 0 -- the CURRENT zone bar, deliberately kept (see module note above)
+    o = float(current["open"])
+
+    # Positions 1..max_len are the previous COMPLETED zone bars, nearest first --
+    # matches the MQL5 script's own shift+k convention exactly.
+    ranges = [float(rates[k]["high"]) - float(rates[k]["low"]) for k in range(1, max_len + 1)]
+    half_short = sum(ranges[:short_len]) / short_len / 2.0
+    half_long = sum(ranges[:long_len]) / long_len / 2.0
+
+    return DynamicZoneSnapshot(
+        symbol=symbol,
+        timeframe_minutes=tf_minutes,
+        updated=int(time.time()),
+        zone_bar_time=int(current["time"]),
+        open=o,
+        z1=o + half_short,
+        z2=o + half_long,
+        z3=o - half_short,
+        z4=o - half_long,
+    )
