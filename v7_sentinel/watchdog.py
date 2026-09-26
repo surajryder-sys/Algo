@@ -112,6 +112,9 @@ _PROCESSES: list[_Monitored] = [
         ("NLB/NSB Watcher", "v7s_nlb_nsb_watcher_heartbeat_XAUUSD.json"),
         # ICT Block Watcher (2026-09-24) -- see ict_ob_watcher.py's own docstring.
         ("ICT Block Watcher", "v7s_ict_ob_watcher_heartbeat_XAUUSD.json"),
+        # Major/Minor Watcher (2026-09-26) -- see major_minor_watcher.py's own docstring.
+        # Data-import only right now; its own ~60s cadence is normal, not a health concern.
+        ("Major/Minor Watcher", "v7s_major_minor_watcher_heartbeat_XAUUSD.json"),
     )),
     _Monitored("Trade Manager", "v7s_trade_manager_run.log", (
         ("TM-STR", "v7s_trend_manager_heartbeat_XAUUSD.json"),

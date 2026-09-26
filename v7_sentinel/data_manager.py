@@ -37,6 +37,13 @@ separate thread rather than folded into nlb_nsb_watcher's own loop since
 that module's job is specifically the H4-M10 NLB/NSB Block, a different
 store with different scope; this keeps both single-purpose.
 
+FOURTH THREAD (2026-09-26, major_minor_watcher -- see that module's own
+docstring): recomputes and persists Major/Minor Support/Resistance per
+timeframe, data-import only (no entry/exit logic reads this yet). Its
+own MUCH slower cadence (~60s, vs. the 1s main poll) since a single
+recompute takes ~9 seconds -- this is exactly why it's a separate
+thread rather than folded into any of the other three.
+
 Run with: python -m v7_sentinel.data_manager
 """
 from __future__ import annotations
@@ -44,7 +51,7 @@ from __future__ import annotations
 import threading
 import time
 
-from v7_sentinel import ict_ob_watcher, nlb_nsb_watcher
+from v7_sentinel import ict_ob_watcher, major_minor_watcher, nlb_nsb_watcher
 from v7_sentinel.tv_scraper import scraper as tv_scraper
 
 _RESTART_DELAY_SECONDS = 5.0
@@ -77,21 +84,33 @@ def _run_ict_ob_watcher() -> None:
             time.sleep(_RESTART_DELAY_SECONDS)
 
 
+def _run_major_minor_watcher() -> None:
+    while True:
+        try:
+            major_minor_watcher.main()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[V7S-DM-MAJORMINOR] FATAL, restarting thread loop in {_RESTART_DELAY_SECONDS:.0f}s: {exc!r}")
+            time.sleep(_RESTART_DELAY_SECONDS)
+
+
 def main() -> None:
     print("[V7S-DM] starting -- sub-components: tv_scraper (thread), nlb_nsb_watcher (thread), "
-          "ict_ob_watcher (thread)")
+          "ict_ob_watcher (thread), major_minor_watcher (thread)")
     t1 = threading.Thread(target=_run_tv_scraper, name="v7s-dm-tvz", daemon=True)
     t2 = threading.Thread(target=_run_nlb_nsb_watcher, name="v7s-dm-nlbnsb", daemon=True)
     t3 = threading.Thread(target=_run_ict_ob_watcher, name="v7s-dm-ictblock", daemon=True)
+    t4 = threading.Thread(target=_run_major_minor_watcher, name="v7s-dm-majorminor", daemon=True)
     t1.start()
     t2.start()
     t3.start()
+    t4.start()
     # daemon=True so Ctrl+C / process exit doesn't hang on a stuck thread; join() here just
     # keeps the process itself alive as long as any thread is (all restart on their own
     # exceptions, so in practice this blocks forever under normal operation).
     t1.join()
     t2.join()
     t3.join()
+    t4.join()
 
 
 if __name__ == "__main__":
