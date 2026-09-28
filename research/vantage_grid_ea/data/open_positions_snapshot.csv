@@ -1,0 +1,2 @@
+ticket,time,time_msc,time_update,time_update_msc,type,magic,identifier,reason,volume,price_open,sl,tp,price_current,swap,profit,symbol,comment,external_id
+967709202,1790085591,1790085591494,1790085591,1790085591494,1,7,967709202,3,0.01,4322.58,0.0,4314.58,4319.75,0.0,2.83,XAUUSD.sc,Initial Sell,
