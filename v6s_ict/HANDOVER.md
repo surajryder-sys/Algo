@@ -25,7 +25,7 @@ about the whole repo and the user's working preferences).
 
 | Terminal | Path / data folder | Account | Use |
 |---|---|---|---|
-| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.14` on **XAUUSDc M5** |
+| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.15` on **XAUUSDc M5** (attached 30 Sep 20:13 IST) |
 | **MetaTrader5-5** | `C:\Program Files\MetaTrader5-5` · data `...\Terminal\4DB333B24A74B726D7AA441A9D0137DC` | on 29 Sep it was logged into VantageMarkets-Live 7 #26518949 (USD, $2.06, no EA trades) | visual tester / compile target |
 
 EA folder in both: `MQL5\Experts\V6S_ICT\`. Compile from the command line:
@@ -35,9 +35,9 @@ Contract specs (cent account): **XAUUSDc 1.00 lot = 100 USC per $1**, spread ≈
 ≈ −56 USC/lot/night. BTCUSDc 1.00 lot = 1 USC per $1 (spread $10). ETHUSDc 1.00 lot = 1 USC per $1 (spread $1).
 USOILc 1.00 lot = 1,000 USC per $1 (spread 0.02, short swap −186 USC/lot/night).
 
-## 2. What the EA does — v2.14 (current, live)
+## 2. What the EA does — v2.15 (current, live since 30 Sep 20:13 IST)
 
-File: `v6s_ict/V6S_ICT_EA_cent_1lot_v2.14.mq5` (identical logic in the other two copies). Chart: XAUUSDc, any TF
+File: `v6s_ict/V6S_ICT_EA_cent_1lot_v2.15.mq5` (identical logic in the other two copies). Chart: XAUUSDc, any TF
 (M5 recommended). All inputs at their defaults are the tested/agreed settings.
 
 **Levels.** Major/Minor support & resistance (ZigZag, pivot period 5, ported verbatim from the indicator's
@@ -56,6 +56,10 @@ with ≥2 of them Major.
   (v2.06). Re-checked every M5 candle.
 - *Management:* breakeven at 2R; partial close at 7R keeping 0.10 runner; **auto square-off** when an opposite M5
   CISD closes back beyond the trade's level; an opposite setup closes & reverses.
+- *Trap trade (v2.15, `UseTrapTrade`):* when the auto square-off closes a reversal/breakout (the setup failed),
+  enter the OTHER way at once: SL = failed level ± 4.0 (`TrapSLBuffer`, capped 20), TP fixed 1:2 (`TrapTPR`),
+  LotSize, same magic. Only while the original trade is open (not after an SL/BE exit); a trap trade is never
+  flipped again; not blocked by the DZ filter / night block. Comment `V6SICT TB|TS <level>`.
 - *Extra leg (v2.12, magic 26092731):* first trade **in profit** + new same-side setup → one extra leg (same lot,
   setup SL capped 20, TP 1:2) and the first trade's SL → breakeven. Max one leg; it closes with the first trade on
   an opposite setup / square-off.
@@ -94,7 +98,8 @@ label limit.
 | v2.11 | no reversal entries 01:30–05:30 IST |
 | v2.12 | extra leg (in profit + first trade to BE) |
 | v2.13 | Dynamic Zones on gap-delimited sessions (was plain D1 = 05:30 IST, wrong) |
-| **v2.14** | **session-high/low TP for reversals** |
+| v2.14 | session-high/low TP for reversals |
+| **v2.15** | **trap trade on the auto square-off (T6: SL level ± 4, TP 1:2)** |
 | v3.00/3.01 | hedge-basket experiments (not used) |
 
 ## 4. Headline backtest results (Python sims, see `sim/README.md`)
@@ -104,7 +109,8 @@ on real ticks), costs included:
 
 | Config | 2-year net (USC) | Worst drop | Losing months |
 |---|---|---|---|
-| **v2.14 (live)** | **+667,620** | **7.0 %** | none |
+| **v2.15 (live)** | **+685,035** | **7.0 %** | none |
+| v2.14 | +667,620 | 7.0 % | none |
 | v2.13 | +648,359 | 7.7 % | Sep 2026 −142 |
 | v2.12 on old D1 zones (for reference) | +657,720 | 11.9 % | May 2025 −9,126 |
 
@@ -141,6 +147,7 @@ $2,900). Recommended 0.05–0.06 lot for $5k.
 | M3 fallback when M5 CISD closes on wrong side | no | only 8–20 trades, slightly worse |
 | Touch expiry | none | 6/12/24/48 candles all worse |
 | Loss cutting (2026-09-30, v2.14) | none | BO BE at 1R +641.5k; DZ BE at 1R +658.3k (Mar-26 losing); DZ BE at +20 pts +626.8k (Mar-26 −17k); BO close on any opposite M5 CISD +527.8k; half off at 1R: aligning +602.2k, DZ +653.9k, both +588.5k |
+| Trap trade (v2.15) | T6: square-off → opposite entry, SL level ± 4, TP 1:2, only while the trade is open | 42 traps / 2y, 43 % win, +15,000; buffer 0.5 +671.1k, 2 +673.5k, TP at level +681.5k, +1h after SL/BE +683.5k (adds Mar-25 losing month on $5k), DZ traps −7k (+660.8k), traps from 2-TF levels +689.2k but drop 7.2 % and recent period −456; $5k USD 0.06: +40,223 → +41,169 |
 | Close on aligning level break against the trade (M5 close, any Minor/Major level) | off | any level: aligning +662.5k, DZ +633.1k (drop 10.2 %), both +628.0k; in-profit levels only: aligning +654.7k, DZ +662.2k, both +649.3k |
 | Replay back-fill fix ("A") | not done (user: ignore for now) | — |
 | Liquidity sweeps (aligning / single-TF Major / HTF candle, M1–M5 CISD / green candle) | rejected | 300+ combos, none profitable (best H4 M5 1:3 +895) |
@@ -185,7 +192,7 @@ can fill SL/TP far away.
 
 ## 9. Open items / ideas not done
 
-- Confirm v2.14 in the MT5 Strategy Tester (visual) before scaling lots.
+- Confirm v2.15 in the MT5 Strategy Tester (visual) before scaling lots.
 - Replay back-fill fix "A" (restart can create touches before a level existed) — parked by the user.
 - BTC DZ-only EA (see §6) — parked by the user.
 - Possible test: auto square-off also on an opposite CISD closing back into the DZ zone (from the 29 Sep trade).

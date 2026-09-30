@@ -1,7 +1,7 @@
 import sys, numpy as np, datetime as dt
 from v6sim import MajorMinor, agg, TFS
 
-P = dict(Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0,
+P = dict(Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0, Trap=0, TrapBuf=4.0, TrapWin=0, TrapTP=2.0,
          SwapLongPerLot=-55.04, Start='2026-08-24', End='2026-09-25')
 for a in sys.argv[1:]:
     k, v = a.split('='); P[k] = type(P[k])(v) if not isinstance(P[k], str) else v
@@ -196,7 +196,7 @@ dz_day = -1; dzblock = {1: False, -1: False}; dz_blocked = 0
 pos = None; trades = []; realized = 0.0; eq_min = 0.0; eq_peak = 0.0; maxdd = 0.0
 MEQ = {}; last_day = None; setups_ignored = 0; streak = {1: 0, -1: 0}; paused = {1: False, -1: False}; braked = 0; peak_t = 0; dd_info = None
 
-leg = None; legs_opened = 0; baskets = 0
+leg = None; legs_opened = 0; baskets = 0; watch = None; traps = 0
 def leg_pl(bid, ask):
     if leg is None: return 0.0
     px = bid if leg['dir'] > 0 else ask
@@ -229,7 +229,7 @@ def pos_pl(bid, ask):
     return (px - pos['entry']) * pos['dir'] * pos['vol'] * P['Contract'] + pos['swap'] + leg_pl(bid, ask)
 
 def close_pos(reason, bid, ask, t, vol=None):
-    global pos, realized
+    global pos, realized, watch
     px = bid if pos['dir'] > 0 else ask
     v = pos['vol'] if vol is None else vol
     pl = (px - pos['entry']) * pos['dir'] * v * P['Contract']
@@ -240,6 +240,9 @@ def close_pos(reason, bid, ask, t, vol=None):
     if vol is None or abs(pos['vol'] - v) < 1e-9:
         if leg is not None and reason in ('REVERSE', 'SQUARE-OFF', 'END', 'BASKET'): close_leg(reason, bid, ask, t)
         pos['exit'] = reason; pos['te'] = t; trades.append(pos)
+        if watch is not None and watch.get('p') is pos:     # v2.15 trap: TrapWin>0 keeps watching after an SL/BE exit (tested worse)
+            if reason in ('SL', 'BE-STOP', 'TRAIL') and P['TrapWin'] > 0: watch['until'] = t + P['TrapWin'] * 300; watch['p'] = None
+            else: watch = None
         d = pos['dir']
         if pos.get('type', 0) == 1:
             pos = None; return
@@ -288,6 +291,19 @@ for j in range(len(tk)):
         while m10ptr < len(M10) and M10['time'][m10ptr] + 600 <= T:
             cs10 = c10.step(M10['open'][m10ptr], M10['close'][m10ptr]); c10close = M10['close'][m10ptr]; m10ptr += 1
         last = m5ptr >= len(M5) or M5['time'][m5ptr] + 300 > now
+        # v2.15 TRAP: the open reversal/breakout's own square-off condition -> close it and enter the other way,
+        # SL = failed level +/- TrapBuf, TP fixed TrapTP x risk (0 = aligning-level TP)
+        if last and P['Trap'] and watch is not None and cs == -watch['dir'] and (C[i] < watch['lvl'] if watch['dir'] > 0 else C[i] > watch['lvl'])                 and ((watch['p'] is not None and pos is watch['p']) or (watch['p'] is None and pos is None and now <= watch['until'])):
+            d2 = -watch['dir']; wl = watch['lvl']
+            if pos is not None: close_pos('TRAP-SQ', bid, ask, now)
+            e2 = ask if d2 > 0 else bid; s2 = wl - d2 * P['TrapBuf']
+            if abs(e2 - s2) > P['MaxSL']: s2 = e2 - d2 * P['MaxSL']
+            watch = None
+            if (e2 - s2) * d2 > 0:
+                pos = dict(dir=d2, entry=e2, sl0=s2, sl=s2, vol=P['Lot'], part=False, swap=0.0, booked=0.0, t=now, lvl=wl,
+                           desc='TRAP', risk=abs(e2 - s2), events=[], type=3)
+                if P['TrapTP'] > 0: pos['tp'] = e2 + d2 * P['TrapTP'] * pos['risk']; pos['fixtp'] = True
+                traps += 1
         # C. auto square-off: opposite CISD closing beyond the trade's level
         if last and P['AutoSq'] and pos is not None and cs == -pos['dir']:
             if (pos['dir'] > 0 and C[i] < pos['lvl']) or (pos['dir'] < 0 and C[i] > pos['lvl']):
@@ -341,6 +357,7 @@ for j in range(len(tk)):
                         pos = dict(dir=sig, entry=entry, sl0=sl, sl=sl, vol=P['Lot'], part=False, swap=0.0, booked=0.0,
                                    t=now, lvl=lvl, desc=desc + (' | M10 CISD' if how == 'M10' else ''), risk=abs(entry - sl), events=[])
                         if how == 'M10': m10_entries += 1
+                        watch = dict(dir=sig, lvl=lvl, p=pos)
                         needm10.pop((sig, lvl), None)
                     (sup if sig > 0 else res)[lvl]['touch'] = -1
         # B. breakout entry (only when no reversal setup fired this candle)
@@ -373,6 +390,7 @@ for j in range(len(tk)):
                         pos = dict(dir=cs, entry=entry, sl0=bsl, sl=bsl, vol=P['BOLots'], part=False, swap=0.0, booked=0.0,
                                    t=now, lvl=blv, desc=('BREAKOUT' if cs > 0 else 'BREAKDOWN'), risk=abs(entry - bsl), events=[], type=1)
                         bo_trades += 1
+                        watch = dict(dir=cs, lvl=blv, p=pos)
                     bo[:] = [b_ for b_ in bo if b_ is not None and not (b_[0] == side and b_[1] == blv)]
         # B. register new breaks by this candle
         if P['BO'] and i >= 1:
@@ -386,7 +404,7 @@ for j in range(len(tk)):
             if pos['dir'] > 0: pos['sl'] = max(pos['sl'], min(L[i-n_+1:i+1]) - P['SLBuf'])
             else:              pos['sl'] = min(pos['sl'], max(H[i-n_+1:i+1]) + P['SLBuf'])
         # A. TP at the nearest opposite aligning level
-        if last and P['OppTP'] and pos is not None and (P['TPScope'] == 0 or pos.get('type', 0) == 1):
+        if last and P['OppTP'] and pos is not None and not pos.get('fixtp') and (P['TPScope'] == 0 or pos.get('type', 0) == 1):
             pos['tp'] = opp_tp(pos['dir'], bid, ask, pos['entry'], pos['risk'], pos.get('type', 0))
             if leg is not None and P['LegTPMode'] == 'main' and pos['tp']: leg['tp'] = pos['tp']
         for v, d in sup.items():
@@ -440,7 +458,7 @@ if pos is not None:
     open_note = f"open at end: {'BUY' if pos['dir']>0 else 'SELL'} from {ist(pos['t'])}, floating {pos_pl(bid, ask):+.2f}"
     close_pos('END', bid, ask, tk[-1, 0] / 1000)
 if leg is not None: close_leg('END', bid, ask, tk[-1, 0] / 1000)
-print(f"extra legs opened {legs_opened}, basket closes {baskets}")
+print(f"extra legs opened {legs_opened}, basket closes {baskets}, trap trades {traps}")
 
 print(f"ticks: {P['TickSrc']}")
 print(f"period {P['Start']} -> {P['End']}  lot {P['Lot']}  touch buffer {P['TouchBuf']}  min aligned TFs {P['MinTF']}")
@@ -475,4 +493,4 @@ for k in sorted(mm):
 
 import json as _j
 if P['TrOut']:
-    _j.dump([dict(t=float(x['t']), te=float(x['te']), pl=float(x['booked']), typ={1: 'BO', 2: 'LEG'}.get(x.get('type', 0), 'REV'), risk=float(x['risk']), pts=float(x['booked']) / ((P['BOLots'] if x.get('type', 0) == 1 else P['Lot']) * P['Contract'])) for x in trades], open(P['TrOut'], 'w'))
+    _j.dump([dict(t=float(x['t']), te=float(x['te']), pl=float(x['booked']), typ={1: 'BO', 2: 'LEG', 3: 'TRAP'}.get(x.get('type', 0), 'REV'), risk=float(x['risk']), pts=float(x['booked']) / ((P['BOLots'] if x.get('type', 0) == 1 else P['Lot']) * P['Contract'])) for x in trades], open(P['TrOut'], 'w'))

@@ -31,7 +31,7 @@ bars), **new/recent** = `Start=2026-04-01` (real ticks). Costs for the cent acco
 
 | Script | Slot / purpose |
 |---|---|
-| `s_v6.py` | **Aligning-level slot, current** (v2.14 logic): reversals + breakouts, extra leg, night block, DZ filter on gap-session zones, session TP. Writes `TrOut` json (typ REV/BO/LEG). |
+| `s_v6.py` | **Aligning-level slot, current** (v2.15 logic): reversals + breakouts, extra leg, night block, DZ filter on gap-session zones, session TP, trap trade (`Trap=1`). Writes `TrOut` json (typ REV/BO/LEG/TRAP). |
 | `s_dz.py` | **DZ breakout slot, current** (gap-session zones, cap/skip, capped-1R, square-off, optional DZ leg). Several target "books" per run: LEVEL (live), LVL>=1R, 1:1 … 1:3. |
 | `sessz.py` | Gap-delimited sessions + Dynamic Zones (identical to `mql5/Dynamic_Zones_CISD_MajorMinor.mq5` and EA v2.13+). |
 | `v6sim.py` | Major/Minor ZigZag port (`MajorMinor`), bar aggregation `agg`, timeframes `TFS`. |
@@ -46,10 +46,10 @@ bars), **new/recent** = `Start=2026-04-01` (real ticks). Costs for the cent acco
 
 Every script takes `Key=Value` arguments that override the `P = dict(...)` defaults at the top of the file.
 
-## Reproduce the live EA (v2.14, cent 1-lot) — expected ≈ +667,620 USC / 2 years, drop 7.0 %
+## Reproduce the EA (v2.15, cent 1-lot) — expected ≈ +685,035 USC / 2 years, drop 7.0 %
 
 ```bash
-B="MinTF=3 MinMajor=2 BER=2.0 PartR=7.0 TouchBuf=0.0 SLFromTouch=0 SLBuf=0.5 OppTP=1 AutoSq=1 BO=1 SLMode=cap MaxSL=20 MinRRRev=0 MinRRBO=1.5 M10AfterSL=0 Brake=0 Lot=1.0 BOLots=1.0 Runner=0.10 MinTPR=1.0 NoRevLate=1 AddLeg=1 LegWhen=profit LegBE=1 LegTP=2.0 DZF=1 DZTP=0 SessTP=2 SessScope=rev Comm=0 MinSpread=0.26"
+B="MinTF=3 MinMajor=2 BER=2.0 PartR=7.0 TouchBuf=0.0 SLFromTouch=0 SLBuf=0.5 OppTP=1 AutoSq=1 BO=1 SLMode=cap MaxSL=20 MinRRRev=0 MinRRBO=1.5 M10AfterSL=0 Brake=0 Lot=1.0 BOLots=1.0 Runner=0.10 MinTPR=1.0 NoRevLate=1 AddLeg=1 LegWhen=profit LegBE=1 LegTP=2.0 DZF=1 DZTP=0 SessTP=2 SessScope=rev Trap=1 Comm=0 MinSpread=0.26"
 D="Lot=1.0 BOSL=zone Modes=BO SQ=1 MinTPPts=1.0 TF=900 SLBuf=4 MaxSL=75 CapMinTPR=1.0 TPBuf=1.0 Comm=0 MinSpread=0.26"
 python s_v6.py $B Start=2024-10-01 End=2026-04-01 TickSrc=ohlc MeqOut=q.json TrOut=al_old.json > al_old.txt
 python s_v6.py $B Start=2026-04-01 MeqOut=r.json TrOut=al_new.json > al_new.txt
@@ -59,4 +59,4 @@ python combine.py al_old.json al_new.json dz_old.json dz_new.json 77581
 ```
 
 The four runs are independent — start them in parallel (`&` + `wait`); each takes a few minutes.
-v2.13 (before session TP) = same with `SessTP=0` → ≈ +648,359.
+v2.14 (no trap) = same with `Trap=0` → ≈ +667,620; v2.13 (before session TP) = also `SessTP=0` → ≈ +648,359.
