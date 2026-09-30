@@ -30,7 +30,7 @@ about the whole repo and the user's working preferences).
 
 | Terminal | Path / data folder | Account | Use |
 |---|---|---|---|
-| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.15` on **XAUUSDc M5** (attached 30 Sep 20:13 IST). **v2.17 built 1 Oct, to be swapped in by the user.** |
+| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.17` on **XAUUSDc M5** (attached 1 Oct 01:58 IST) |
 | **MetaTrader5-5** | `C:\Program Files\MetaTrader5-5` · data `...\Terminal\4DB333B24A74B726D7AA441A9D0137DC` | **Exness Trial12 demo 83125455** (Exness-MT5Trial12, XAUUSD) | **Strategy Tester** (the user runs it; real ticks from 2026-01-01, generated before) + compile target; the sim data `m1_t12.npy`/`ticks_t12.npy` come from here |
 
 EA folder in both: `MQL5\Experts\V6S_ICT\`. Compile from the command line:
@@ -40,7 +40,7 @@ Contract specs (cent account): **XAUUSDc 1.00 lot = 100 USC per $1**, spread ≈
 ≈ −56 USC/lot/night. BTCUSDc 1.00 lot = 1 USC per $1 (spread $10). ETHUSDc 1.00 lot = 1 USC per $1 (spread $1).
 USOILc 1.00 lot = 1,000 USC per $1 (spread 0.02, short swap −186 USC/lot/night).
 
-## 2. What the EA does — v2.17 (current build, 1 Oct 2026; live chart still on v2.15 until swapped)
+## 2. What the EA does — v2.17 (current, live since 1 Oct 01:58 IST)
 
 File: `v6s_ict/V6S_ICT_EA_cent_1lot_v2.17.mq5` (identical logic in the other two copies). Chart: XAUUSDc, any TF
 (M5 recommended). All inputs at their defaults are the tested/agreed settings.
@@ -226,7 +226,6 @@ can fill SL/TP far away.
 
 ## 9. Open items / ideas not done
 
-- **User to swap the live chart to `V6S_ICT_EA_cent_1lot_v2.17`**; then delete v2.15 (+ tester v2.16) from both terminals.
 - **Volatility fix (main weakness):** scale stops/buffers/caps to ATR, or cut lots when the daily range is small.
 - **Breakout auto square-off:** −$11.4k in the tester — test removing it for breakouts.
 - Time filter 15:00-17:00 IST for breakouts/DZ; trend filter for counter-trend sells.
