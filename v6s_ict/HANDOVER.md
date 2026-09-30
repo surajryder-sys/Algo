@@ -140,6 +140,8 @@ $2,900). Recommended 0.05–0.06 lot for $5k.
 | Confirmation (aligning slot alone, 0.08/0.10 lot, old zones) | M5 CISD +26.2k | M5 candle close +20.6k, M15 CISD +14.2k, M15 close +27.2k (2× the drawdown) |
 | M3 fallback when M5 CISD closes on wrong side | no | only 8–20 trades, slightly worse |
 | Touch expiry | none | 6/12/24/48 candles all worse |
+| Loss cutting (2026-09-30, v2.14) | none | BO BE at 1R +641.5k; DZ BE at 1R +658.3k (Mar-26 losing); DZ BE at +20 pts +626.8k (Mar-26 −17k); BO close on any opposite M5 CISD +527.8k; half off at 1R: aligning +602.2k, DZ +653.9k, both +588.5k |
+| Close on aligning level break against the trade (M5 close, any Minor/Major level) | off | any level: aligning +662.5k, DZ +633.1k (drop 10.2 %), both +628.0k; in-profit levels only: aligning +654.7k, DZ +662.2k, both +649.3k |
 | Replay back-fill fix ("A") | not done (user: ignore for now) | — |
 | Liquidity sweeps (aligning / single-TF Major / HTF candle, M1–M5 CISD / green candle) | rejected | 300+ combos, none profitable (best H4 M5 1:3 +895) |
 | Cap vs skip, 20-pt cap (aligning) | cap 20 | skip worse (v2.02 era) |
