@@ -16,6 +16,8 @@ for y in (2024, 2025, 2026):
         if (ok&inc).any(): got.append(r[ok&inc])
     cat = np.concatenate(got); _, idx = np.unique(cat['time'], return_index=True); parts.append(cat[idx])
 m1 = np.concatenate(parts); _, idx = np.unique(m1['time'], return_index=True); m1 = m1[idx]
+from build_data import drop_bad_midnight
+m1, nbad = drop_bad_midnight(m1)   # 2026-09-30 fix: fake 00:00 day-boundary records (see build_data.py)
 o,h,l,c = m1['open'],m1['high'],m1['low'],m1['close']
 pc = np.concatenate([[c[0]],c[:-1]]); no = np.concatenate([o[1:],[o[-1]]])
 spike = (np.abs((o+c)/2-(pc+no)/2)>30)&(np.abs(pc-no)<15)
@@ -34,4 +36,4 @@ def agg(m, sec):
     r['high'] = np.maximum.reduceat(m['high'], st); r['low'] = np.minimum.reduceat(m['low'], st); return r
 np.save('m5_2y.npy', agg(merged, 300)); np.save('m3_2y.npy', agg(merged, 180))
 f = lambda t: dt.datetime.fromtimestamp(int(t), dt.timezone.utc).date()
-print('M1 bars', len(merged), f(merged['time'][0]), '->', f(merged['time'][-1]), '| history until', f(cut), '| spikes removed', spike.sum())
+print('M1 bars', len(merged), f(merged['time'][0]), '->', f(merged['time'][-1]), '| history until', f(cut), '| spikes removed', spike.sum(), '| bad 00:00 bars removed', nbad)

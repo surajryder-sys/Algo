@@ -1,4 +1,9 @@
-# V6S-ICT — full handover (state as of 30 Sep 2026, IST)
+# V6S-ICT — full handover (state as of 1 Oct 2026, IST)
+
+> **READ FIRST (1 Oct 2026): every 2-year simulation result before 30 Sep 2026 was inflated by bad data.** The M1
+> files were parsed from MT5 `.hcc` history; on ~85 % of days the 00:00 UTC record was a wrong whole-day candle, which
+> produced fake fills. Clean, tester-matched numbers are in §4; §5's old table is kept for history only (see §5a for
+> the re-check on clean data). The Strategy Tester is the reference now.
 
 Written for a teammate / a new Claude chat picking this up with no prior context. Read this first, then
 `v6s_ict/sim/README.md` (how to re-run every test) and `docs/claude_context/` (the previous assistant's saved notes
@@ -25,8 +30,8 @@ about the whole repo and the user's working preferences).
 
 | Terminal | Path / data folder | Account | Use |
 |---|---|---|---|
-| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.15` on **XAUUSDc M5** (attached 30 Sep 20:13 IST) |
-| **MetaTrader5-5** | `C:\Program Files\MetaTrader5-5` · data `...\Terminal\4DB333B24A74B726D7AA441A9D0137DC` | on 29 Sep it was logged into VantageMarkets-Live 7 #26518949 (USD, $2.06, no EA trades) | visual tester / compile target |
+| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.15` on **XAUUSDc M5** (attached 30 Sep 20:13 IST). **v2.17 built 1 Oct, to be swapped in by the user.** |
+| **MetaTrader5-5** | `C:\Program Files\MetaTrader5-5` · data `...\Terminal\4DB333B24A74B726D7AA441A9D0137DC` | **Exness Trial12 demo 83125455** (Exness-MT5Trial12, XAUUSD) | **Strategy Tester** (the user runs it; real ticks from 2026-01-01, generated before) + compile target; the sim data `m1_t12.npy`/`ticks_t12.npy` come from here |
 
 EA folder in both: `MQL5\Experts\V6S_ICT\`. Compile from the command line:
 `& "<terminal dir>\MetaEditor64.exe" /compile:"<data>\MQL5\Experts\V6S_ICT\<file>.mq5" /inc:"<data>\MQL5" /log:"<log>"`.
@@ -35,9 +40,9 @@ Contract specs (cent account): **XAUUSDc 1.00 lot = 100 USC per $1**, spread ≈
 ≈ −56 USC/lot/night. BTCUSDc 1.00 lot = 1 USC per $1 (spread $10). ETHUSDc 1.00 lot = 1 USC per $1 (spread $1).
 USOILc 1.00 lot = 1,000 USC per $1 (spread 0.02, short swap −186 USC/lot/night).
 
-## 2. What the EA does — v2.15 (current, live since 30 Sep 20:13 IST)
+## 2. What the EA does — v2.17 (current build, 1 Oct 2026; live chart still on v2.15 until swapped)
 
-File: `v6s_ict/V6S_ICT_EA_cent_1lot_v2.15.mq5` (identical logic in the other two copies). Chart: XAUUSDc, any TF
+File: `v6s_ict/V6S_ICT_EA_cent_1lot_v2.17.mq5` (identical logic in the other two copies). Chart: XAUUSDc, any TF
 (M5 recommended). All inputs at their defaults are the tested/agreed settings.
 
 **Levels.** Major/Minor support & resistance (ZigZag, pivot period 5, ported verbatim from the indicator's
@@ -56,7 +61,7 @@ with ≥2 of them Major.
   (v2.06). Re-checked every M5 candle.
 - *Management:* breakeven at 2R; partial close at 7R keeping 0.10 runner; **auto square-off** when an opposite M5
   CISD closes back beyond the trade's level; an opposite setup closes & reverses.
-- *Trap trade (v2.15, `UseTrapTrade`):* when the auto square-off closes a reversal/breakout (the setup failed),
+- *Trap trade (v2.15, `UseTrapTrade`, **OFF by default since v2.17** — it lost on clean data):* when the auto square-off closes a reversal/breakout (the setup failed),
   enter the OTHER way at once: SL = failed level ± 4.0 (`TrapSLBuffer`, capped 20), TP fixed 1:2 (`TrapTPR`),
   LotSize, same magic. Only while the original trade is open (not after an SL/BE exit); a trap trade is never
   flipped again; not blocked by the DZ filter / night block. Comment `V6SICT TB|TS <level>`.
@@ -70,7 +75,11 @@ with ≥2 of them Major.
 - Zones per **gap-delimited session** (v2.13, same as `mql5/Dynamic_Zones_CISD_MajorMinor.mq5`): a new session
   starts wherever consecutive H1 bars are > 1 h apart; anchor = session's first H1 open; Z1/Z3 = open ± ½ avg range
   of the previous 5 complete sessions, Z2/Z4 = same with 10. Resistance zone = Z1–Z2, support zone = Z3–Z4.
-- Entry: an **M15 CISD** candle closing beyond the zone (above resistance → buy, below support → sell).
+- Entry: an **M15 CISD** candle closing beyond the zone (above resistance → buy, below support → sell). **Since
+  v2.16 (`DZEntryLuxAlgo`) the entry CISD is LuxAlgo "Classic"** (close beyond the OPEN of the first candle of the
+  latest opposite run; no tolerance; line expires after `LuxMaxBars` = 100 candles). The **square-off still uses
+  AlgoAlpha**: only an AlgoAlpha opposite setup closes the DZ trade; a LuxAlgo opposite setup while a DZ trade is
+  open is ignored.
 - SL = far zone line ± 4.0, **capped at 75**; a capped trade needs TP ≥ 1R (v2.10). TP = nearest aligning level
   ∓1.0 fixed at entry (1:1 if none; skipped if < 1 pt away). An opposite DZ setup squares it off.
 
@@ -99,32 +108,56 @@ label limit.
 | v2.12 | extra leg (in profit + first trade to BE) |
 | v2.13 | Dynamic Zones on gap-delimited sessions (was plain D1 = 05:30 IST, wrong) |
 | v2.14 | session-high/low TP for reversals |
-| **v2.15** | **trap trade on the auto square-off (T6: SL level ± 4, TP 1:2)** |
+| v2.15 | trap trade on the auto square-off (T6: SL level ± 4, TP 1:2) |
+| tester v2.16 | `V6S_ICT_EA_tester_v2.16` (standard lots only): DZ entry on LuxAlgo CISD, exit AlgoAlpha |
+| **v2.17** | **= v2.16 DZ LuxAlgo entry + trap trade OFF by default** (3 copies) |
 | v3.00/3.01 | hedge-basket experiments (not used) |
 
-## 4. Headline backtest results (Python sims, see `sim/README.md`)
+## 4. Headline results — CLEAN data (1 Oct 2026)
 
-Gold, cent account, 1.00 lot, start 77,581 USC, Oct 2024 – 25 Sep 2026 (old period on 1-min bars, Apr–Sep 2026
-on real ticks), costs included:
+**Strategy Tester, Exness Trial12 XAUUSD, 1 Jan 2024 – 29 Sep 2026, $5,000, 0.08 rev / 0.10 BO + DZ, trap ON**
+(27 % real ticks: 2026 real, 2024-25 generated from M1):
 
-| Config | 2-year net (USC) | Worst drop | Losing months |
-|---|---|---|---|
-| **v2.15 (live)** | **+685,035** | **7.0 %** | none |
-| v2.14 | +667,620 | 7.0 % | none |
-| v2.13 | +648,359 | 7.7 % | Sep 2026 −142 |
-| v2.12 on old D1 zones (for reference) | +657,720 | 11.9 % | May 2025 −9,126 |
+| | v2.15 | v2.16 |
+|---|---|---|
+| Net | +$27,885 | **+$37,523** |
+| 2024 / 2025 / 2026 | −2,401 / +10,370 / +19,804 | −1,260 / +12,341 / +26,078 |
+| Lowest balance | **$1,613 (21 Jan 2025), −73 %** | $2,323 (11 Nov 2024), −60 % |
+| Losing months | 13 | 11 |
+| DZ slot | −1,050 / +7,414 / +12,602 | +90 / +9,386 / +18,876 |
 
-v2.13 split: reversals +153,927 · breakouts +171,691 · extra legs +23,107 · DZ +299,635. v2.13 months (USC):
-2024-10 +3,909 · 11 +45,103 · 12 +20,863 · 2025-01 +6,716 · 02 +21,446 · 03 +225 · 04 +47,208 · 05 +6,522 ·
-06 +13,156 · 07 +31,170 · 08 +12,886 · 09 +56,814 · 10 +56,594 · 11 +10,616 · 12 +21,325 · 2026-01 +72,299 ·
-02 +10,913 · 03 +23,333 · 04 +18,387 · 05 +52,109 · 06 +29,981 · 07 +26,320 · 08 +60,606 · 09 −142.
+Aligning slot identical in both: reversals +$1,409 over 635 trades; breakouts TP +35.9k, SL −18.8k, **auto square-off
+−11.4k (144 trades)**; trap trades −$548 over 194. Costs: swap −$2.5k, commission −$0.7k, spread ≈ −$2k.
 
-5,000 USD standard account (v2.12, comm $3.5/lot/side): 0.06 lot +39,600 (drop $1,740); 0.10 lot +65,847 (drop
-$2,900). Recommended 0.05–0.06 lot for $5k.
+**Main weakness = quiet markets.** Gold's typical daily range: 2024 26.6 pts, 2025 45.0, 2026 90.1. The EA's
+fixed-point stops/targets/buffers suit 2026; in 2024 wins were ~3.4× smaller while costs were not → 2024 lost and
+the balance fell 60-73 %. Best hours 18:00-23:00 IST (+$27k); worst 15:00-17:00 IST (−$2.7k) and 01:00-04:00 (−$1.7k);
+2025 sells lost against the uptrend (−$1.4k vs buys +$13.8k).
 
-**Caveat:** simulation only — never confirmed in the MT5 Strategy Tester; many settings were chosen on this same data.
+**Simulation on clean Trial12 data** (`sim/build_t12.py`; matches the tester: 96 % of entries, yearly P/L within a
+few hundred $): cent 1 lot, Oct 2024 – Sep 2026 — v2.15 +293,335 (drop 27.1k, 7 losing months) · v2.16 +388,152
+(drop 36.7k, 5) · **v2.17 (v2.16 + trap off) +399,953 (drop 36.9k, 5 losing months, −56.0k)**. $5k 0.08/0.10,
+Jan 2024 – Sep 2026: v2.16 trap on +$36,433 (low $1,816) vs **trap off +$37,791 (low $2,395)**.
 
-## 5. Every decision and the test behind it (all re-checked on gap-session zones unless noted)
+## 5a. Decisions re-checked on CLEAN data (1 Oct 2026, cent 1 lot, Oct 2024 – Sep 2026, base = v2.16 +388,152, drop 36,676, 5 losing months)
+
+| Change | Net | Drop | Losing months | Verdict |
+|---|---|---|---|---|
+| **Trap OFF** | **+399,953** | 36,866 | 5 (−56.0k vs −60.8k) | **adopted in v2.17** |
+| Session TP off | +399,951 | 36,676 | 5 (−63.9k) | keep (noise) |
+| Extra leg off | +382,982 | 36,676 | 5 (−49.9k) | keep (noise) |
+| Trap off + leg off / + session TP off / all three | +385.9k / +408.3k / +385.2k | 37.2k / 37.0k / 38.1k | 5 | no clear gain |
+| Aligning SL cap 30 / 15 | +465.7k / +333.1k | 53.5k / 43.4k | 6 / 6 | keep 20 |
+| Breakeven 1R / 3R | +372.9k / +400.7k | 37.2k / 41.2k | 8 / 5 | keep 2R |
+| Night block off | +400.5k | 41.8k | 5 | keep on |
+| Breakout min TP 0 or 1R / 2R | +396.2k / +382.6k | 39.3k / 40.5k | 5 | keep 1.5R |
+| Breakouts off / reversals off | +274.6k / +368.0k | 35.9k / 34.8k | 4 / 7 | keep both |
+| DZ filter off | +341.3k | 43.0k (38.6 %) | 6 | keep on |
+| DZ SL cap 50 / 100 | +362.5k / +348.5k | 36.4k / 41.7k | 5 | keep 75 |
+| DZ TP 1:1 / 1:1.5 / 1:2 / level-or-1R | +349k / +358k / +355k / +394k | 47-71k | 6-9 | keep nearest level |
+| DZ CISD: LuxAlgo entry + AlgoAlpha exit (v2.16) vs AlgoAlpha | +388.2k vs +293.3k | 36.7k vs 27.1k | 5 vs 7 | **adopted** |
+
+## 5. Every decision and the test behind it — ORIGINAL table (inflated data, history only)
 
 | Topic | Chosen | Alternatives tested (2-year net) |
 |---|---|---|
@@ -154,7 +187,7 @@ $2,900). Recommended 0.05–0.06 lot for $5k.
 | Liquidity sweeps (aligning / single-TF Major / HTF candle, M1–M5 CISD / green candle) | rejected | 300+ combos, none profitable (best H4 M5 1:3 +895) |
 | Cap vs skip, 20-pt cap (aligning) | cap 20 | skip worse (v2.02 era) |
 
-## 6. Other instruments (sim only, nothing built)
+## 6. Other instruments (sim only, nothing built) — ⚠ built with the same flawed `.hcc` parser, re-do before relying on them
 
 - **BTCUSD** (Exness data Oct 2024–Sep 2026, 2.00 BTCUSDc lots, settings ×35–×50): only **DZ-only on M30** works.
   Best: DZ only, M30, ×35 (SL buffer 140, cap 2,625, TP buffer 35), **fixed 1:1**, **London entries off**:
@@ -193,7 +226,11 @@ can fill SL/TP far away.
 
 ## 9. Open items / ideas not done
 
-- Confirm v2.15 in the MT5 Strategy Tester (visual) before scaling lots.
+- **User to swap the live chart to `V6S_ICT_EA_cent_1lot_v2.17`**; then delete v2.15 (+ tester v2.16) from both terminals.
+- **Volatility fix (main weakness):** scale stops/buffers/caps to ATR, or cut lots when the daily range is small.
+- **Breakout auto square-off:** −$11.4k in the tester — test removing it for breakouts.
+- Time filter 15:00-17:00 IST for breakouts/DZ; trend filter for counter-trend sells.
+- Consider a smaller live lot (e.g. 0.60 cent) until the volatility fix exists (a 2024-like market could cost ~60 %).
+- Redo BTC/ETH/USOIL data with the fixed parser if those come back.
 - Replay back-fill fix "A" (restart can create touches before a level existed) — parked by the user.
-- BTC DZ-only EA (see §6) — parked by the user.
 - Possible test: auto square-off also on an opposite CISD closing back into the DZ zone (from the 29 Sep trade).

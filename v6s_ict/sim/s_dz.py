@@ -6,7 +6,7 @@ from v6sim import agg, MajorMinor, TFS
 from ohlc import synth_ticks
 
 P = dict(TF=300, SLBuf=2.0, Lot=0.10, Tol=0.7, Contract=100.0, Comm=3.5, MinSpread=0.20, SwapLongPerLot=-55.04,
-         TickSrc='real', SQ=0, ONE=0, NOCISD=0, TrOut='', CapMinTPR=0.0, MinTPPts=0.0, Data='m1_2y.npy', NoLondon=0, DZLeg=0, DZLegTP=2.0, BE=0.5, TPBuf=1.0, Warm=3000, MinTF=3, MinMajor=2, MaxSL=0.0, MaxRisk=0.0, BOSL='swing', RR='2,3,4', Modes='REV,BO,BOTH', Start='2026-04-01', End='2026-09-25', Tag='')
+         TickSrc='real', SQ=0, ONE=0, NOCISD=0, TrOut='', CapMinTPR=0.0, MinTPPts=0.0, Data='m1_2y.npy', NoLondon=0, DZLeg=0, DZLegTP=2.0, BE=0.5, TPBuf=1.0, Warm=3000, MinTF=3, MinMajor=2, MaxSL=0.0, MaxRisk=0.0, BOSL='swing', RR='2,3,4', Modes='REV,BO,BOTH', Start='2026-04-01', End='2026-09-25', Tag='', Ticks='ticks.npy', CISD='algo', LuxMax=100, ExitAlgo=0)
 for a in sys.argv[1:]:
     k, v = a.split('='); P[k] = type(P[k])(v) if not isinstance(P[k], str) else v
 RRS = tuple(float(x) for x in P['RR'].split(','))
@@ -17,7 +17,7 @@ def ists(t): return (dt.datetime.fromtimestamp(int(t), dt.timezone.utc) + IST).s
 m1 = np.load(P['Data'])
 start = int(np.datetime64(P['Start']).astype('datetime64[s]').astype(np.int64))
 end = int(np.datetime64(P['End']).astype('datetime64[s]').astype(np.int64))
-ticks = np.load('ticks.npy') if P['TickSrc'] == 'real' else synth_ticks(m1[(m1['time'] >= start - 86400) & (m1['time'] < end + 86400 * 30)])
+ticks = np.load(P['Ticks']) if P['TickSrc'] == 'real' else synth_ticks(m1[(m1['time'] >= start - 86400) & (m1['time'] < end + 86400 * 30)])
 tk = ticks[(ticks[:, 0] >= start * 1000)]
 TT = tk[:, 0] / 1000.0; BID = tk[:, 1].copy(); ASK = np.maximum(tk[:, 2], BID + P['MinSpread'])
 
@@ -29,7 +29,25 @@ B = agg(m1, P['TF']); sec = P['TF']
 O, H, L, C = B['open'], B['high'], B['low'], B['close']
 # ---- CISD (AlgoAlpha, same as v6run)
 bear, bull = [], []
+class Lux:      # LuxAlgo CISD, Classic method (same as EA tester v2.16)
+    def __init__(s): s.bl = None; s.br = None
+    def step(s, O, C, i):
+        if i >= 1:
+            if C[i] > O[i] and C[i-1] < O[i-1]: s.bl = [O[i], i]
+            if C[i] < O[i] and C[i-1] > O[i-1]: s.br = [O[i], i]
+        r = 0
+        if s.bl is not None:
+            if i - s.bl[1] > P['LuxMax']: s.bl = None
+            elif C[i] < s.bl[0]: r = -1; s.bl = None
+        if s.br is not None:
+            if i - s.br[1] > P['LuxMax']: s.br = None
+            elif C[i] > s.br[0]: r = 1; s.br = None
+        return r
+luxz = Lux()
 def cisd(i):
+    if P['CISD'] == 'lux': return luxz.step(O, C, i)
+    return cisd_algo(i)
+def cisd_algo(i):
     o, c = O[i], C[i]
     if i >= 1:
         if C[i-1] < O[i-1] and c > o: bear.insert(0, (o, i))
@@ -122,31 +140,44 @@ signals = {'REV': 0, 'BO': 0}
 # setup state (reset each new D1 session)
 dk_cur = -1
 rs = dict(tS=-1, tR=-1)     # reversal: first touch bar of the current touch run (support / resistance)
-bo = dict(up=-1, dn=-1, usedU=False, usedD=False)     # breakout: bar of the close through the zone
+bo = dict(up=-1, dn=-1, usedU=False, usedD=False)
+boA = dict(up=-1, dn=-1, usedU=False, usedD=False)     # breakout: bar of the close through the zone
 last_below = -1; last_above = -1   # last bar that traded below the resistance zone / above the support zone
 
 i0 = int(np.searchsorted(B['time'], start - 20 * 86400))
+def do_sq(d, j0):
+    for bk in books.values():
+        lt_ = bk['trades'][-1] if bk['trades'] else None
+        if lt_ is not None and TT[j0] < bk['busy'] and lt_['d'] == -d:
+            px = BID[j0] if lt_['d'] > 0 else ASK[j0]
+            pl = (px - lt_['entry']) * lt_['d'] * P['Lot'] * P['Contract'] - P['Comm'] * P['Lot'] * 2
+            if lt_['d'] > 0: pl += swap_cost(lt_['t'], TT[j0])
+            lt_.update(te=TT[j0], pl=pl, R=(px - lt_['entry']) * lt_['d'] / lt_['risk'], why='SQUARE-OFF')
+            bk['busy'] = TT[j0]
 for i in range(i0, len(B)):
     bt = B['time'][i]; T = bt + sec
     if T >= end: break
     r = cisd(i)
+    rA = cisd_algo(i) if (P['ExitAlgo'] and P['CISD'] == 'lux') else r
     advance_levels(T)
     dk = int(np.searchsorted(d1t, bt, side='right') - 1)
     if dk < 0 or np.isnan(Z[dk, 0]): continue
     z1, z2, z3, z4 = Z[dk]; rLo, rHi = min(z1, z2), max(z1, z2); sLo, sHi = min(z3, z4), max(z3, z4)
     if dk != dk_cur:
-        dk_cur = dk; rs['tS'] = rs['tR'] = -1; bo['up'] = bo['dn'] = -1; bo['usedU'] = bo['usedD'] = False
+        dk_cur = dk; rs['tS'] = rs['tR'] = -1
+        for b__ in (bo, boA): b__['up'] = b__['dn'] = -1; b__['usedU'] = b__['usedD'] = False
     # --- update touches / breaks on this closed candle
     if H[i] >= rLo and rs['tR'] < 0: rs['tR'] = i
     if L[i] <= sHi and rs['tS'] < 0: rs['tS'] = i
     if C[i] > rHi: rs['tR'] = -1                      # closed above the resistance zone: no longer a reversal setup
     if C[i] < sLo: rs['tS'] = -1
-    if C[i] <= rHi: bo['usedU'] = False               # back inside/below the zone: a new break can trade again
-    if C[i] >= sLo: bo['usedD'] = False
-    if C[i] > rHi and bo['up'] < 0 and not (P['ONE'] and bo['usedU']): bo['up'] = i
-    if C[i] < sLo and bo['dn'] < 0 and not (P['ONE'] and bo['usedD']): bo['dn'] = i
-    if bo['up'] >= 0 and C[i] < rHi: bo['up'] = -1     # closed back into / below the zone: break cancelled
-    if bo['dn'] >= 0 and C[i] > sLo: bo['dn'] = -1
+    for b__ in (bo, boA):
+        if C[i] <= rHi: b__['usedU'] = False
+        if C[i] >= sLo: b__['usedD'] = False
+        if C[i] > rHi and b__['up'] < 0 and not (P['ONE'] and b__['usedU']): b__['up'] = i
+        if C[i] < sLo and b__['dn'] < 0 and not (P['ONE'] and b__['usedD']): b__['dn'] = i
+        if b__['up'] >= 0 and C[i] < rHi: b__['up'] = -1
+        if b__['dn'] >= 0 and C[i] > sLo: b__['dn'] = -1
     if L[i] < rLo: last_below = i
     if H[i] > sHi: last_above = i
     if T < start: continue
@@ -163,13 +194,20 @@ for i in range(i0, len(B)):
     if (C[i] < sLo and C[i-1] >= sLo) if P['NOCISD'] else (r < 0 and bo['dn'] >= 0 and C[i] < sLo):
         s0 = last_above if 0 <= last_above <= bo['dn'] else bo['dn']
         sig.append(('BO', -1, (sHi if P['BOSL'] == 'zone' else H[s0:i+1].max()) + P['SLBuf'], f"BREAKDOWN of S zone {sLo:.2f}-{sHi:.2f}")); bo['dn'] = -1; bo['usedD'] = True
+    if P['ExitAlgo'] and P['SQ']:
+        sqd = []
+        if rA > 0 and boA['up'] >= 0 and C[i] > rHi: sqd.append(1); boA['up'] = -1; boA['usedU'] = True
+        if rA < 0 and boA['dn'] >= 0 and C[i] < sLo: sqd.append(-1); boA['dn'] = -1; boA['usedD'] = True
+        jq = int(np.searchsorted(TT, T))
+        if jq < len(TT):
+            for dq in sqd: do_sq(dq, jq)
     if not sig: continue
     j0 = int(np.searchsorted(TT, T))
     if j0 >= len(TT): break
     for typ, d, sl, desc in sig:
         signals[typ] += 1
         entry = ASK[j0] if d > 0 else BID[j0]
-        if P['SQ']:
+        if P['SQ'] and not P['ExitAlgo']:
             for bk in books.values():
                 lt_ = bk['trades'][-1] if bk['trades'] else None
                 if lt_ is not None and TT[j0] < bk['busy'] and lt_['d'] == -d:

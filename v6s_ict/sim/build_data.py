@@ -42,10 +42,20 @@ def parse(base, years, lo_px, hi_px):
             cat = np.concatenate(got); _, idx = np.unique(cat['time'], return_index=True); parts.append(cat[idx])
     m = np.concatenate(parts); _, idx = np.unique(m['time'], return_index=True); return m[idx]
 
+def drop_bad_midnight(m, S=1.0):
+    """Remove 00:00 UTC records that don't fit their neighbours. parse() tries every byte offset and keeps the FIRST
+    valid-looking row per time; at the day boundary that is usually a wrong record (a whole-day candle) -- found
+    2026-09-30 on ~85% of days in both the Real7 and Trial12 gold files. Those fake bars became fake fills in the sims."""
+    o, hi, lo, cl, t = m['open'], m['high'], m['low'], m['close'], m['time']
+    pc = np.concatenate([[cl[0]], cl[:-1]]); no = np.concatenate([o[1:], [o[-1]]])
+    bad = (t % 86400 == 0) & ((np.abs(o - pc) > 3 * S) | (np.abs(cl - no) > 3 * S) | ((hi - lo) > 25 * S))
+    return m[~bad], int(bad.sum())
+
 def build(name):
     c = CFG[name]
     a = parse(*c['srcs'][0], c['lo'], c['hi']); b = parse(*c['srcs'][1], c['lo'], c['hi']); cut = a['time'][-1]
     m1 = np.concatenate([a, b[b['time'] > cut]])
+    m1, nbad = drop_bad_midnight(m1, c['S'])
     o, h, l, cl = m1['open'], m1['high'], m1['low'], m1['close']
     pc = np.concatenate([[cl[0]], cl[:-1]]); no = np.concatenate([o[1:], [o[-1]]]); S = c['S']
     spike = (np.abs((o + cl) / 2 - (pc + no) / 2) > 30 * S) & (np.abs(pc - no) < 15 * S)
@@ -56,7 +66,7 @@ def build(name):
     for f in d.names: out[f] = m1[f]
     np.save(c['out'], out)
     f = lambda t: dt.datetime.fromtimestamp(int(t), dt.timezone.utc).strftime('%Y-%m-%d')
-    print(name, 'M1 bars', len(out), f(out['time'][0]), '->', f(out['time'][-1]), '| first source until', f(cut), '| spikes removed', int(spike.sum()))
+    print(name, 'M1 bars', len(out), f(out['time'][0]), '->', f(out['time'][-1]), '| first source until', f(cut), '| spikes removed', int(spike.sum()), '| bad 00:00 bars removed', nbad)
 
 if __name__ == '__main__':
     build(sys.argv[1].upper())

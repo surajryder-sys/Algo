@@ -1,7 +1,7 @@
 import sys, numpy as np, datetime as dt
 from v6sim import MajorMinor, agg, TFS
 
-P = dict(Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0, Trap=0, TrapBuf=4.0, TrapWin=0, TrapTP=2.0,
+P = dict(Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0, Ticks='ticks.npy', Trap=0, TrapBuf=4.0, TrapWin=0, TrapTP=2.0,
          SwapLongPerLot=-55.04, Start='2026-08-24', End='2026-09-25')
 for a in sys.argv[1:]:
     k, v = a.split('='); P[k] = type(P[k])(v) if not isinstance(P[k], str) else v
@@ -13,11 +13,11 @@ m1 = np.load(P['Data'])
 from ohlc import synth_ticks
 REAL_FROM = int(np.datetime64('2026-04-01').astype('datetime64[s]').astype(np.int64))
 if P['TickSrc'] == 'real':
-    ticks = np.load('ticks.npy')
+    ticks = np.load(P['Ticks'])
 elif P['TickSrc'] == 'ohlc':
     ticks = synth_ticks(m1)
 else:   # mixed: 1-minute-bar ticks before April 2026, real ticks after
-    syn = synth_ticks(m1[m1['time'] < REAL_FROM]); real = np.load('ticks.npy')
+    syn = synth_ticks(m1[m1['time'] < REAL_FROM]); real = np.load(P['Ticks'])
     ticks = np.concatenate([syn, real[real[:, 0] >= REAL_FROM * 1000]])
 start = int(np.datetime64(P['Start']).astype('datetime64[s]').astype(np.int64))
 end = int(np.datetime64(P['End']).astype('datetime64[s]').astype(np.int64))
@@ -493,4 +493,4 @@ for k in sorted(mm):
 
 import json as _j
 if P['TrOut']:
-    _j.dump([dict(t=float(x['t']), te=float(x['te']), pl=float(x['booked']), typ={1: 'BO', 2: 'LEG', 3: 'TRAP'}.get(x.get('type', 0), 'REV'), risk=float(x['risk']), pts=float(x['booked']) / ((P['BOLots'] if x.get('type', 0) == 1 else P['Lot']) * P['Contract'])) for x in trades], open(P['TrOut'], 'w'))
+    _j.dump([dict(t=float(x['t']), te=float(x['te']), dir=int(x['dir']), pl=float(x['booked']), typ={1: 'BO', 2: 'LEG', 3: 'TRAP'}.get(x.get('type', 0), 'REV'), risk=float(x['risk']), pts=float(x['booked']) / ((P['BOLots'] if x.get('type', 0) == 1 else P['Lot']) * P['Contract'])) for x in trades], open(P['TrOut'], 'w'))
