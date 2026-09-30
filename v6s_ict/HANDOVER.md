@@ -148,6 +148,7 @@ $2,900). Recommended 0.05–0.06 lot for $5k.
 | Touch expiry | none | 6/12/24/48 candles all worse |
 | Loss cutting (2026-09-30, v2.14) | none | BO BE at 1R +641.5k; DZ BE at 1R +658.3k (Mar-26 losing); DZ BE at +20 pts +626.8k (Mar-26 −17k); BO close on any opposite M5 CISD +527.8k; half off at 1R: aligning +602.2k, DZ +653.9k, both +588.5k |
 | Trap trade (v2.15) | T6: square-off → opposite entry, SL level ± 4, TP 1:2, only while the trade is open | 42 traps / 2y, 43 % win, +15,000; buffer 0.5 +671.1k, 2 +673.5k, TP at level +681.5k, +1h after SL/BE +683.5k (adds Mar-25 losing month on $5k), DZ traps −7k (+660.8k), traps from 2-TF levels +689.2k but drop 7.2 % and recent period −456; $5k USD 0.06: +40,223 → +41,169 |
+| Extra traps from higher-TF levels (watch-only reversal + breakout setups, M5 CISD, T6 SL/TP, on top of v2.15) | off | M15–H4 2+ TFs +678.4k (drop 7.4 %, Mar-25 −697); M15–H4 3+ TFs +681.7k; M30–H4 2+ TFs +682.4k; M30–H4 3+ TFs +685.1k (drop 7.2 %); failed-breakout traps lose in every set (14–22 % win) |
 | Close on aligning level break against the trade (M5 close, any Minor/Major level) | off | any level: aligning +662.5k, DZ +633.1k (drop 10.2 %), both +628.0k; in-profit levels only: aligning +654.7k, DZ +662.2k, both +649.3k |
 | Replay back-fill fix ("A") | not done (user: ignore for now) | — |
 | Liquidity sweeps (aligning / single-TF Major / HTF candle, M1–M5 CISD / green candle) | rejected | 300+ combos, none profitable (best H4 M5 1:3 +895) |
