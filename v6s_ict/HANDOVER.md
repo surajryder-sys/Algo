@@ -135,7 +135,7 @@ $2,900). Recommended 0.05–0.06 lot for $5k.
 | DZ TP for reversals (Z1/Z3) | off | +636k |
 | Extra leg (aligning) | in profit + 1st to BE | any-time +656k (drop 14 %), cover-at-BE worse, basket close worse, half-size worse (old zones) |
 | Extra leg on DZ slot | off | +661k but drop 15 % / 27 % |
-| Session TP | reversals, nearest (S2) | S1 prev-session only +666.5k; on breakouts too +531k |
+| Session TP | reversals, nearest (S2): +667.6k, drop 7.0 %, 0 losing months — chosen for consistency + lowest drop, not just net | S1 prev-session only +666.5k (drop 9.7 %); on breakouts too +531k (2 losing months) |
 | Aligning TFs | include M3 | v2.10-era on old zones: with M3 +581.7k (drop 13.4 %), without M3 +552.9k (drop 20 %) |
 | Confirmation (aligning slot alone, 0.08/0.10 lot, old zones) | M5 CISD +26.2k | M5 candle close +20.6k, M15 CISD +14.2k, M15 close +27.2k (2× the drawdown) |
 | M3 fallback when M5 CISD closes on wrong side | no | only 8–20 trades, slightly worse |
