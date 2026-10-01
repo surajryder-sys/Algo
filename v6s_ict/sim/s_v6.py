@@ -1,7 +1,7 @@
 import sys, numpy as np, datetime as dt
 from v6sim import MajorMinor, agg, TFS
 
-P = dict(Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0, LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', Trap=0, CISD='algo', LuxMax=100, BOBuf=1.0, TrapBuf=4.0, TrapWin=0, TrapTP=2.0,
+P = dict(Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0, LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', Trap=0, CISD='algo', LuxMax=100, PivLvl=0, PivConf=0.0, PivTP=0, PivScope='all', BOBuf=1.0, TrapBuf=4.0, TrapWin=0, TrapTP=2.0,
          SwapLongPerLot=-55.04, Start='2026-08-24', End='2026-09-25')
 for a in sys.argv[1:]:
     k, v = a.split('='); P[k] = type(P[k])(v) if not isinstance(P[k], str) else v
@@ -131,6 +131,14 @@ for k in range(max(0, m5closed[-1] - P['Warm'] + 1), m5closed[-1] + 1):
     cisd_step(M5['open'][k], M5['high'][k], M5['low'][k], M5['close'][k])
 m5ptr = m5closed[-1] + 1
 
+# classic daily pivots from the PREVIOUS gap-session's high / low / close (PP, R1-R3, S1-S3)
+_h = agg(m1, 3600); _st = np.concatenate([[0], np.flatnonzero(np.diff(_h['time']) > 3600) + 1]); _en = np.concatenate([_st[1:] - 1, [len(_h) - 1]])
+PST = _h['time'][_st]; PH = np.maximum.reduceat(_h['high'], _st); PLo = np.minimum.reduceat(_h['low'], _st); PC = _h['close'][_en]
+def pivots_at(t):
+    k = int(np.searchsorted(PST, t, side='right') - 1)
+    if k < 1: return []
+    H_, L_, C_ = PH[k-1], PLo[k-1], PC[k-1]; pp = (H_ + L_ + C_) / 3
+    return [pp, 2*pp - L_, 2*pp - H_, pp + (H_ - L_), pp - (H_ - L_), H_ + 2*(pp - L_), L_ - 2*(H_ - pp)]
 sup = {}; res = {}   # value -> dict(touch=int, desc=str)
 def rebuild():
     global sup, res
@@ -147,6 +155,16 @@ def rebuild():
     for v, mem in r.items():
         if len({m[0] for m in mem}) >= P['MinTF'] and len({m[0] for m in mem if m[1] == 'Maj'}) >= P['MinMajor']:
             nr[v] = dict(touch=res.get(v, {}).get('touch', -1), est=res.get(v, {}).get('est', -1), desc=', '.join(sorted(f"{a} {b}" for a, b in mem)))
+    tnow = globals().get('T', start)
+    if P['PivConf'] > 0:
+        pv = pivots_at(tnow)
+        ns = {v: d for v, d in ns.items() if any(abs(v - p) <= P['PivConf'] for p in pv)}
+        nr = {v: d for v, d in nr.items() if any(abs(v - p) <= P['PivConf'] for p in pv)}
+    if P['PivLvl']:
+        for p in pivots_at(tnow):
+            p = round(p, 3)
+            ns.setdefault(p, dict(touch=sup.get(p, {}).get('touch', -1), est=sup.get(p, {}).get('est', -1), desc='PIVOT'))
+            nr.setdefault(p, dict(touch=res.get(p, {}).get('touch', -1), est=res.get(p, {}).get('est', -1), desc='PIVOT'))
     sup, res = ns, nr
 rebuild()
 
@@ -173,6 +191,10 @@ def opp_tp(d, bid, ask, entry=None, risk=None, typ=0):
             if (z - (bid if d > 0 else ask)) * d > 0:
                 if P['DZTP'] == 1: t = z                                   # always aim at the zone line
                 elif t is not None and (t - z) * d > 0: t = z              # 2: only pull a farther level in to it
+    if P['PivTP'] and (P['PivScope'] == 'all' or typ == 0):
+        pv = [p - d * P['TPBuf'] for p in pivots_at(now)]
+        pv = [p for p in pv if (p - (bid if d > 0 else ask)) * d > 0]
+        if pv: t = min(pv) if d > 0 else max(pv)
     if t is None: return None
     if P['MinTPR'] > 0 and entry is not None and (t - entry) * d < P['MinTPR'] * risk: return entry + d * risk
     return t
@@ -427,6 +449,9 @@ for j in range(len(tk)):
         if last and P['OppTP'] and pos is not None and not pos.get('fixtp') and (P['TPScope'] == 0 or pos.get('type', 0) == 1):
             pos['tp'] = opp_tp(pos['dir'], bid, ask, pos['entry'], pos['risk'], pos.get('type', 0))
             if leg is not None and P['LegTPMode'] == 'main' and pos['tp']: leg['tp'] = pos['tp']
+            if leg is not None and P['LegTPMode'] == 'level':          # leg aims at the next aligning level (breakout-style TP)
+                t_ = opp_tp(leg['dir'], bid, ask, leg['entry'], leg['risk'], 1)
+                if t_: leg['tp'] = t_
         for v, d in sup.items():
             if L[i] <= v + P['TouchBuf']:
                 if d['touch'] != i - 1: d['est'] = i      # a new run of touching candles starts here
