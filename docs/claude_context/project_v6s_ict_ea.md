@@ -94,3 +94,4 @@ UPDATE 2026-10-01 (evening): v2.19 built (3 copies) = v2.18 + reversal TP at the
 UPDATE 2026-10-01 (night): v2.20 built (3 copies) = v2.19 + DZTPBuffer 2.0. Tester: +$43,791, PF 1.41, 10/33 losing months, low $2,586. User to swap the live chart to cent_1lot_v2.20.
 v2.20 attached live on cent 1 Oct 19:34 IST; all older versions deleted from both terminals; demo terminal (MT5-5) had no EA attached after the power cut as of 19:35.
 UPDATE 2026-10-01 (late): v2.21 built (3 copies) = v2.20 + DZSLBuffer 6 + Monday reversal block + London aligning block (12:30-18:30 IST). Tester: +$48,325, PF 1.54, deepest drop 35.4% (was 52.7%), low $3,344, 8/33 losing months, 2024 +$3,523. Live still cent_1lot_v2.20 (demo v2.20) until the user swaps; all other old files deleted from both terminals.
+v2.21 attached live 1 Oct 22:53 IST (cent) / 22:54 (demo); only v2.21 files left in both terminals. Opposite-direction holds across slots: 130 in tester, profitable -> no block rule (user).

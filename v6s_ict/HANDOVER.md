@@ -30,7 +30,7 @@ about the whole repo and the user's working preferences).
 
 | Terminal | Path / data folder | Account | Use |
 |---|---|---|---|
-| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.20` on **XAUUSDc M5** (attached 1 Oct 19:34 IST); **v2.21 built 1 Oct, to be swapped in**. A power cut ~15:10 IST 1 Oct dropped the EA from both charts — **after any restart check the EA reloaded**. |
+| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.21` on **XAUUSDc M5** (attached 1 Oct 22:53 IST; demo MT5-5 runs `V6S_ICT_EA_v2.21` since 22:54). A power cut ~15:10 IST 1 Oct dropped the EA from both charts — **after any restart check the EA reloaded**. |
 | **MetaTrader5-5** | `C:\Program Files\MetaTrader5-5` · data `...\Terminal\4DB333B24A74B726D7AA441A9D0137DC` | **Exness Trial12 demo 83125455** (Exness-MT5Trial12, XAUUSD) | **Strategy Tester** (the user runs it; real ticks from 2026-01-01, generated before) + compile target; the sim data `m1_t12.npy`/`ticks_t12.npy` come from here |
 
 EA folder in both: `MQL5\Experts\V6S_ICT\`. Compile from the command line:
@@ -40,7 +40,7 @@ Contract specs (cent account): **XAUUSDc 1.00 lot = 100 USC per $1**, spread ≈
 ≈ −56 USC/lot/night. BTCUSDc 1.00 lot = 1 USC per $1 (spread $10). ETHUSDc 1.00 lot = 1 USC per $1 (spread $1).
 USOILc 1.00 lot = 1,000 USC per $1 (spread 0.02, short swap −186 USC/lot/night).
 
-## 2. What the EA does — v2.21 (current build, 1 Oct 2026)
+## 2. What the EA does — v2.21 (current, live since 1 Oct 22:53 IST)
 
 File: `v6s_ict/V6S_ICT_EA_cent_1lot_v2.21.mq5` (identical logic in the other two copies). Chart: XAUUSDc, any TF
 (M5 recommended). All inputs at their defaults are the tested/agreed settings.
@@ -169,6 +169,8 @@ aligning TP buffer 1.0 (0.5 +469.5k, 2.0 +447.2k), CISD tolerance 0.7 (0.5 +470.
 +478.6k ≈, 5R +456.0k), breakout auto square-off on (off +470.4k), touch buffer 0 (1.0 +446.5k, drop 41.7k), breakout
 validity 48 (24 +439.6k, 96 +484.3k but drop 37.1k), DZ London block (+438.6k, drop 27.8k). Not re-tested: touch expiry,
 M3 fallback, loss-cutting variants (all clearly worse on the old data). Volatility fix: parked by the user.
+Buy + sell open together (aligning vs DZ slot): 130 times in the v2.21 tester run, those trades net +$5,677;
+blocking opposite entries across slots estimated −$881 with the same max drop → not adopted (user: "let it be").
 
 ## 5a. Decisions re-checked on CLEAN data (1 Oct 2026, cent 1 lot, Oct 2024 – Sep 2026, base = v2.16 +388,152, drop 36,676, 5 losing months)
 
