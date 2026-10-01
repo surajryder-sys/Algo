@@ -92,3 +92,4 @@ UPDATE 2026-10-01 (later): v2.18 built = v2.17 + breakout SL at the broken level
 
 UPDATE 2026-10-01 (evening): v2.19 built (3 copies) = v2.18 + reversal TP at the next classic daily pivot (UsePivotTPRev) + extra-leg TP 1:3. Tester Jan 2024-Sep 2026 $5k: +$42,376 (v2.18 +$39,050), PF 1.40, 11/33 losing months. tester v2.20 = v2.19 + DZTPBuffer 2.0 (user's pick; sim 3.0 slightly higher). A power cut ~15:10 IST 1 Oct dropped the EA from both charts (terminals restarted 17:16 without it) -- after any restart check the EA reloaded.
 UPDATE 2026-10-01 (night): v2.20 built (3 copies) = v2.19 + DZTPBuffer 2.0. Tester: +$43,791, PF 1.41, 10/33 losing months, low $2,586. User to swap the live chart to cent_1lot_v2.20.
+v2.20 attached live on cent 1 Oct 19:34 IST; all older versions deleted from both terminals; demo terminal (MT5-5) had no EA attached after the power cut as of 19:35.
