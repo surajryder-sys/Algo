@@ -1,7 +1,7 @@
 import sys, numpy as np, datetime as dt
 from v6sim import MajorMinor, agg, TFS
 
-P = dict(Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0, Ticks='ticks.npy', Trap=0, TrapBuf=4.0, TrapWin=0, TrapTP=2.0,
+P = dict(Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0, LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', Trap=0, CISD='algo', LuxMax=100, BOBuf=1.0, TrapBuf=4.0, TrapWin=0, TrapTP=2.0,
          SwapLongPerLot=-55.04, Start='2026-08-24', End='2026-09-25')
 for a in sys.argv[1:]:
     k, v = a.split('='); P[k] = type(P[k])(v) if not isinstance(P[k], str) else v
@@ -45,9 +45,25 @@ def swing_step(i):
         if all(L[k] > L[c] for k in range(c - sp, c + sp + 1) if k != c): sll.insert(0, (L[c], c))
     shl[:] = [(v, x) for v, x in shl if not (i - x >= P['SwExp'] or H[i] >= v)][:100]
     sll[:] = [(v, x) for v, x in sll if not (i - x >= P['SwExp'] or L[i] <= v)][:100]
+class Lux:      # LuxAlgo CISD, Classic method (same as the EA's DZ entry since v2.16)
+    def __init__(s): s.bl = None; s.br = None
+    def step(s, O, C, i):
+        if i >= 1:
+            if C[i] > O[i] and C[i-1] < O[i-1]: s.bl = [O[i], i]
+            if C[i] < O[i] and C[i-1] > O[i-1]: s.br = [O[i], i]
+        r = 0
+        if s.bl is not None:
+            if i - s.bl[1] > P['LuxMax']: s.bl = None
+            elif C[i] < s.bl[0]: r = -1; s.bl = None
+        if s.br is not None:
+            if i - s.br[1] > P['LuxMax']: s.br = None
+            elif C[i] > s.br[0]: r = 1; s.br = None
+        return r
+LUXR = [0]; lux5 = Lux()
 def cisd_step(o, h, l, c):
     i = len(C); O.append(o); H.append(h); L.append(l); C.append(c)
     swing_step(i)
+    LUXR[0] = lux5.step(O, C, i)
     if i >= 1:
         if C[i-1] < O[i-1] and c > o: bear.insert(0, (o, i))
         if C[i-1] > O[i-1] and c < o: bull.insert(0, (o, i))
@@ -120,6 +136,7 @@ def rebuild():
     global sup, res
     s, r = {}, {}
     for name, _ in TFS:
+        if name not in P['LevelTFs'].split(','): continue   # aligning levels only from these TFs
         for side, v, kind in mms[name].levels():
             d = s if side == 'S' else r
             d.setdefault(v, set()).add((name, kind))
@@ -310,6 +327,7 @@ for j in range(len(tk)):
                 close_pos('SQUARE-OFF', bid, ask, now); sq_count += 1
         # B. breakout candidates: expire / cancel on a close back through
         bo[:] = [b_ for b_ in bo if not (i - b_[2] > P['BOBars'] or (C[i] < b_[1] if b_[0] > 0 else C[i] > b_[1]))]
+        if P['CISD'] == 'lux': cs = LUXR[0]     # ENTRY confirmation only; the auto square-off above used AlgoAlpha
         sig = 0
         if last and (cs != 0 or cs10 != 0):
             def conf(side, v):
@@ -365,7 +383,9 @@ for j in range(len(tk)):
             cands = [b_ for b_ in bo if b_[0] == cs and b_[2] < i and (C[i] > b_[1] if cs > 0 else C[i] < b_[1])]
             if cands:
                 side, blv, bbar = max(cands, key=lambda x: x[2])
-                if cswing[0] is not None and P['BOSL'] == 'swing':
+                if P['BOSL'] == 'level':                    # SL just beyond the broken level
+                    bsl = blv - P['BOBuf'] if cs > 0 else blv + P['BOBuf']
+                elif cswing[0] is not None and P['BOSL'] == 'swing':
                     bsl = cswing[0] - P['SLBuf'] if cs > 0 else cswing[0] + P['SLBuf']
                 else:
                     bsl = (min(L[bbar:i+1]) - P['SLBuf']) if cs > 0 else (max(H[bbar:i+1]) + P['SLBuf'])

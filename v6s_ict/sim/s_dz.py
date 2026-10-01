@@ -6,7 +6,7 @@ from v6sim import agg, MajorMinor, TFS
 from ohlc import synth_ticks
 
 P = dict(TF=300, SLBuf=2.0, Lot=0.10, Tol=0.7, Contract=100.0, Comm=3.5, MinSpread=0.20, SwapLongPerLot=-55.04,
-         TickSrc='real', SQ=0, ONE=0, NOCISD=0, TrOut='', CapMinTPR=0.0, MinTPPts=0.0, Data='m1_2y.npy', NoLondon=0, DZLeg=0, DZLegTP=2.0, BE=0.5, TPBuf=1.0, Warm=3000, MinTF=3, MinMajor=2, MaxSL=0.0, MaxRisk=0.0, BOSL='swing', RR='2,3,4', Modes='REV,BO,BOTH', Start='2026-04-01', End='2026-09-25', Tag='', Ticks='ticks.npy', CISD='algo', LuxMax=100, ExitAlgo=0)
+         TickSrc='real', SQ=0, ONE=0, NOCISD=0, TrOut='', CapMinTPR=0.0, MinTPPts=0.0, Data='m1_2y.npy', NoLondon=0, DZLeg=0, DZLegTP=2.0, BE=0.5, TPBuf=1.0, Warm=3000, MinTF=3, MinMajor=2, MaxSL=0.0, MaxRisk=0.0, BOSL='swing', RR='2,3,4', Modes='REV,BO,BOTH', Start='2026-04-01', End='2026-09-25', Tag='', LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', CISD='algo', LuxMax=100, ExitAlgo=0)
 for a in sys.argv[1:]:
     k, v = a.split('='); P[k] = type(P[k])(v) if not isinstance(P[k], str) else v
 RRS = tuple(float(x) for x in P['RR'].split(','))
@@ -123,6 +123,7 @@ def advance_levels(T):
     if not ch: return
     sd, rd = {}, {}
     for name, _ in TFS:
+        if name not in P['LevelTFs'].split(','): continue   # aligning levels only from these TFs
         for side, v, kind in mms[name].levels():
             (sd if side == 'S' else rd).setdefault(v, set()).add((name, kind))
     ok = lambda mem: len({m[0] for m in mem}) >= P['MinTF'] and len({m[0] for m in mem if m[1] == 'Maj'}) >= P['MinMajor']
