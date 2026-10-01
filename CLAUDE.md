@@ -61,11 +61,13 @@ breakouts on M15 CISD (magic 26092721). Current version **v2.21** (v2.20 + DZ SL
 working conventions). Python backtest simulators + data: `v6s_ict/sim/` (see its README). The previous assistant's
 saved notes for this whole repo: `docs/claude_context/`.
 
-### ob_ea/ — basic order block + CISD EA (MQL5, tester only)
-Reads zones from `mql5/OB_Detector_v1.07.mq5` (volume-pivot OBs, live first-retest, 30 EA buffers) via iCustom.
-Current **v1.03**: most recent OB takes control (flip closes opposite trades), CISD in that direction (LuxAlgo
-Classic default, AlgoAlpha selectable) → entry, SL OB ± 0.5, TP 1:2, draws zones + CISDs. Magic 26100101. Execution
-checked in the MetaTrader5-5 tester; not run live. Sims (`v6s_ict/sim/s_ob.py`) found no month-on-month consistent edge.
+### v6s_ict_3/ — V6S_ICT_3.0, order block + CISD EA (MQL5, tester only)
+Separate EA from V6S-ICT v2.x (v2.21 live — never touched by this one). Reads zones from
+`mql5/OB_Detector_v1.07.mq5` (volume-pivot OBs, live first-retest, 30 EA buffers) via iCustom. Most recent OB takes
+control (flip closes opposite trades), CISD in that direction (LuxAlgo Classic default, AlgoAlpha selectable) →
+entry, SL OB ± 0.5, TP 1:2, draws zones + CISDs. Magic 26100101. MetaTrader5-5 `Experts\V6S_ICT_3\`; not run live.
+(Renamed 2026-10-02 from the earlier test EA; the old `V6S_ICT_EA_v3.00/3.01` hedge-basket files in `v6s_ict/` are
+unrelated.) Sims (`v6s_ict/sim/s_ob.py`) found no month-on-month consistent edge.
 
 ### v5s_ict/ — V5S-ICT grid EA (MQL5, superseded)
 M3/M5 dual-ATR + CISD hedged ladder grid EA; tested in simulation only, not run live.

@@ -1,40 +1,37 @@
 //+------------------------------------------------------------------+
-//| OB_EA_v1.03.mq5                                                  |
-//| Basic order block + CISD EA (chart timeframe, e.g. M3 or M5).    |
+//| V6S_ICT_3.0.mq5                                                  |
+//| Order block + CISD EA (chart timeframe, e.g. M3 or M5).          |
+//| Separate from V6S-ICT v2.x (v2.21 live) -- own magic number.     |
 //|                                                                  |
 //| Zones: mql5/OB_Detector_v1.07 (iCustom, same timeframe as the    |
 //| chart, drawing ON so the zones plot in the visual tester too).   |
 //|                                                                  |
-//| v1.01 -- the MOST RECENT OB TAKES CONTROL (sell mirrored):       |
-//|  1. whichever OB formed last (bullish or bearish, candle close)  |
-//|     is in control; when control flips, this EA's open trades on  |
-//|     the other side are closed at that candle close               |
+//| Rules (sell mirrored):                                           |
+//|  1. the MOST RECENT OB TAKES CONTROL: whichever OB formed last   |
+//|     (bullish or bearish, candle close); when control flips, this |
+//|     EA's open trades on the other side are closed at that close  |
 //|  2. a LATER closed candle is a CISD in the controlling OB's      |
-//|     direction (AlgoAlpha port, same as V6S-ICT, tolerance 0.7)   |
-//|     -> market entry, SL = OB bottom - SLBufferPrice (buy) /      |
-//|     OB top + SLBufferPrice (sell), TP = RiskReward x risk (1:2)  |
+//|     direction -> market entry, SL = OB bottom - SLBufferPrice    |
+//|     (buy) / OB top + SLBufferPrice (sell), TP = RiskReward x     |
+//|     risk (1:2)                                                   |
 //|  3. one trade per OB; the controlling OB mitigated -> no control |
 //|     (no entries) until the next OB forms                         |
 //|  OnePositionAtATime: no new entry while this EA has a position.  |
 //|  No retest of the zone is required.                              |
-//|  Every CISD is drawn on the chart (arrow + the level it broke),  |
-//|  also in the visual tester.                                      |
 //|                                                                  |
-//| v1.02 -- entries on the LuxAlgo "Change in State of Delivery"    |
-//| CISD, Classic mode (default; AlgoAlpha still selectable):        |
-//|  bull candle after a bear candle -> its open = level for a       |
-//|  bearish CISD; bear after bull -> level for a bullish CISD (only |
-//|  the latest level each way). A close beyond the level within     |
-//|  LuxMaxLen candles = CISD (if at least LuxMinLen candles after   |
-//|  the level, else the level is dropped); older levels expire.     |
-//|  No noise filter. Drawn arrows = the CISD type used for entries. |
-//|                                                                  |
-//| v1.03 -- loads OB_Detector_v1.07 (fixed object prefix: no stale  |
-//| zones left on the chart after a restart). Trading unchanged.     |
+//| CISD: LuxAlgo "Change in State of Delivery", Classic mode        |
+//| (default; AlgoAlpha, tolerance 0.7, selectable): bull candle     |
+//| after a bear candle -> its open = level for a bearish CISD; bear |
+//| after bull -> level for a bullish CISD (only the latest level    |
+//| each way). A close beyond the level within LuxMaxLen candles =   |
+//| CISD (if at least LuxMinLen candles after the level, else the    |
+//| level is dropped); older levels expire. No noise filter.         |
+//| Every CISD is drawn (arrow + the level it broke), also in the    |
+//| visual tester; drawn arrows = the CISD type used for entries.    |
 //|                                                                  |
 //| Decisions on closed candles only (first tick of a new candle).   |
 //+------------------------------------------------------------------+
-#property version   "1.03"
+#property version   "3.00"
 #property tester_indicator "OB_Detector_v1.07.ex5"
 #include <Trade/Trade.mqh>
 
@@ -222,7 +219,7 @@ int CisdStep(const datetime t, const double o, const double h, const double l, c
 void DrawCISD(const int dir, const int i, const double h, const double l)
   {
    color  cl = dir > 0 ? clrLime : clrOrangeRed;
-   string id = "OBEA_CISD_" + IntegerToString((long)g_t[i]);
+   string id = "V6S3_CISD_" + IntegerToString((long)g_t[i]);
    string nm = (CISDType == CISD_LUX ? "LuxAlgo " : "AlgoAlpha ");
    string ar = id + "_a", ln = id + "_l";
    ObjectCreate(0, ar, OBJ_ARROW, 0, g_t[i], dir > 0 ? l : h);
@@ -288,7 +285,7 @@ void CloseSide(const int dir, const string why)
       if((dir > 0 && pt == POSITION_TYPE_BUY) || (dir < 0 && pt == POSITION_TYPE_SELL))
         {
          bool ok = g_trade.PositionClose(t);
-         PrintFormat("OB_EA close %s #%I64u (%s) %s", dir > 0 ? "BUY" : "SELL", t, why, ok ? "done" : g_trade.ResultRetcodeDescription());
+         PrintFormat("V6S_ICT_3.0 close %s #%I64u (%s) %s", dir > 0 ? "BUY" : "SELL", t, why, ok ? "done" : g_trade.ResultRetcodeDescription());
         }
      }
   }
@@ -325,20 +322,20 @@ void Enter(const int dir, const datetime barTime)
    g_usedOB = a.obTime;
    if(risk <= 0)
      {
-      PrintFormat("OB_EA skip %s: price already beyond the SL (entry %.2f, SL %.2f)", dir > 0 ? "BUY" : "SELL", entry, sl);
+      PrintFormat("V6S_ICT_3.0 skip %s: price already beyond the SL (entry %.2f, SL %.2f)", dir > 0 ? "BUY" : "SELL", entry, sl);
       return;
      }
    double tp = entry + dir * RiskReward * risk;
    long   stopsLvl = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    if(risk < stopsLvl * _Point)
      {
-      PrintFormat("OB_EA skip: SL %.2f closer than the stops level", risk);
+      PrintFormat("V6S_ICT_3.0 skip: SL %.2f closer than the stops level", risk);
       return;
      }
    sl = NormalizeDouble(sl, _Digits); tp = NormalizeDouble(tp, _Digits);
-   string cm = StringFormat("OBEA %s %s", dir > 0 ? "B" : "S", StringSubstr(EnumToString((ENUM_TIMEFRAMES)_Period), 7));
+   string cm = StringFormat("V6S3 %s %s", dir > 0 ? "B" : "S", StringSubstr(EnumToString((ENUM_TIMEFRAMES)_Period), 7));
    bool ok = dir > 0 ? g_trade.Buy(Lots, _Symbol, 0.0, sl, tp, cm) : g_trade.Sell(Lots, _Symbol, 0.0, sl, tp, cm);
-   PrintFormat("OB_EA %s %s | OB %s zone %.2f-%.2f formed %s | CISD candle %s | entry %.2f SL %.2f TP %.2f (risk %.2f) | %s",
+   PrintFormat("V6S_ICT_3.0 %s %s | OB %s zone %.2f-%.2f formed %s | CISD candle %s | entry %.2f SL %.2f TP %.2f (risk %.2f) | %s",
                dir > 0 ? "BUY" : "SELL", ok ? "sent" : "FAILED", TimeToString(a.obTime), a.btm, a.top,
                TimeToString(a.formed), TimeToString(barTime), entry, sl, tp, risk,
                ok ? "" : g_trade.ResultRetcodeDescription());
@@ -351,7 +348,7 @@ int OnInit()
    g_ob = iCustom(_Symbol, PERIOD_CURRENT, "OB_Detector_v1.07", OBLength, OBVolume, OBMitigation, ShowZones);
    if(g_ob == INVALID_HANDLE)
      {
-      Print("OB_EA: cannot load indicator OB_Detector_v1.07 (must be in MQL5\\Indicators)");
+      Print("V6S_ICT_3.0: cannot load indicator OB_Detector_v1.07 (must be in MQL5\\Indicators)");
       return INIT_FAILED;
      }
    if(ShowZones && !MQLInfoInteger(MQL_TESTER))
@@ -365,14 +362,14 @@ int OnInit()
    g_ctl.on = false; g_ctl.obTime = 0; g_ctl.formed = 0; g_ctlDir = 0; g_usedOB = 0; g_seen[0] = 0; g_seen[1] = 0;
    ArrayResize(g_t, 0);
    g_luxOn[0] = false; g_luxOn[1] = false;
-   ObjectsDeleteAll(0, "OBEA_CISD_");
+   ObjectsDeleteAll(0, "V6S3_CISD_");
 
    // warm up the CISD state on closed candles (no trades)
    MqlRates r[];
    int got = CopyRates(_Symbol, PERIOD_CURRENT, 1, WarmupBars, r);   // oldest first
    for(int k = 0; k < got; k++) CisdStep(r[k].time, r[k].open, r[k].high, r[k].low, r[k].close);
    g_lastBar = iTime(_Symbol, PERIOD_CURRENT, 0);
-   PrintFormat("OB_EA v1.03 started on %s %s | CISD %s | warm-up %d candles | lots %.2f, SL buffer %.2f, 1:%.1f, magic %I64d",
+   PrintFormat("V6S_ICT_3.0 started on %s %s | CISD %s | warm-up %d candles | lots %.2f, SL buffer %.2f, 1:%.1f, magic %I64d",
                _Symbol, EnumToString((ENUM_TIMEFRAMES)_Period), CISDType == CISD_LUX ? "LuxAlgo" : "AlgoAlpha", got, Lots, SLBufferPrice, RiskReward, MagicNumber);
    return INIT_SUCCEEDED;
   }
@@ -380,7 +377,7 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    if(g_ob != INVALID_HANDLE) IndicatorRelease(g_ob);
-   if(!MQLInfoInteger(MQL_TESTER)) ObjectsDeleteAll(0, "OBEA_CISD_");
+   if(!MQLInfoInteger(MQL_TESTER)) ObjectsDeleteAll(0, "V6S3_CISD_");
   }
 
 void OnTick()
