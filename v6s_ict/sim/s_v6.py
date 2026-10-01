@@ -1,7 +1,7 @@
 import sys, numpy as np, datetime as dt
 from v6sim import MajorMinor, agg, TFS
 
-P = dict(Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0, LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', Trap=0, CISD='algo', LuxMax=100, PivLvl=0, PivConf=0.0, PivTP=0, PivScope='all', BOBuf=1.0, TrapBuf=4.0, TrapWin=0, TrapTP=2.0,
+P = dict(Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0, LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', Trap=0, CISD='algo', LuxMax=100, PivLvl=0, PivConf=0.0, PivTP=0, AutoSqBO=1, PivScope='all', BOBuf=1.0, TrapBuf=4.0, TrapWin=0, TrapTP=2.0,
          SwapLongPerLot=-55.04, Start='2026-08-24', End='2026-09-25')
 for a in sys.argv[1:]:
     k, v = a.split('='); P[k] = type(P[k])(v) if not isinstance(P[k], str) else v
@@ -344,7 +344,7 @@ for j in range(len(tk)):
                 if P['TrapTP'] > 0: pos['tp'] = e2 + d2 * P['TrapTP'] * pos['risk']; pos['fixtp'] = True
                 traps += 1
         # C. auto square-off: opposite CISD closing beyond the trade's level
-        if last and P['AutoSq'] and pos is not None and cs == -pos['dir']:
+        if last and P['AutoSq'] and pos is not None and cs == -pos['dir'] and not (P['AutoSqBO'] == 0 and pos.get('type', 0) == 1):
             if (pos['dir'] > 0 and C[i] < pos['lvl']) or (pos['dir'] < 0 and C[i] > pos['lvl']):
                 close_pos('SQUARE-OFF', bid, ask, now); sq_count += 1
         # B. breakout candidates: expire / cancel on a close back through
