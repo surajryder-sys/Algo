@@ -30,7 +30,7 @@ about the whole repo and the user's working preferences).
 
 | Terminal | Path / data folder | Account | Use |
 |---|---|---|---|
-| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.18` on **XAUUSDc M5** (attached 1 Oct 09:00 IST) |
+| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.18` on **XAUUSDc M5** (attached 1 Oct 09:00 IST; **a power cut ~15:10 IST 1 Oct dropped the EA from both charts — reattach after any restart**). v2.19 built 1 Oct, to be swapped in. |
 | **MetaTrader5-5** | `C:\Program Files\MetaTrader5-5` · data `...\Terminal\4DB333B24A74B726D7AA441A9D0137DC` | **Exness Trial12 demo 83125455** (Exness-MT5Trial12, XAUUSD) | **Strategy Tester** (the user runs it; real ticks from 2026-01-01, generated before) + compile target; the sim data `m1_t12.npy`/`ticks_t12.npy` come from here |
 
 EA folder in both: `MQL5\Experts\V6S_ICT\`. Compile from the command line:
@@ -40,9 +40,9 @@ Contract specs (cent account): **XAUUSDc 1.00 lot = 100 USC per $1**, spread ≈
 ≈ −56 USC/lot/night. BTCUSDc 1.00 lot = 1 USC per $1 (spread $10). ETHUSDc 1.00 lot = 1 USC per $1 (spread $1).
 USOILc 1.00 lot = 1,000 USC per $1 (spread 0.02, short swap −186 USC/lot/night).
 
-## 2. What the EA does — v2.18 (current, live since 1 Oct 09:00 IST)
+## 2. What the EA does — v2.19 (current build, 1 Oct 2026)
 
-File: `v6s_ict/V6S_ICT_EA_cent_1lot_v2.18.mq5` (identical logic in the other two copies). Chart: XAUUSDc, any TF
+File: `v6s_ict/V6S_ICT_EA_cent_1lot_v2.19.mq5` (identical logic in the other two copies). Chart: XAUUSDc, any TF
 (M5 recommended). All inputs at their defaults are the tested/agreed settings.
 
 **Levels.** Major/Minor support & resistance (ZigZag, pivot period 5, ported verbatim from the indicator's
@@ -56,7 +56,8 @@ with ≥2 of them Major.
 - *Breakout:* M5 close through a level (valid 48 candles, cancelled by a close back through), then a LATER M5 CISD
   beyond it → trade. **SL = the broken level ∓ 1.5 (`BreakoutSLAtLevel`, `BreakoutSLBuffer`, v2.18)** — was the CISD
   swing ± 0.5 — capped at 20. Only if the TP is ≥ 1.5R.
-- *TP:* **reversals → nearest session target (v2.14)**: nearest beyond price of the previous gap-session's high
+- *TP:* **reversals → next classic daily pivot (v2.19, `UsePivotTPRev`)**: PP/R1-R3/S1-S3 from the previous gap-session's
+  H/L/C, ∓1.0; if no pivot is ahead → the session target (v2.14): nearest beyond price of the previous gap-session's high
   (buy) / low (sell) and the current session's high/low so far (closed M5), ∓1.0; fallback = nearest aligning level
   ∓1.0. **Breakouts → nearest opposite aligning level ∓1.0.** Either way: if the target is < 1R from entry → 1:1
   (v2.06). Re-checked every M5 candle.
@@ -67,7 +68,7 @@ with ≥2 of them Major.
   LotSize, same magic. Only while the original trade is open (not after an SL/BE exit); a trap trade is never
   flipped again; not blocked by the DZ filter / night block. Comment `V6SICT TB|TS <level>`.
 - *Extra leg (v2.12, magic 26092731):* first trade **in profit** + new same-side setup → one extra leg (same lot,
-  setup SL capped 20, TP 1:2) and the first trade's SL → breakeven. Max one leg; it closes with the first trade on
+  setup SL capped 20, **TP 1:3 since v2.19** (`ExtraLegTPR`, was 1:2)) and the first trade's SL → breakeven. Max one leg; it closes with the first trade on
   an opposite setup / square-off.
 - *DZ filter:* an M5 close beyond the outer zone line blocks the opposite direction for the rest of the session.
 - Off by default: brake, M10-after-SL, news filter. Spread filter 0.50; no entries in the first 60 min of the week.
@@ -113,7 +114,10 @@ label limit.
 | tester v2.16 | `V6S_ICT_EA_tester_v2.16` (standard lots only): DZ entry on LuxAlgo CISD, exit AlgoAlpha |
 | v2.17 | = v2.16 DZ LuxAlgo entry + trap trade OFF by default (3 copies) |
 | tester v2.18 | breakout SL at the broken level ± buffer (input), standard lots |
-| **v2.18** | **= v2.17 + breakout SL at the broken level ∓ 1.5** (3 copies) |
+| v2.18 | = v2.17 + breakout SL at the broken level ∓ 1.5 (3 copies) |
+| tester v2.19 | reversal TP at the next daily pivot + extra-leg TP 1:3 (inputs) |
+| **v2.19** | **= v2.18 + reversal TP at the next daily pivot + extra-leg TP 1:3** (3 copies) |
+| tester v2.20 | v2.19 + separate `DZTPBuffer` = 2.0 for the DZ slot's TP (was the shared 1.0) |
 | v3.00/3.01 | hedge-basket experiments (not used) |
 
 ## 4. Headline results — CLEAN data (1 Oct 2026)
@@ -140,6 +144,11 @@ the balance fell 60-73 %. Best hours 18:00-23:00 IST (+$27k); worst 15:00-17:00 
 **Strategy Tester v2.18** (same setup, trap off, breakout SL level ± 1.5): **+$39,050, PF 1.37, low $2,676 (−51 %)**,
 2024 −509 / 2025 +14,023 / 2026 +25,531, 12 losing months totalling −$7,320 (v2.16: −$9,138); breakout square-offs
 144 (−$11.4k) → 37 (−$1.4k). Sim (cent 1 lot, Oct 2024 – Sep 2026): v2.18 +413,962, drop 34.9k, low 72.2k.
+
+**Strategy Tester v2.19** (same setup): **+$42,376, PF 1.40, max drop $3,383, 11 of 33 months losing (7 in 2024)**;
+reversals +$2,877 (v2.18 +$1,017), legs +$1,940 (+$650); low $2,480. Sim, v2.19 settings, DZ TP buffer: 1.0 +446,168 /
+**2.0 +471,828 (chosen, steadier)** / 3.0 +476,499 / 4.0 +459,712 / 5.0 +462,041. Reversal TP at the DZ line instead of
+the pivot: +444,448 (rejected).
 
 **Simulation on clean Trial12 data** (`sim/build_t12.py`; matches the tester: 96 % of entries, yearly P/L within a
 few hundred $): cent 1 lot, Oct 2024 – Sep 2026 — v2.15 +293,335 (drop 27.1k, 7 losing months) · v2.16 +388,152
