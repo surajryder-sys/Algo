@@ -56,8 +56,8 @@ no MT5 connection, runs independently of main.py).
 ### v6s_ict/ — V6S-ICT MQL5 EA (XAUUSD, LIVE on the Exness cent account)
 The actively developed bot as of 30 Sep 2026: an MT5 Expert Advisor (not Python). Two independent slots —
 aligning Major/Minor level reversals + breakouts on M5 CISD (magic 26092701, extra leg 26092731) and Dynamic Zones
-breakouts on M15 CISD (magic 26092721). Current version **v2.19** (v2.18 + reversal TP at the next daily pivot + extra-leg TP 1:3; built 1 Oct 2026, user to swap it in —
-`V6S_ICT_EA_cent_1lot_v2.18.mq5` was live on XAUUSDc M5; tester v2.20 = v2.19 + DZ TP buffer 2.0 awaiting a tester run). ⚠ All sim results before 30 Sep 2026 were inflated by bad data — see HANDOVER's top note. **Start with `v6s_ict/HANDOVER.md`** (rules, every version, every test result,
+breakouts on M15 CISD (magic 26092721). Current version **v2.20** (v2.18 + reversal TP at the next daily pivot + extra-leg TP 1:3 + DZ TP buffer 2.0; built 1 Oct 2026,
+user to swap it in on XAUUSDc M5 on the real cent account). ⚠ All sim results before 30 Sep 2026 were inflated by bad data — see HANDOVER's top note. **Start with `v6s_ict/HANDOVER.md`** (rules, every version, every test result,
 working conventions). Python backtest simulators + data: `v6s_ict/sim/` (see its README). The previous assistant's
 saved notes for this whole repo: `docs/claude_context/`.
 

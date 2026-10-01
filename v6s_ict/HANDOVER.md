@@ -30,7 +30,7 @@ about the whole repo and the user's working preferences).
 
 | Terminal | Path / data folder | Account | Use |
 |---|---|---|---|
-| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.18` on **XAUUSDc M5** (attached 1 Oct 09:00 IST; **a power cut ~15:10 IST 1 Oct dropped the EA from both charts — reattach after any restart**). v2.19 built 1 Oct, to be swapped in. |
+| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.18` on **XAUUSDc M5** (attached 1 Oct 09:00 IST; **a power cut ~15:10 IST 1 Oct dropped the EA from both charts — reattach after any restart**). v2.20 built 1 Oct, to be swapped in. |
 | **MetaTrader5-5** | `C:\Program Files\MetaTrader5-5` · data `...\Terminal\4DB333B24A74B726D7AA441A9D0137DC` | **Exness Trial12 demo 83125455** (Exness-MT5Trial12, XAUUSD) | **Strategy Tester** (the user runs it; real ticks from 2026-01-01, generated before) + compile target; the sim data `m1_t12.npy`/`ticks_t12.npy` come from here |
 
 EA folder in both: `MQL5\Experts\V6S_ICT\`. Compile from the command line:
@@ -40,9 +40,9 @@ Contract specs (cent account): **XAUUSDc 1.00 lot = 100 USC per $1**, spread ≈
 ≈ −56 USC/lot/night. BTCUSDc 1.00 lot = 1 USC per $1 (spread $10). ETHUSDc 1.00 lot = 1 USC per $1 (spread $1).
 USOILc 1.00 lot = 1,000 USC per $1 (spread 0.02, short swap −186 USC/lot/night).
 
-## 2. What the EA does — v2.19 (current build, 1 Oct 2026)
+## 2. What the EA does — v2.20 (current build, 1 Oct 2026)
 
-File: `v6s_ict/V6S_ICT_EA_cent_1lot_v2.19.mq5` (identical logic in the other two copies). Chart: XAUUSDc, any TF
+File: `v6s_ict/V6S_ICT_EA_cent_1lot_v2.20.mq5` (identical logic in the other two copies). Chart: XAUUSDc, any TF
 (M5 recommended). All inputs at their defaults are the tested/agreed settings.
 
 **Levels.** Major/Minor support & resistance (ZigZag, pivot period 5, ported verbatim from the indicator's
@@ -83,7 +83,7 @@ with ≥2 of them Major.
   AlgoAlpha**: only an AlgoAlpha opposite setup closes the DZ trade; a LuxAlgo opposite setup while a DZ trade is
   open is ignored.
 - SL = far zone line ± 4.0, **capped at 75**; a capped trade needs TP ≥ 1R (v2.10). TP = nearest aligning level
-  ∓1.0 fixed at entry (1:1 if none; skipped if < 1 pt away). An opposite DZ setup squares it off.
+  **∓2.0 (`DZTPBuffer`, v2.20; was 1.0)** fixed at entry (1:1 if none; skipped if < 1 pt away). An opposite DZ setup squares it off.
 
 **Safety (v2.07–v2.09):** per-trade data flushed to disk and rebuilt from comment/history after a crash; startup
 replays the current session's M5 candles with no orders; only a candle closed ≤ 120 s ago can trade; full state
@@ -118,6 +118,7 @@ label limit.
 | tester v2.19 | reversal TP at the next daily pivot + extra-leg TP 1:3 (inputs) |
 | **v2.19** | **= v2.18 + reversal TP at the next daily pivot + extra-leg TP 1:3** (3 copies) |
 | tester v2.20 | v2.19 + separate `DZTPBuffer` = 2.0 for the DZ slot's TP (was the shared 1.0) |
+| **v2.20** | **= v2.19 + DZ TP buffer 2.0** (3 copies). Tester: +$43,791, PF 1.41, 10 of 33 months losing, low $2,586 |
 | v3.00/3.01 | hedge-basket experiments (not used) |
 
 ## 4. Headline results — CLEAN data (1 Oct 2026)
