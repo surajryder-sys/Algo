@@ -30,7 +30,7 @@ about the whole repo and the user's working preferences).
 
 | Terminal | Path / data folder | Account | Use |
 |---|---|---|---|
-| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.20` on **XAUUSDc M5** (attached 1 Oct 19:34 IST). A power cut ~15:10 IST 1 Oct dropped the EA from both charts — **after any restart check the EA reloaded**. |
+| **MetaTrader 5** | `C:\Program Files\MetaTrader 5` · data `...\Terminal\D0E8209F77C8CF37AD8BF550E51FF075` | **Exness REAL cent 263602422** (Exness-MT5Real37, USC). Balance 77,581 USC when the EA went live (28 Sep 04:14 IST) | **LIVE**: `V6S_ICT_EA_cent_1lot_v2.20` on **XAUUSDc M5** (attached 1 Oct 19:34 IST); **v2.21 built 1 Oct, to be swapped in**. A power cut ~15:10 IST 1 Oct dropped the EA from both charts — **after any restart check the EA reloaded**. |
 | **MetaTrader5-5** | `C:\Program Files\MetaTrader5-5` · data `...\Terminal\4DB333B24A74B726D7AA441A9D0137DC` | **Exness Trial12 demo 83125455** (Exness-MT5Trial12, XAUUSD) | **Strategy Tester** (the user runs it; real ticks from 2026-01-01, generated before) + compile target; the sim data `m1_t12.npy`/`ticks_t12.npy` come from here |
 
 EA folder in both: `MQL5\Experts\V6S_ICT\`. Compile from the command line:
@@ -40,9 +40,9 @@ Contract specs (cent account): **XAUUSDc 1.00 lot = 100 USC per $1**, spread ≈
 ≈ −56 USC/lot/night. BTCUSDc 1.00 lot = 1 USC per $1 (spread $10). ETHUSDc 1.00 lot = 1 USC per $1 (spread $1).
 USOILc 1.00 lot = 1,000 USC per $1 (spread 0.02, short swap −186 USC/lot/night).
 
-## 2. What the EA does — v2.20 (current, live since 1 Oct 19:34 IST)
+## 2. What the EA does — v2.21 (current build, 1 Oct 2026)
 
-File: `v6s_ict/V6S_ICT_EA_cent_1lot_v2.20.mq5` (identical logic in the other two copies). Chart: XAUUSDc, any TF
+File: `v6s_ict/V6S_ICT_EA_cent_1lot_v2.21.mq5` (identical logic in the other two copies). Chart: XAUUSDc, any TF
 (M5 recommended). All inputs at their defaults are the tested/agreed settings.
 
 **Levels.** Major/Minor support & resistance (ZigZag, pivot period 5, ported verbatim from the indicator's
@@ -52,7 +52,9 @@ with ≥2 of them Major.
 **Slot 1 — aligning-level trades** (magic 26092701, 1.00 lot, one main trade at a time):
 - *Reversal:* an M5 candle touches an aligning level (touch never expires); a LATER M5 CISD (AlgoAlpha port,
   tolerance 0.7) closes back beyond it → trade. SL = extreme after the touch ± 0.5, **capped at 20**.
-  **No reversal entries 01:30–05:30 IST** (v2.11).
+  **No reversal entries 01:30–05:30 IST** (v2.11) **or on Mondays IST** (v2.21, `UseMondayRevBlock`).
+- **London block (v2.21, `UseLondonBlock`):** no new aligning-slot entries (reversals, breakouts, legs) 12:30–18:30 IST;
+  a blocked setup is not used up. DZ slot unaffected.
 - *Breakout:* M5 close through a level (valid 48 candles, cancelled by a close back through), then a LATER M5 CISD
   beyond it → trade. **SL = the broken level ∓ 1.5 (`BreakoutSLAtLevel`, `BreakoutSLBuffer`, v2.18)** — was the CISD
   swing ± 0.5 — capped at 20. Only if the TP is ≥ 1.5R.
@@ -82,7 +84,7 @@ with ≥2 of them Major.
   latest opposite run; no tolerance; line expires after `LuxMaxBars` = 100 candles). The **square-off still uses
   AlgoAlpha**: only an AlgoAlpha opposite setup closes the DZ trade; a LuxAlgo opposite setup while a DZ trade is
   open is ignored.
-- SL = far zone line ± 4.0, **capped at 75**; a capped trade needs TP ≥ 1R (v2.10). TP = nearest aligning level
+- SL = far zone line ± **6.0 (v2.21, was 4.0)**, **capped at 75**; a capped trade needs TP ≥ 1R (v2.10). TP = nearest aligning level
   **∓2.0 (`DZTPBuffer`, v2.20; was 1.0)** fixed at entry (1:1 if none; skipped if < 1 pt away). An opposite DZ setup squares it off.
 
 **Safety (v2.07–v2.09):** per-trade data flushed to disk and rebuilt from comment/history after a crash; startup
@@ -118,7 +120,9 @@ label limit.
 | tester v2.19 | reversal TP at the next daily pivot + extra-leg TP 1:3 (inputs) |
 | **v2.19** | **= v2.18 + reversal TP at the next daily pivot + extra-leg TP 1:3** (3 copies) |
 | tester v2.20 | v2.19 + separate `DZTPBuffer` = 2.0 for the DZ slot's TP (was the shared 1.0) |
-| **v2.20** | **= v2.19 + DZ TP buffer 2.0** (3 copies). Tester: +$43,791, PF 1.41, 10 of 33 months losing, low $2,586 |
+| v2.20 | = v2.19 + DZ TP buffer 2.0 (3 copies). Tester: +$43,791, PF 1.41, 10 of 33 months losing, low $2,586 |
+| tester v2.21 | v2.20 + DZ SL buffer 6, Monday reversal block, London aligning block (inputs) |
+| **v2.21** | **= v2.20 + DZ SL buffer 6 + Monday reversal block + London aligning block** (3 copies). Tester: **+$48,325, PF 1.54, deepest drop 35.4 %, low $3,344, 8 of 33 months losing, 2024 +$3,523** |
 | v3.00/3.01 | hedge-basket experiments (not used) |
 
 ## 4. Headline results — CLEAN data (1 Oct 2026)
@@ -155,6 +159,16 @@ the pivot: +444,448 (rejected).
 few hundred $): cent 1 lot, Oct 2024 – Sep 2026 — v2.15 +293,335 (drop 27.1k, 7 losing months) · v2.16 +388,152
 (drop 36.7k, 5) · **v2.17 (v2.16 + trap off) +399,953 (drop 36.9k, 5 losing months, −56.0k)**. $5k 0.08/0.10,
 Jan 2024 – Sep 2026: v2.16 trap on +$36,433 (low $1,816) vs **trap off +$37,791 (low $2,395)**.
+
+## 5b. Second clean-data batch (1 Oct 2026, base v2.20 +471,828, drop 35.1k, 5 losing months −51.2k)
+
+Adopted in v2.21: DZ SL buffer 6 (+513.1k; 5 +503.1k, 8 +503.4k, 10 +513.6k), Monday reversal block (+477.1k, milder
+months), London aligning block (+461.8k, losing months −39.6k); all three +501.7k, drop 32.9k, 4 losing months −39.2k.
+Confirmed (keep): DZ trigger M15 (M5 +380.6k, M30 +321.6k), DZ SL buffer 2 worse, capped-DZ 1R rule on (+457.5k off),
+aligning TP buffer 1.0 (0.5 +469.5k, 2.0 +447.2k), CISD tolerance 0.7 (0.5 +470.5k, 0.9 +456.8k), partial 7R (off
++478.6k ≈, 5R +456.0k), breakout auto square-off on (off +470.4k), touch buffer 0 (1.0 +446.5k, drop 41.7k), breakout
+validity 48 (24 +439.6k, 96 +484.3k but drop 37.1k), DZ London block (+438.6k, drop 27.8k). Not re-tested: touch expiry,
+M3 fallback, loss-cutting variants (all clearly worse on the old data). Volatility fix: parked by the user.
 
 ## 5a. Decisions re-checked on CLEAN data (1 Oct 2026, cent 1 lot, Oct 2024 – Sep 2026, base = v2.16 +388,152, drop 36,676, 5 losing months)
 
