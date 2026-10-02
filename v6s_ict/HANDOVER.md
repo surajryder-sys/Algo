@@ -163,6 +163,24 @@ few hundred $): cent 1 lot, Oct 2024 – Sep 2026 — v2.15 +293,335 (drop 27.1k
 (drop 36.7k, 5) · **v2.17 (v2.16 + trap off) +399,953 (drop 36.9k, 5 losing months, −56.0k)**. $5k 0.08/0.10,
 Jan 2024 – Sep 2026: v2.16 trap on +$36,433 (low $1,816) vs **trap off +$37,791 (low $2,395)**.
 
+**v2.22 on Real7 data (3 Oct 2026) — the new base for further tests.** Exness REAL account (Exness-MT5Real7,
+XAUUSD) via `sim/build_real7.py`: 163 M real ticks 1 Oct 2024 → 2 Oct 2026, so the sim runs on **real ticks for the
+whole period** (Trial12 had real ticks only from 2026). Bars match Trial12 almost exactly (median close diff 0.00,
+p99 0.27; gaps are holidays only, no bad 00:00 candles). Sim M1 file = Trial12 bars before 1 Oct 2024 (warm-up only) +
+Real7 bars. Re-run of v2.22 on Trial12 reproduced +543,577 exactly.
+
+| v2.22, Oct 2024 → 2 Oct 2026 | Trial12 (M1-generated ticks till 2025) | **Real7 cent 1 lot** | **Real7 standard $5k (0.08/0.10, comm 3.5, real spread)** |
+|---|---|---|---|
+| Net | +543,577 | **+526,260** | **+$51,558** |
+| Worst drop (closed trades) | 33,516 | 33,558 | $3,322 |
+| Lowest balance | 75,993 | 76,657 | $4,907 |
+| Losing months | 4 (−29,155) | 5 (−32,489) | 5 (−$3,122): Dec 24, Jan 25, May 25, Aug 25, Jul 26 |
+| Oct–Dec 2024 / 2025 / 2026 Jan–Sep | 46,177 / 171,820 / 325,581 | 38,141 / 150,111 / 336,481 | $3,738 / $15,801 / $31,932 |
+| DZ / BO / REV / LEG | 330.6k / 119.0k / 69.1k / 25.0k | 308.8k / 125.1k / 63.4k / 29.0k | $31,365 / $12,815 / $5,381 / $1,997 |
+
+Real ticks cost ~12 % in 2024-25 vs M1-generated ticks (fills were too kind); 2026 about equal. The standard sim's 2025
+(+$15,801) and 2026 (+$31,932) match the v2.22 Strategy Tester (+$15,819 / +$31,127).
+
 ## 5b. Second clean-data batch (1 Oct 2026, base v2.20 +471,828, drop 35.1k, 5 losing months −51.2k)
 
 Adopted in v2.21: DZ SL buffer 6 (+513.1k; 5 +503.1k, 8 +503.4k, 10 +513.6k), Monday reversal block (+477.1k, milder

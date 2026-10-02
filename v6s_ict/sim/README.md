@@ -23,6 +23,7 @@ cp data/*.npy .                       # the sims load their data from the curren
 | File | What | Source |
 |---|---|---|
 | **`m1_t12.npy` / `ticks_t12.npy`** | **XAUUSD, Exness Trial12 = the Strategy Tester feed**: M1 2022 → 28 Sep 2026 (hcc 2022-25 cleaned + 2026 from ticks) / real ticks 1 Jan → 28 Sep 2026 (72.8 M) | `build_t12.py ticks` then `build_t12.py bars` (MT5-5 terminal; ~1.8 GB, not in git) |
+| **`ticks_real7.npz` / `m1_real7_tv.npy`** | **XAUUSD, Exness REAL account (Real7), real ticks 1 Oct 2024 → 2 Oct 2026 (163 M) — base for tests from 3 Oct 2026** | `build_real7.py ticks` then `build_real7.py bars` ('MetaTrader 5' terminal on Real7; ~2.6 GB, not in git). For s_v6/s_dz: `m1_r7.npy` = `m1_t12` bars before 1 Oct 2024 (warm-up) + Real7 bars; `ticks_r7.npy` = npz unpacked to [ms, bid, ask] float64; run both periods with `TickSrc=real` |
 | `m1_2y.npy` | XAUUSD 1-min bars, Jan 2024 → 25 Sep 2026 — ⚠ built BEFORE the 00:00 fix (inflated results) | Exness Real7 .hcc + real ticks (`build2y.py`) |
 | `ticks_part*.npz` → `ticks.npy` | XAUUSD real ticks [ms, bid, ask], 1 Apr → 25 Sep 2026 | Exness Trial12, exported with the MetaTrader5 package |
 | `btc_m1.npy` / `eth_m1.npy` / `oil_m1.npy` | BTCUSD / ETHUSD / USOIL 1-min bars | `build_data.py BTC|ETH|OIL` (Exness .hcc files) |

@@ -181,6 +181,7 @@ mql5/*_compile_log.txt
 
 # V6S-ICT simulators: unpacked tick file and run outputs (data/ is committed on purpose)
 v6s_ict/sim/*.npy
+v6s_ict/sim/*.npz
 v6s_ict/sim/*.json
 v6s_ict/sim/*.txt
 v6s_ict/sim/__pycache__/
