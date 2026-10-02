@@ -181,6 +181,12 @@ Real7 bars. Re-run of v2.22 on Trial12 reproduced +543,577 exactly.
 Real ticks cost ~12 % in 2024-25 vs M1-generated ticks (fills were too kind); 2026 about equal. The standard sim's 2025
 (+$15,801) and 2026 (+$31,932) match the v2.22 Strategy Tester (+$15,819 / +$31,127).
 
+Floating profit per trade (Real7 standard, 3 Oct): highest $4,545 (DZ), average $156, median $87 (≈ 9 pts); REV med $50,
+BO $94, DZ $102; 60 % of trades peak at $25–200. Winners keep 95 % of their peak (TP exits); 102 losers had been 1–2R up.
+Earlier breakeven (3 Oct, base +$51,558, 5 losing months −$3,122) — ALL REJECTED, v2.22 kept: aligning BE 1.0R +$49,347
+(−$2,694 losing months, breakouts −$2.3k) · 1.5R +$50,798 · DZ BE 1.0R +$47,168 · 1.5R +$48,033 (4 losing months but
+−$5,186, drop $4,054) · 2.0R +$45,501 (7 losing months) · aligning 1.5R + DZ 1.5R +$47,274.
+
 ## 5b. Second clean-data batch (1 Oct 2026, base v2.20 +471,828, drop 35.1k, 5 losing months −51.2k)
 
 Adopted in v2.21: DZ SL buffer 6 (+513.1k; 5 +503.1k, 8 +503.4k, 10 +513.6k), Monday reversal block (+477.1k, milder
