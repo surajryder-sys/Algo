@@ -186,6 +186,16 @@ BO $94, DZ $102; 60 % of trades peak at $25–200. Winners keep 95 % of their pe
 Earlier breakeven (3 Oct, base +$51,558, 5 losing months −$3,122) — ALL REJECTED, v2.22 kept: aligning BE 1.0R +$49,347
 (−$2,694 losing months, breakouts −$2.3k) · 1.5R +$50,798 · DZ BE 1.0R +$47,168 · 1.5R +$48,033 (4 losing months but
 −$5,186, drop $4,054) · 2.0R +$45,501 (7 losing months) · aligning 1.5R + DZ 1.5R +$47,274.
+DZ entry timeframe (3 Oct, Real7 standard; entry + square-off on that TF): **M15 +$51,558 kept** · M10 +$39,239 (DZ +19.0k
+vs +31.4k, losing months −$6,726) · M5 +$40,338.
+IFVG instead of CISD (3 Oct, Real7 standard, base +$51,558, 5 losing months −$3,122) — ALL REJECTED, CISD kept. IFVG =
+close through a whole 3-candle FVG; "strict" = gap formed at/after the setup start (first touch / breakout close),
+"loose" = any gap of the last ~2 h; IFVG candle must also close beyond the level/zone; SL/TP unchanged. Aligning
+(DZ = v2.22): entry IFVG M5 +$36,384 · loose M5 +$38,333 · strict M3 +$44,682 · **loose M3 +$42,746 (only 3 losing
+months −$2,565, but drop $4,133, BO +4.8k vs +12.8k)** · strict M1 +$47,032 (2,288 trades, 2025 +9.8k) · loose M1
++$42,809. Exit by opposite IFVG instead of the CISD square-off: aligning +$51,570 (6 losing months), DZ +$51,038 — a
+wash. DZ entry (aligning = v2.22): IFVG M15 +$29,199 (151 DZ trades) · loose M15 +$28,419 · M10 +$21,862 · loose M10
++$21,789. IFVG entries are late/rare and miss clean breakouts. Untested idea: loose M3 IFVG for reversals only.
 
 ## 5b. Second clean-data batch (1 Oct 2026, base v2.20 +471,828, drop 35.1k, 5 losing months −51.2k)
 
