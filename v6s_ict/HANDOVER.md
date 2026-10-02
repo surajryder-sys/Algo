@@ -169,7 +169,13 @@ months), London aligning block (+461.8k, losing months −39.6k); all three +501
 Confirmed (keep): DZ trigger M15 (M5 +380.6k, M30 +321.6k), DZ SL buffer 2 worse, capped-DZ 1R rule on (+457.5k off),
 aligning TP buffer 1.0 (0.5 +469.5k, 2.0 +447.2k), CISD tolerance 0.7 (0.5 +470.5k, 0.9 +456.8k), partial 7R (off
 +478.6k ≈, 5R +456.0k), breakout auto square-off on (off +470.4k), touch buffer 0 (1.0 +446.5k, drop 41.7k), breakout
-validity 48 (24 +439.6k, 96 +484.3k but drop 37.1k), DZ London block (+438.6k, drop 27.8k). DZ reversals (2 Oct, base v2.22 +543,577, 4 losing months −29.2k): touch of a zone + M15 LuxAlgo CISD back out of it,
+validity 48 (24 +439.6k, 96 +484.3k but drop 37.1k), DZ London block (+438.6k, drop 27.8k). New-level trades (2 Oct): a NEWLY confirmed aligning level counts as touched for 12 M5 candles (6 tested too), first
+opposite M5 CISD → trade, SL level ± 0.5 (cap 20). TP aligning level +540,079 (drop 42.8k vs 33.5k, breakouts +119k →
++81k: the slot is busy), TP pivot +505,546, 1:1 +484,078, 1:2 +497,100, 6-candle window +485,524 — REJECTED. A level is
+only known after its swing is confirmed (M10: 50 min), by when price has usually moved on.
+Breakout priority (2 Oct): a qualifying same-direction breakout closes the open reversal (+ leg) and opens itself:
++537,545 (losing months −35.1k vs −29.2k); with new-level trades +513,047 — REJECTED (current leg + breakeven is better).
+DZ reversals (2 Oct, base v2.22 +543,577, 4 losing months −29.2k): touch of a zone + M15 LuxAlgo CISD back out of it,
 SL zone edge ± 2/4/6, TP aligning level (or 1:1-1:3). Alone they LOSE (−63k/−16k/−8k); with breakouts best = SL ± 4,
 TP level +561,002 but losing months −59.6k (twice as deep), lowest 71.9k, and +81.6k of it is ONE month (Mar 2026) —
 the other 23 months −52.6k. Fixed-RR TPs far worse. REJECTED (DZ slot stays breakouts only).
