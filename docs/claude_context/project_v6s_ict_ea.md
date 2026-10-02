@@ -99,3 +99,4 @@ UPDATE 2026-10-02: v2.22 built (3 copies) = v2.21 + SLFromTouch true (reversal S
 v2.22 attached live on cent 2 Oct 17:16 IST; only v2.22 files left in both terminals.
 2026-10-02: DZ reversals tested on clean data (zone touch + M15 CISD back out, SL zone edge +/-2/4/6): lose on their own; with breakouts +17k but all from Mar 2026, losing months twice as deep -> rejected, DZ stays breakouts only.
 2026-10-02: rejected on clean data -- new-level immediate trades (+540k vs +544k, drop 42.8k vs 33.5k, crowd out breakouts) and breakout-priority over an open reversal (-6k, deeper losing months). v2.22 unchanged.
+2026-10-02 (evening): also rejected on clean data -- new-level+CISD exits, basket close (all / keep one), exit on opposite level touch, DZ filter lifting on M10/M15 close back inside. Pattern: every early-exit / profit-taking idea loses to letting trades reach their own TP/SL/square-off. v2.22 unchanged.

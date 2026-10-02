@@ -169,7 +169,17 @@ months), London aligning block (+461.8k, losing months −39.6k); all three +501
 Confirmed (keep): DZ trigger M15 (M5 +380.6k, M30 +321.6k), DZ SL buffer 2 worse, capped-DZ 1R rule on (+457.5k off),
 aligning TP buffer 1.0 (0.5 +469.5k, 2.0 +447.2k), CISD tolerance 0.7 (0.5 +470.5k, 0.9 +456.8k), partial 7R (off
 +478.6k ≈, 5R +456.0k), breakout auto square-off on (off +470.4k), touch buffer 0 (1.0 +446.5k, drop 41.7k), breakout
-validity 48 (24 +439.6k, 96 +484.3k but drop 37.1k), DZ London block (+438.6k, drop 27.8k). New-level trades (2 Oct): a NEWLY confirmed aligning level counts as touched for 12 M5 candles (6 tested too), first
+validity 48 (24 +439.6k, 96 +484.3k but drop 37.1k), DZ London block (+438.6k, drop 27.8k). Exit / filter ideas (2 Oct, base v2.22 cent +543,577, drop 33.5k, 4 losing months −29.2k) — ALL REJECTED:
+- Exit when a new opposite aligning level appears + opposite CISD (1 h): M5 +486,274, M10 +528,561, M15 +538,191, M15 2 h
+  +521,874 — cuts winners (breakouts +119k → +81k with M5).
+- Basket close ($5k account, 0.08/0.10; v2.22 sim +$50,161): close all when 2 pos ≥ $400 / 3 pos ≥ $500 → +$37,345
+  (drop $4,352 vs $3,322); 300/400 +$31,477; 500/600 +$39,367. Keep one (most in profit or oldest), close the rest
+  (400/500) +$44,745 / +$44,568, lowest $1,948 vs $2,612; 500/600 +$46,583.
+- Exit on touch of the next opposite aligning level: any +494,636; only levels ≥ 1R away +526,272 (reversals/legs capped).
+- DZ filter that lifts when M10/M15 closes back inside the zone (inner edge) or inside the outer line: +533,149 /
+  +527,814 / +523,894 / +527,641 — reversals gain but breakouts/legs lose, losing months −40k to −46k. The filter stays
+  one-way for the whole session (it misses spikes that fully reverse, e.g. 2 Oct 18:00 4227 → 4134).
+New-level trades (2 Oct): a NEWLY confirmed aligning level counts as touched for 12 M5 candles (6 tested too), first
 opposite M5 CISD → trade, SL level ± 0.5 (cap 20). TP aligning level +540,079 (drop 42.8k vs 33.5k, breakouts +119k →
 +81k: the slot is busy), TP pivot +505,546, 1:1 +484,078, 1:2 +497,100, 6-candle window +485,524 — REJECTED. A level is
 only known after its swing is confirmed (M10: 50 min), by when price has usually moved on.
