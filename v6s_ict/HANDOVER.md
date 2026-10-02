@@ -16,7 +16,8 @@ about the whole repo and the user's working preferences).
 - **Report every time in IST (UTC+5:30).** Exness server time = UTC. Gold's daily session starts 03:30 IST (22:00 UTC).
 - **Every EA change = a NEW versioned file** `<EA>_v<x.yy>.mq5`; never overwrite an old one (one exception the user
   explicitly asked for: a display-only panel fix was overwritten in place in v2.09).
-- **Three copies of each version:** `V6S_ICT_EA_vX` (base lots), `V6S_ICT_EA_cent_vX` (3×: 0.24/0.30/0.30),
+- **Copies of each version:** `V6S_ICT_EA_vX` (base lots), `V6S_ICT_EA_cent_vX` (3×: 0.24/0.30/0.30), and from v2.22 an
+  optional `V6S_ICT_EA_half_vX` (0.04 reversals / 0.05 breakouts + DZ / runner 0.01, user 2 Oct),
   `V6S_ICT_EA_cent_1lot_vX` (1.00 everywhere — **this one runs live**).
 - After building: copy + compile in **both** terminals (below), delete older versions from the terminals **except
   the one attached to the live chart** (delete it after the user swaps), commit + push.
