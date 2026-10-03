@@ -5,7 +5,7 @@ import sys, numpy as np, datetime as dt
 from v6sim import agg, MajorMinor, TFS
 from ohlc import synth_ticks
 
-P = dict(TF=300, SLBuf=2.0, Lot=0.10, Tol=0.7, Contract=100.0, Comm=3.5, MinSpread=0.20, SwapLongPerLot=-55.04,
+P = dict(MinADR=0.0, ADRDays=10, TF=300, SLBuf=2.0, Lot=0.10, Tol=0.7, Contract=100.0, Comm=3.5, MinSpread=0.20, SwapLongPerLot=-55.04,
          TickSrc='real', SQ=0, ONE=0, NOCISD=0, TrOut='', CapMinTPR=0.0, MinTPPts=0.0, Data='m1_2y.npy', NoLondon=0, DZLeg=0, DZLegTP=2.0, BE=0.5, TPBuf=1.0, Warm=3000, MinTF=3, MinMajor=2, MaxSL=0.0, MaxRisk=0.0, BOSL='swing', RR='2,3,4', Modes='REV,BO,BOTH', Start='2026-04-01', End='2026-09-25', Tag='', LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', CISD='algo', LuxMax=100, ExitAlgo=0, REVSL='touch', REVBuf=4.0, ZoneMode='gap', SwapTriple=1, MaxDay=0, TrendF=0, MinRiskZ=0.0, DZNight=0, DZBER=0.0, FriNight=0, Win='')
 for a in sys.argv[1:]:
     k, v = a.split('='); P[k] = type(P[k])(v) if not isinstance(P[k], str) else v
@@ -22,6 +22,11 @@ tk = ticks[(ticks[:, 0] >= start * 1000)]
 TT = tk[:, 0] / 1000.0; BID = tk[:, 1].copy(); ASK = np.maximum(tk[:, 2], BID + P['MinSpread'])
 
 # zones per server D1
+_DQ = agg(m1, 86400); _DQ = _DQ[((_DQ['time'] // 86400 + 3) % 7) != 6]; _DQr = _DQ['high'] - _DQ['low']   # Sunday stub bars excluded
+def QUIET(t):    # MinADR (v2.23): no new entries while the average daily range of the last ADRDays closed days is below it
+    if P['MinADR'] <= 0: return False
+    k = int(np.searchsorted(_DQ['time'], t, side='right') - 1)
+    return k >= P['ADRDays'] and _DQr[k-P['ADRDays']:k].mean() < P['MinADR']
 from sessz import session_zones, day_zones
 _D = agg(m1, 86400)
 def trend_at(t):    # +1 if the last closed day closed above its 20-day average, else -1
@@ -229,6 +234,7 @@ for i in range(i0, len(B)):
                         if lg_['d'] > 0: pl += swap_cost(lg_['t'], TT[j0])
                         lg_.update(te=TT[j0], pl=pl, R=(px - lg_['entry']) * lg_['d'] / lg_['risk'], why='SQUARE-OFF')
                         bk['legbusy'] = TT[j0]
+        if QUIET(T): signals['quiet'] = signals.get('quiet', 0) + 1; continue   # v2.23 quiet market
         if P['TrendF']:
             tr_ = trend_at(T)
             if (P['TrendF'] == 1 and d != tr_) or (P['TrendF'] == 2 and d < 0 and tr_ > 0): signals['trend'] = signals.get('trend', 0) + 1; continue

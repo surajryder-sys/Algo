@@ -126,6 +126,7 @@ label limit.
 | tester v2.21 | v2.20 + DZ SL buffer 6, Monday reversal block, London aligning block (inputs) |
 | v2.21 | = v2.20 + DZ SL buffer 6 + Monday reversal block + London aligning block (3 copies).
 | **v2.22** | **= v2.21 + reversal SL from the whole touch run (`SLFromTouch` true)** (3 copies). Tester: **+$50,840, PF 1.55, deepest drop 32.7 %, low $3,460, 8 of 33 months losing (−$6,141); 2024 +$3,894 / 2025 +$15,819 / 2026 +$31,127** | Tester: **+$48,325, PF 1.54, deepest drop 35.4 %, low $3,344, 8 of 33 months losing, 2024 +$3,523** |
+| v2.23 (tester only so far) | = v2.22 + quiet-market filter `MinADR` 30 / `ADRDays` 10: no new entries (aligning + DZ) while the average D1 range of the last 10 closed days (Sunday stubs skipped) is below 30 pts. Sim (Trial12, $5k, Jan 2024 – Sep 2026): v2.22 +$52,358, low $2,785, 8 losing months (−$6,612) → **+$54,090, low $4,437, 6 losing (−$4,120), 3 months no trades (Jan–Feb 2024)**; MinADR 28 +$54,323 / 6 losing, 32 +$52,437 / 7, 36 +$50,397 / 6. Profitable months 25 → 24 (losing months become flat ones). DZ 15:00/17:00 IST block cut drop $3,319 → $2,313 but not losing months (not added). Only v2.23 standard file exists; cent copies after the tester check |
 | v3.00/3.01 | hedge-basket experiments (not used) |
 
 ## 4. Headline results — CLEAN data (1 Oct 2026)
@@ -336,7 +337,7 @@ can fill SL/TP far away.
 
 ## 9. Open items / ideas not done
 
-- **Volatility fix (main weakness):** scale stops/buffers/caps to ATR, or cut lots when the daily range is small.
+- **Volatility fix:** v2.23 adds the quiet-market entry filter (MinADR 30) — tester check pending. Scaling stops/buffers to ATR is still untested.
 - **Breakout auto square-off:** −$11.4k in the tester — test removing it for breakouts.
 - Time filter 15:00-17:00 IST for breakouts/DZ; trend filter for counter-trend sells.
 - Consider a smaller live lot (e.g. 0.60 cent) until the volatility fix exists (a 2024-like market could cost ~60 %).

@@ -1,7 +1,7 @@
 import sys, numpy as np, datetime as dt
 from v6sim import MajorMinor, agg, TFS
 
-P = dict(Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0, MinSLRev=0.0, MinSLMode='skip', ZoneMode='gap', SwapTriple=1, LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', Trap=0, CISD='algo', LuxMax=100, PivLvl=0, PivConf=0.0, PivTP=0, AutoSqBO=1, PivScope='all', BOBuf=1.0, TrapBuf=4.0, TrapWin=0, TrapTP=2.0,
+P = dict(MinADR=0.0, ADRDays=10, Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0, MinSLRev=0.0, MinSLMode='skip', ZoneMode='gap', SwapTriple=1, LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', Trap=0, CISD='algo', LuxMax=100, PivLvl=0, PivConf=0.0, PivTP=0, AutoSqBO=1, PivScope='all', BOBuf=1.0, TrapBuf=4.0, TrapWin=0, TrapTP=2.0,
          SwapLongPerLot=-55.04, Start='2026-08-24', End='2026-09-25')
 for a in sys.argv[1:]:
     k, v = a.split('='); P[k] = type(P[k])(v) if not isinstance(P[k], str) else v
@@ -198,7 +198,12 @@ def opp_tp(d, bid, ask, entry=None, risk=None, typ=0):
     if t is None: return None
     if P['MinTPR'] > 0 and entry is not None and (t - entry) * d < P['MinTPR'] * risk: return entry + d * risk
     return t
-LON = lambda t: P['LondonAL'] and 750 <= ((int(t) + 19800) % 86400) // 60 < 1110   # 12:30-18:30 IST
+_DQ = agg(m1, 86400); _DQ = _DQ[((_DQ['time'] // 86400 + 3) % 7) != 6]; _DQr = _DQ['high'] - _DQ['low']   # Sunday stub bars excluded
+def QUIET(t):    # MinADR (v2.23): no new entries while the average daily range of the last ADRDays closed days is below it
+    if P['MinADR'] <= 0: return False
+    k = int(np.searchsorted(_DQ['time'], t, side='right') - 1)
+    return k >= P['ADRDays'] and _DQr[k-P['ADRDays']:k].mean() < P['MinADR']
+LON = lambda t: (P['LondonAL'] and 750 <= ((int(t) + 19800) % 86400) // 60 < 1110) or QUIET(t)   # 12:30-18:30 IST / quiet market (v2.23)
 def rr_ok(d, entry, sl, bid, ask, typ=0):
     need = P['MinRRBO'] if typ == 1 and P['MinRRBO'] >= 0 else P['MinRRRev'] if typ == 0 and P['MinRRRev'] >= 0 else P['MinRR']
     if not need: return True
