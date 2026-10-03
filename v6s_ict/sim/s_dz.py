@@ -6,7 +6,7 @@ from v6sim import agg, MajorMinor, TFS
 from ohlc import synth_ticks
 
 P = dict(TF=300, SLBuf=2.0, Lot=0.10, Tol=0.7, Contract=100.0, Comm=3.5, MinSpread=0.20, SwapLongPerLot=-55.04,
-         TickSrc='real', SQ=0, ONE=0, NOCISD=0, TrOut='', CapMinTPR=0.0, MinTPPts=0.0, Data='m1_2y.npy', NoLondon=0, DZLeg=0, DZLegTP=2.0, BE=0.5, TPBuf=1.0, Warm=3000, MinTF=3, MinMajor=2, MaxSL=0.0, MaxRisk=0.0, BOSL='swing', RR='2,3,4', Modes='REV,BO,BOTH', Start='2026-04-01', End='2026-09-25', Tag='', LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', CISD='algo', LuxMax=100, ExitAlgo=0, REVSL='touch', REVBuf=4.0)
+         TickSrc='real', SQ=0, ONE=0, NOCISD=0, TrOut='', CapMinTPR=0.0, MinTPPts=0.0, Data='m1_2y.npy', NoLondon=0, DZLeg=0, DZLegTP=2.0, BE=0.5, TPBuf=1.0, Warm=3000, MinTF=3, MinMajor=2, MaxSL=0.0, MaxRisk=0.0, BOSL='swing', RR='2,3,4', Modes='REV,BO,BOTH', Start='2026-04-01', End='2026-09-25', Tag='', LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', CISD='algo', LuxMax=100, ExitAlgo=0, REVSL='touch', REVBuf=4.0, ZoneMode='gap', SwapTriple=1, MaxDay=0, TrendF=0, MinRiskZ=0.0, DZNight=0, DZBER=0.0)
 for a in sys.argv[1:]:
     k, v = a.split('='); P[k] = type(P[k])(v) if not isinstance(P[k], str) else v
 RRS = tuple(float(x) for x in P['RR'].split(','))
@@ -22,8 +22,13 @@ tk = ticks[(ticks[:, 0] >= start * 1000)]
 TT = tk[:, 0] / 1000.0; BID = tk[:, 1].copy(); ASK = np.maximum(tk[:, 2], BID + P['MinSpread'])
 
 # zones per server D1
-from sessz import session_zones
-d1t, Z = session_zones(m1)          # gap-delimited sessions, as the indicator / EA v2.13
+from sessz import session_zones, day_zones
+_D = agg(m1, 86400)
+def trend_at(t):    # +1 if the last closed day closed above its 20-day average, else -1
+    k = int(np.searchsorted(_D['time'], t, side='right') - 1)
+    if k < 2: return 0
+    return 1 if _D['close'][k-1] > _D['close'][max(0, k-20):k].mean() else -1
+d1t, Z = day_zones(m1) if P['ZoneMode'] == 'd1' else session_zones(m1)          # gap-delimited sessions, as the indicator / EA v2.13
 
 B = agg(m1, P['TF']); sec = P['TF']
 O, H, L, C = B['open'], B['high'], B['low'], B['close']
@@ -132,7 +137,7 @@ def advance_levels(T):
 def swap_cost(t0, t1):
     s = 0.0; d0 = int(t0 // 86400); d1 = int(t1 // 86400)
     for last_day in range(d0, d1):
-        s += P['SwapLongPerLot'] * P['Lot'] * (3 if (last_day + 3) % 7 == 2 else 1)
+        s += P['SwapLongPerLot'] * P['Lot'] * (3 if (P['SwapTriple'] and (last_day + 3) % 7 == 2) else 1)
     return s
 
 EXITS = [('LEVEL', False), ('LVL>=1R', False), ('1:1', False), ('1:1.5', False), ('1:2', False), ('1:3', False)]
@@ -224,12 +229,17 @@ for i in range(i0, len(B)):
                         if lg_['d'] > 0: pl += swap_cost(lg_['t'], TT[j0])
                         lg_.update(te=TT[j0], pl=pl, R=(px - lg_['entry']) * lg_['d'] / lg_['risk'], why='SQUARE-OFF')
                         bk['legbusy'] = TT[j0]
+        if P['TrendF']:
+            tr_ = trend_at(T)
+            if (P['TrendF'] == 1 and d != tr_) or (P['TrendF'] == 2 and d < 0 and tr_ > 0): signals['trend'] = signals.get('trend', 0) + 1; continue
+        if P['DZNight'] and 90 <= ((int(T) + 19800) % 86400) // 60 < 330: signals['night'] = signals.get('night', 0) + 1; continue
         if P['NoLondon'] and 750 <= ((int(T) + 19800) % 86400) // 60 < 1110: signals['london'] = signals.get('london', 0) + 1; continue   # no NEW entries 12:30-18:30 IST (square-off above still applies)
         if P['MaxRisk'] > 0 and typ == 'BO' and (entry - sl) * d > P['MaxRisk']: signals['skipped'] = signals.get('skipped', 0) + 1; continue
         capped = P['MaxSL'] > 0 and (entry - sl) * d > P['MaxSL']
         if capped: sl = entry - d * P['MaxSL']
         risk = (entry - sl) * d
         if risk <= 0: continue
+        if P['MinRiskZ'] > 0 and risk < P['MinRiskZ'] * abs(z1 - z3) / 2: signals['weak'] = signals.get('weak', 0) + 1; continue
         if d > 0: lv = [v - P['TPBuf'] for v in ALR if v - P['TPBuf'] > entry]; lt = min(lv) if lv else None
         else:     lv = [v + P['TPBuf'] for v in ALS if v + P['TPBuf'] < entry]; lt = max(lv) if lv else None
         for (m, (xn, xbe)), bk in books.items():
@@ -252,17 +262,20 @@ for i in range(i0, len(B)):
                     ft.update(te=TT[jf], pl=plf, R=(pf - ft['entry']) * d / ft['risk'], why=('BE-STOP' if wf == 'SL' else wf))
                     bk['busy'] = TT[jf]
                 continue
+            dkey = int((T + 19800) // 86400)
+            if P['MaxDay'] > 0 and bk.setdefault('dc', {}).get(dkey, 0) >= P['MaxDay']: continue
             if xn.startswith('1:'): tp = entry + d * float(xn[2:]) * risk
             elif lt is not None and (xn == 'LEVEL' or (lt - entry) * d >= risk): tp = lt
             else: tp = entry + d * risk; bk['fb'] += 1        # no level (or under 1R for LVL>=1R): 1:1
             if P['MinTPPts'] > 0 and lt is not None and (lt - entry) * d < P['MinTPPts']: continue
             if capped and P['CapMinTPR'] > 0 and (tp - entry) * d < P['CapMinTPR'] * risk: continue
-            je, px, why = exit_scan_be(j0, d, entry, sl, tp, entry + d * P['BE'] * risk if xbe else None)
+            je, px, why = exit_scan_be(j0, d, entry, sl, tp, entry + d * P['BE'] * risk if xbe else (entry + d * P['DZBER'] * risk if (P['DZBER'] > 0 and (tp - entry) * d > P['DZBER'] * risk) else None))
             pl = (px - entry) * d * P['Lot'] * P['Contract'] - P['Comm'] * P['Lot'] * 2
             if d > 0: pl += swap_cost(TT[j0], TT[je])
             bk['trades'].append(dict(t=TT[j0], te=TT[je], typ=typ, d=d, entry=entry, sl=sl, risk=risk, pl=pl,
                                      R=(px - entry) * d / risk, why=why, desc=desc, tpR=(tp - entry) * d / risk))
             bk['busy'] = TT[je]
+            dc_ = bk.setdefault('dc', {}); dc_[dkey] = dc_.get(dkey, 0) + 1
 
 tf = {300: 'M5', 900: 'M15'}.get(sec, str(sec))
 print(f"=== DZ test {tf} {P['Start']}..{P['End']} ticks={P['TickSrc']} lot {P['Lot']} SL buffer {P['SLBuf']} | signals {signals}")

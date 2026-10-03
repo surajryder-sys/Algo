@@ -22,3 +22,16 @@ def session_hl(m1):
     h = agg(m1, 3600)
     starts = np.concatenate([[0], np.flatnonzero(np.diff(h['time']) > 3600) + 1])
     return h['time'][starts], np.maximum.reduceat(h['high'], starts), np.minimum.reduceat(h['low'], starts)
+
+def day_zones(m1, short=5, long_=10):
+    """24/7 instruments (BTC): one session per server day (00:00 UTC = 05:30 IST); same zone maths as session_zones."""
+    h = agg(m1, 3600)
+    day = h['time'] // 86400
+    starts = np.concatenate([[0], np.flatnonzero(np.diff(day)) + 1])
+    hi = np.maximum.reduceat(h['high'], starts); lo = np.minimum.reduceat(h['low'], starts)
+    rng = hi - lo; t0 = h['time'][starts]; op = h['open'][starts]
+    n = len(starts); Z = np.full((n, 4), np.nan)
+    for k in range(max(short, long_), n):
+        h5 = rng[k-short:k].mean() / 2.0; h10 = rng[k-long_:k].mean() / 2.0
+        Z[k] = (op[k] + h5, op[k] + h10, op[k] - h5, op[k] - h10)
+    return t0, Z

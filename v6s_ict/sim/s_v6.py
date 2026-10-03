@@ -1,7 +1,7 @@
 import sys, numpy as np, datetime as dt
 from v6sim import MajorMinor, agg, TFS
 
-P = dict(Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0, LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', Trap=0, CISD='algo', LuxMax=100, PivLvl=0, PivConf=0.0, PivTP=0, AutoSqBO=1, PivScope='all', BOBuf=1.0, TrapBuf=4.0, TrapWin=0, TrapTP=2.0,
+P = dict(Lot=0.06, Runner=0.01, SLBuf=0.5, TouchBuf=2.0, BER=2.0, PartR=3.0, Warm=3000, Tol=0.7, Contract=100.0, MinTF=2, Brake=0, M10AfterSL=0, MinMajor=0, TickSrc='real', MeqOut='meq.json', SLFromTouch=0, OppTP=0, TPScope=0, DZF=0, BOSL='swing', MaxSL=0.0, Comm=0.0, MinSpread=0.0, News=0, NewsMin=5, MinRR=0.0, TPNth=1, MinRRRev=-1.0, MinRRBO=-1.0, TrailR=0.0, TrailBars=0, FixTPR=0.0, SLMode='none', TPBuf=1.0, AutoSq=0, BO=0, BOLots=0.05, BOBars=48, SwP=12, SwExp=100, MinTPR=0.0, TrOut='', Data='m1_2y.npy', NoRevLate=0, NoRevMon=0, AddLeg=0, LondonAL=0, SessTP=0, SessScope='rev', DZTP=0, DZScope='rev', LegTP=2.0, LegWhen='any', LegBE=0, BasketR=0.0, SharedSL=0, LegTPMode='rr', LegLot=1.0, MinSLRev=0.0, MinSLMode='skip', ZoneMode='gap', SwapTriple=1, LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', Trap=0, CISD='algo', LuxMax=100, PivLvl=0, PivConf=0.0, PivTP=0, AutoSqBO=1, PivScope='all', BOBuf=1.0, TrapBuf=4.0, TrapWin=0, TrapTP=2.0,
          SwapLongPerLot=-55.04, Start='2026-08-24', End='2026-09-25')
 for a in sys.argv[1:]:
     k, v = a.split('='); P[k] = type(P[k])(v) if not isinstance(P[k], str) else v
@@ -132,7 +132,7 @@ for k in range(max(0, m5closed[-1] - P['Warm'] + 1), m5closed[-1] + 1):
 m5ptr = m5closed[-1] + 1
 
 # classic daily pivots from the PREVIOUS gap-session's high / low / close (PP, R1-R3, S1-S3)
-_h = agg(m1, 3600); _st = np.concatenate([[0], np.flatnonzero(np.diff(_h['time']) > 3600) + 1]); _en = np.concatenate([_st[1:] - 1, [len(_h) - 1]])
+_h = agg(m1, 3600); _st = np.concatenate([[0], np.flatnonzero((np.diff(_h['time'] // 86400) != 0) if P['ZoneMode'] == 'd1' else (np.diff(_h['time']) > 3600)) + 1]); _en = np.concatenate([_st[1:] - 1, [len(_h) - 1]])
 PST = _h['time'][_st]; PH = np.maximum.reduceat(_h['high'], _st); PLo = np.minimum.reduceat(_h['low'], _st); PC = _h['close'][_en]
 def pivots_at(t):
     k = int(np.searchsorted(PST, t, side='right') - 1)
@@ -227,9 +227,13 @@ def in_news(t):
         if 0 <= kk < len(NEWS) and abs(t - NEWS[kk]) <= P['NewsMin'] * 60: return True
     return False
 # Dynamic Zones from D1 built out of the same 1-minute data: Z2 = open + avg10/2, Z4 = open - avg10/2
-from sessz import session_zones, session_hl
-d1t, _ZZ = session_zones(m1)
-ST0, SHI, SLO = session_hl(m1)        # gap-delimited sessions, as the indicator / EA v2.13
+from sessz import session_zones, session_hl, day_zones
+d1t, _ZZ = day_zones(m1) if P['ZoneMode'] == 'd1' else session_zones(m1)
+if P['ZoneMode'] == 'd1':                    # 24/7: sessions = server days
+    _h1 = agg(m1, 3600); _st1 = np.concatenate([[0], np.flatnonzero(np.diff(_h1['time'] // 86400)) + 1])
+    ST0, SHI, SLO = _h1['time'][_st1], np.maximum.reduceat(_h1['high'], _st1), np.minimum.reduceat(_h1['low'], _st1)
+else:
+    ST0, SHI, SLO = session_hl(m1)        # gap-delimited sessions, as the indicator / EA v2.13
 Z1, Z2, Z3, Z4 = _ZZ[:, 0], _ZZ[:, 1], _ZZ[:, 2], _ZZ[:, 3]
 dz_day = -1; dzblock = {1: False, -1: False}; dz_blocked = 0
 pos = None; trades = []; realized = 0.0; eq_min = 0.0; eq_peak = 0.0; maxdd = 0.0
@@ -302,10 +306,10 @@ for j in range(len(tk)):
     if ask - bid < P['MinSpread']: ask = bid + P['MinSpread']
     day = int(now // 86400)
     if last_day is not None and day != last_day and pos is not None and pos['dir'] > 0:
-        mult = 3 if (last_day + 3) % 7 == 2 else 1
+        mult = 3 if (P['SwapTriple'] and (last_day + 3) % 7 == 2) else 1
         pos['swap'] += P['SwapLongPerLot'] * pos['vol'] * mult
     if last_day is not None and day != last_day and leg is not None and leg['dir'] > 0:
-        leg['swap'] += P['SwapLongPerLot'] * leg['vol'] * (3 if (last_day + 3) % 7 == 2 else 1)
+        leg['swap'] += P['SwapLongPerLot'] * leg['vol'] * (3 if (P['SwapTriple'] and (last_day + 3) % 7 == 2) else 1)
     last_day = day
 
     # ---- closed M5 bar(s) -> levels, CISD, signal, touches
@@ -389,6 +393,8 @@ for j in range(len(tk)):
                     if pos is not None: close_pos('REVERSE', bid, ask, now)
                     entry = ask if sig > 0 else bid
                     if P['SLMode'] == 'cap' and abs(entry - sl) > P['MaxSL']: sl = entry - sig * P['MaxSL']
+                    if P['MinSLRev'] > 0 and abs(entry - sl) < P['MinSLRev']:          # BTC test: small reversal stops
+                        sl = (entry + sig) if P['MinSLMode'] == 'skip' else (entry - sig * P['MinSLRev'])
                     if P['SLMode'] == 'skip' and abs(entry - sl) > P['MaxSL']: sl = entry + sig   # invalid -> skipped
                     if not rr_ok(sig, entry, sl, bid, ask): rr_blocked += 1; sl = entry + sig
                     if (sig > 0 and sl < entry) or (sig < 0 and sl > entry):

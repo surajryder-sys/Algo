@@ -279,18 +279,21 @@ blocking opposite entries across slots estimated −$881 with the same max drop 
 | Liquidity sweeps (aligning / single-TF Major / HTF candle, M1–M5 CISD / green candle) | rejected | 300+ combos, none profitable (best H4 M5 1:3 +895) |
 | Cap vs skip, 20-pt cap (aligning) | cap 20 | skip worse (v2.02 era) |
 
-## 6. Other instruments (sim only, nothing built) — ⚠ built with the same flawed `.hcc` parser, re-do before relying on them
+## 6. BTCUSD (clean data, 3 Oct 2026) — tester EA `V6S_ICT_EA_BTC_tester_v1.00.mq5` built, not yet run in MT5
 
-- **BTCUSD** (Exness data Oct 2024–Sep 2026, 2.00 BTCUSDc lots, settings ×35–×50): only **DZ-only on M30** works.
-  Best: DZ only, M30, ×35 (SL buffer 140, cap 2,625, TP buffer 35), **fixed 1:1**, **London entries off**:
-  +115,983 USC / 2y, drop 14.8 %, 6/24 losing months. Aligning trades ≈ 0 or negative on BTC.
-  NB: BTC trades 24/7 → the gap-session zone rule never splits sessions; the crypto sims still use D1 zones.
-  Building it would need: DZ trigger-TF input, a switch to turn off aligning reversals, fixed-RR DZ TP, London window.
-- **ETHUSD** (40 ETHUSDc lots, ×1.75–×3.5): DZ-only M30 with the **nearest-level** target: +85,014 / 23 months,
-  drop 22.5 %; full EA loses in the recent period.
-- **USOIL** (3.30 lots, ×0.03, no weekend carry): does **not** work (DZ loses, drawdowns > 100 %).
-
-Details: `docs/claude_context/project_v6s_ict_btc.md`.
+Data: Exness **Real7 BTCUSD** (`.hcc` 2022-25 cleaned: 959 bad 00:00 records dropped; 2026 real ticks, 27.4 M).
+Sim on cent terms: 2.00 BTCUSDc lots, start 77,581 USC, spread $10 on bars, swap long −18.9 USC/lot/day, **one zone
+session per server day** (BTC is 24/7 → the H1-gap rule never splits). Settings = gold × 35.
+- **Works:** DZ breakouts on **M30 with AlgoAlpha** (LuxAlgo and M15 worse); aligning **reversals with a stop ≥ 300**
+  (+31.3k, drop 10.1 %, 5/24 losing months; plain reversals +18.3k, 10/24). **Doesn't:** aligning breakouts (−32k to
+  −51k), extra legs (unstable), trend/time filters on top of breakeven, weak-breakout filter, BE on a 1:1 TP.
+- DZ fixes found by digging the trades: **max 1 DZ trade per IST day**, **no DZ square-off**, **London block**,
+  **breakeven** (31 % of 1:2 losers were first 1R in profit).
+- **System C** (DZ 1:1.5, BE 1R) + reversals: **+151,192 USC, drop 9.1 %, 4/25 losing months**.
+  **System E** (DZ 1:2, BE 1.5R) + reversals: **+201,127 USC, drop 15.3 %, 5/25** (slots simulated separately, summed).
+- The tester EA defaults to System C (`DZFixedRR 1.5`, `DZBreakevenR 1.0`); System E = `DZFixedRR 2.0`,
+  `DZBreakevenR 1.5`. Lots 0.02 BTCUSD = the sim's 2.00 BTCUSDc (test with a 776 USD deposit to compare 1:1).
+- ETH / USOIL results (below in `docs/claude_context/project_v6s_ict_btc.md`) are still on the OLD faulty data.
 
 ## 7. Live history so far (cent account, 1.00 lot)
 
