@@ -6,7 +6,7 @@ from v6sim import agg, MajorMinor, TFS
 from ohlc import synth_ticks
 
 P = dict(TF=300, SLBuf=2.0, Lot=0.10, Tol=0.7, Contract=100.0, Comm=3.5, MinSpread=0.20, SwapLongPerLot=-55.04,
-         TickSrc='real', SQ=0, ONE=0, NOCISD=0, TrOut='', CapMinTPR=0.0, MinTPPts=0.0, Data='m1_2y.npy', NoLondon=0, DZLeg=0, DZLegTP=2.0, BE=0.5, TPBuf=1.0, Warm=3000, MinTF=3, MinMajor=2, MaxSL=0.0, MaxRisk=0.0, BOSL='swing', RR='2,3,4', Modes='REV,BO,BOTH', Start='2026-04-01', End='2026-09-25', Tag='', LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', CISD='algo', LuxMax=100, ExitAlgo=0, REVSL='touch', REVBuf=4.0, ZoneMode='gap', SwapTriple=1, MaxDay=0, TrendF=0, MinRiskZ=0.0, DZNight=0, DZBER=0.0)
+         TickSrc='real', SQ=0, ONE=0, NOCISD=0, TrOut='', CapMinTPR=0.0, MinTPPts=0.0, Data='m1_2y.npy', NoLondon=0, DZLeg=0, DZLegTP=2.0, BE=0.5, TPBuf=1.0, Warm=3000, MinTF=3, MinMajor=2, MaxSL=0.0, MaxRisk=0.0, BOSL='swing', RR='2,3,4', Modes='REV,BO,BOTH', Start='2026-04-01', End='2026-09-25', Tag='', LevelTFs='H4,H2,H1,M30,M15,M10,M5,M3', Ticks='ticks.npy', CISD='algo', LuxMax=100, ExitAlgo=0, REVSL='touch', REVBuf=4.0, ZoneMode='gap', SwapTriple=1, MaxDay=0, TrendF=0, MinRiskZ=0.0, DZNight=0, DZBER=0.0, FriNight=0, Win='')
 for a in sys.argv[1:]:
     k, v = a.split('='); P[k] = type(P[k])(v) if not isinstance(P[k], str) else v
 RRS = tuple(float(x) for x in P['RR'].split(','))
@@ -233,6 +233,8 @@ for i in range(i0, len(B)):
             tr_ = trend_at(T)
             if (P['TrendF'] == 1 and d != tr_) or (P['TrendF'] == 2 and d < 0 and tr_ > 0): signals['trend'] = signals.get('trend', 0) + 1; continue
         if P['DZNight'] and 90 <= ((int(T) + 19800) % 86400) // 60 < 330: signals['night'] = signals.get('night', 0) + 1; continue
+        if P['FriNight'] and ((int(T) + 19800) // 86400 + 3) % 7 == 5 and (P['FriNight'] == 2 or ((int(T) + 19800) % 86400) // 60 < 330): signals['frinight'] = signals.get('frinight', 0) + 1; continue   # FriNight 1 = no DZ entries Sat 00:00-05:30 IST, 2 = all Saturday (IST)
+        if P['Win'] and not any(int(w.split('-')[0]) <= ((int(T) + 19800) % 86400) // 60 < int(w.split('-')[1]) for w in P['Win'].split('/')): signals['win'] = signals.get('win', 0) + 1; continue   # Win = allowed IST entry windows, minutes 'a-b/c-d'
         if P['NoLondon'] and 750 <= ((int(T) + 19800) % 86400) // 60 < 1110: signals['london'] = signals.get('london', 0) + 1; continue   # no NEW entries 12:30-18:30 IST (square-off above still applies)
         if P['MaxRisk'] > 0 and typ == 'BO' and (entry - sl) * d > P['MaxRisk']: signals['skipped'] = signals.get('skipped', 0) + 1; continue
         capped = P['MaxSL'] > 0 and (entry - sl) * d > P['MaxSL']

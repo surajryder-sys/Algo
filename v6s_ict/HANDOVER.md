@@ -279,7 +279,7 @@ blocking opposite entries across slots estimated −$881 with the same max drop 
 | Liquidity sweeps (aligning / single-TF Major / HTF candle, M1–M5 CISD / green candle) | rejected | 300+ combos, none profitable (best H4 M5 1:3 +895) |
 | Cap vs skip, 20-pt cap (aligning) | cap 20 | skip worse (v2.02 era) |
 
-## 6. BTCUSD (clean data, 3 Oct 2026) — tester EA `V6S_ICT_EA_BTC_tester_v1.00.mq5` built, not yet run in MT5
+## 6. BTCUSD (clean data, 3 Oct 2026) — tester EAs `V6S_ICT_EA_BTC_tester_v1.00/1.01/1.02.mq5`
 
 Data: Exness **Real7 BTCUSD** (`.hcc` 2022-25 cleaned: 959 bad 00:00 records dropped; 2026 real ticks, 27.4 M).
 Sim on cent terms: 2.00 BTCUSDc lots, start 77,581 USC, spread $10 on bars, swap long −18.9 USC/lot/day, **one zone
@@ -294,6 +294,21 @@ session per server day** (BTC is 24/7 → the H1-gap rule never splits). Setting
 - The tester EA defaults to System C (`DZFixedRR 1.5`, `DZBreakevenR 1.0`); System E = `DZFixedRR 2.0`,
   `DZBreakevenR 1.5`. Lots 0.02 BTCUSD = the sim's 2.00 BTCUSDc (test with a 776 USD deposit to compare 1:1).
 - ETH / USOIL results (below in `docs/claude_context/project_v6s_ict_btc.md`) are still on the OLD faulty data.
+- **Tester v1.00 (System C)**, Trial12 BTCUSD, Jan 2024 – Oct 2026, $5k, 0.02 lot: **+$1,336, PF 1.35, drop 11.0 %,
+  8/33 losing months**; from Oct 2024 +$1,387 vs sim +$1,512 (92 % match). Jan–Sep 2024 flat (−$84). v1.01 = System E
+  defaults (tester run pending). M15 DZ trigger re-tested: much worse for both C and E.
+- **Weekends (IST):** Sunday DZ trades win (sim 9/10, tester 7/8; best 18:00–24:00 IST); "Saturday" DZ trades are really
+  Friday's US night (Sat 00:00–05:30 IST) and lose (C 17/24 losing months). LuxAlgo M15 Saturday +34.7k / 2023–26 but
+  17/31 losing months — not consistent.
+- **Extending back to Jan 2023 exposed the real weakness:** System C lost 2023 (−18.7k) and H1 2024 (−31.9k), drop 82 %.
+  Cause = DZ entries 00:00–05:30 IST (−29k 2023, −33k H1 2024: late, extended, bigger stop vs zone). Best windows
+  18:30–21:00 IST (US open, +80k) and 09:00–12:30 (80 % win).
+- **Tester v1.02 = the "consistent" setup:** DZ entries only 05:30–12:30 + 18:30–21:00 IST, no Saturday, TP = nearest
+  aligning level (1:1 if under 1R), BE 1R; reversals unchanged. Sim Feb 2023 – Sep 2026 (44 months, slots summed):
+  **+121,443 USC, drop 17.2 %, 10/44 losing months (worst −4,793), every year up** (+7.7k / +34.2k / +38.2k / +41.4k)
+  vs v1.00 setup +87,222, drop 82 %, 19/44. Windows were found on the same data → tester run is the check.
+  Other ranked variants: C 1:1.5 + windows + rev +135.6k, 14.6 %, 13/44; C no-00:00–05:30 + rev +152.6k, 19.4 %, 13/44.
+  sim: `s_dz.py ... MaxDay=1 SQ=0 DZBER=1.0 NoLondon=1 FriNight=2 Win=330-750/1110-1260`, book `LVL>=1R`.
 
 ## 7. Live history so far (cent account, 1.00 lot)
 
