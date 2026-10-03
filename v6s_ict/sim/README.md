@@ -27,7 +27,6 @@ cp data/*.npy .                       # the sims load their data from the curren
 | `m1_2y.npy` | XAUUSD 1-min bars, Jan 2024 → 25 Sep 2026 — ⚠ built BEFORE the 00:00 fix (inflated results) | Exness Real7 .hcc + real ticks (`build2y.py`) |
 | `ticks_part*.npz` → `ticks.npy` | XAUUSD real ticks [ms, bid, ask], 1 Apr → 25 Sep 2026 | Exness Trial12, exported with the MetaTrader5 package |
 | `btc_m1.npy` / `eth_m1.npy` / `oil_m1.npy` | BTCUSD / ETHUSD / USOIL 1-min bars | `build_data.py BTC|ETH|OIL` (Exness .hcc files) |
-| `m3.npy m3t.npy m5.npy m15.npy m5h.npy m3h.npy m1_clean.npy` | older XAUUSD series used only by the V5S grid sim (`sim.py`) | — |
 
 Periods used everywhere: **old** = `Start=2024-10-01 End=2026-04-01 TickSrc=ohlc` (synthetic ticks from 1-min
 bars), **new/recent** = `Start=2026-04-01` (real ticks). Costs for the cent account: `Comm=0 MinSpread=0.26`
@@ -48,7 +47,6 @@ bars), **new/recent** = `Start=2026-04-01` (real ticks). Costs for the cent acco
 | `v3run.py` | v3.x hedge-basket sim — historical. |
 | `bt_btbo.py`, `bt_dz3.py` | BTC/ETH versions (D1 zones, `Data=`, `TradeTF=`, `RevOff=`, `Contract=`). |
 | `bt_oil.py`, `bt_dzo.py` | USOIL versions (no weekend carry `WkCut`, short swap `SwapShortPerLot`). |
-| `sim.py` | V5S-ICT grid EA sim (older project). |
 | `build2y.py`, `build_data.py`, `ticks_pack.py` | Data builders. |
 
 Every script takes `Key=Value` arguments that override the `P = dict(...)` defaults at the top of the file.

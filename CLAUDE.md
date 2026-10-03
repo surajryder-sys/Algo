@@ -78,9 +78,6 @@ Separate lineage from V6S-ICT v2.x (the live v2.2x files are never touched from 
   have an edge), `s_mss.py` (3.15), `s_algov2.py` (algo_v2 replay + filters). Real7 data extended to Jan 2024:
   `build_real7.py extend` → `ticks_real7x.npz` / `m1_real7x_tv.npy` (sims take `Data=real7x`).
 
-### v5s_ict/ — V5S-ICT grid EA (MQL5, superseded)
-M3/M5 dual-ATR + CISD hedged ladder grid EA; tested in simulation only, not run live.
-
 ### research/ — Vantage account trade-history analysis (data only)
 Analysis-only; never use the Vantage grid EA as a design reference.
 

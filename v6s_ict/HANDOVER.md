@@ -203,7 +203,7 @@ Trap recheck on it: trap on +$52,346 (+$184 only by knock-on effects); the 67 tr
 stays OFF.
 
 **Dual ATR Trail flip instead of CISD (3 Oct 2026, v2.23 sim, Trial12 $5k, Jan 2024 – Sep 2026) — ALL REJECTED, CISD kept.**
-Trail = V5S lines ATR(2)×2 (fast) + ATR(300)×2 (slow); DUAL flip = close above/below both lines; PART flip = close across
+Trail = dual ATR lines ATR(2)×2 (fast) + ATR(300)×2 (slow); DUAL flip = close above/below both lines; PART flip = close across
 the fast line. Flip exit = opposite flip closes the trade (replaces the CISD square-off; SL/TP unchanged).
 Aligning slot (v2.23 +$19,638, drop $2,005, 9 losing months): M5 CISD entry + DUAL exit +$13,210 · M3 CISD + DUAL exit
 +$11,351 (drop $1,113, 8 losing) · CISD + PART exit +$9.6–10.7k · DUAL entry + CISD exit M3 +$9,120 / M5 +$5,024 (7 losing)

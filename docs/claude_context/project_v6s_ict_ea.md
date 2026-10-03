@@ -8,7 +8,7 @@ metadata:
   modified: 2026-09-26T19:08:53.872Z
 ---
 
-V6S-ICT is a new standalone MQL5 EA, started 2026-09-27: `v6s_ict/V6S_ICT_EA_v1.50.mq5` (versioned files from v1.50 on, see [[feedback_ea_versioned_files]]), magic 26092701. It is based on the other chat's combined chart indicator `mql5/Dynamic_Zones_CISD_MajorMinor.mq5`; a snapshot copy is in `v6s_ict/`, and it was first compiled here with 0 errors. It is unrelated to [[project_v5s_ict_grid_bot]] (the V5S-ICT grid EA).
+V6S-ICT is a new standalone MQL5 EA, started 2026-09-27: `v6s_ict/V6S_ICT_EA_v1.50.mq5` (versioned files from v1.50 on, see [[feedback_ea_versioned_files]]), magic 26092701. It is based on the other chat's combined chart indicator `mql5/Dynamic_Zones_CISD_MajorMinor.mq5`; a snapshot copy is in `v6s_ict/`, and it was first compiled here with 0 errors.
 
 Rules, agreed one question at a time:
 - Levels: Major/Minor S/R (ZigZag, PivotPeriod 5), ported verbatim from the indicator, on H4, H2, H1, M30, M15, M10, M5 and M3.
@@ -29,7 +29,7 @@ First backtest (Python mirror on real ticks, 24 Aug-24 Sep 2026, 0.06 lot; the M
 6-MONTH real-tick sim (1 Apr-24 Sep 2026, 3-TF, 0.06): without the brake 500 trades, +274, drop 1,827 (3 losing months). With the brake 410 trades, +1,774, drop 1,242; monthly Apr -853, May +476, Jun +857, Jul +412, Aug -28, Sep +910. The sim excludes commission; not yet confirmed in the MT5 tester.
 BEST SO FAR (v1.40 defaults): 2-Major rule, M5 CISD, NO brake: 268 trades, +2,343, drop 846, lowest -734, 1 losing month (Apr -579). With brake: +2,431, drop 994, lowest -973, so the brake adds little once levels are stronger.
 
-Installed and compiled in the MetaTrader 5 terminal (a real cent account, see [[project_v5s_ict_grid_bot]]) and in MT5-5. Not committed, not backtested, not run live. See [[feedback_algo_trading_collab]].
+Installed and compiled in the MetaTrader 5 terminal (a real cent account) and in MT5-5. Not committed, not backtested, not run live. See [[feedback_algo_trading_collab]].
 
 CURRENT DEFAULTS v1.50 = "setup D" (user chose it 2026-09-27): 2-Major alignment (3+ TFs, 2+ Major), M5 CISD, M10-after-SL ON, brake 2 ON, BE 1:2, partial 1:7. Real-tick 1 Apr-24 Sep 2026: 188 trades, +4,911, drop 922, lowest -835; only April negative. Partial grid with BE 1:2: 1:3 +3,110, 1:4 +3,775, 1:5 +4,040, 1:6 +4,421, 1:7 +4,911, 1:10 +3,335, none +3,458. BE at 1:1 cost about 1,100 (85 BE stops). One year (Oct-Mar on 1-min bars, which are PESSIMISTIC for this EA: real Apr-Sep +3,110 vs 1-min +1,339): setup D at 1:3 +1,547 vs setup A -2,104. Oct 2025-Apr 2026 (violent gold trend) was the weak stretch for every variant. The sim is scratchpad v6sim.py/v6run.py (session temp); not committed; not run live.
 - v1.51 (display only): per-TF Major/Minor drawn yellow; attached indicator loaded with EnableCISD=false (its CISD swing lines were being mistaken for levels -- the user wants ONLY the yellow Major/Minor logic as levels, which the EA already uses); touch arrow only on the first candle of a touch. MT5-5 has no tester.tpl, so the tester uses default.tpl, which loads FVG_Combined_V2.01 (a tight ATR-2 trailing line) + Dynamic Zones -- those are NOT from the EA.

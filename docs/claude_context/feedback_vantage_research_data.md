@@ -10,6 +10,6 @@ metadata:
 
 `research/vantage_grid_ea/` (deal/order history of a third-party XAUUSD grid EA) was added by the user only for data analysis. Don't bring it up when designing strategies, and don't suggest copying the EA or using its logic.
 
-**Why:** On 2026-09-25, while the grid bot design ([[project_v5s_ict_grid_bot]]) was being discussed, the user said "skip vantage, stop suggesting, i added only to analyze the data".
+**Why:** On 2026-09-25, while a grid bot design (since removed) was being discussed, the user said "skip vantage, stop suggesting, i added only to analyze the data".
 
 **How to apply:** Only touch this folder when the user asks for an analysis of it. Leave it out of design ideas for the OB/CISD grid bot and every other bot.
