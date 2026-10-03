@@ -1,4 +1,8 @@
 //+------------------------------------------------------------------+
+//| Fix 3 Oct 2026 (same version): OB slot restart safety -- an OB     |
+//| already retested whose first CISD came before a restart/reload is  |
+//| not re-armed (no second trade / late entry); detector handles      |
+//| released on unload. Tester results unchanged.                      |
 //| CENT ACCOUNT 1-LOT copy: every slot 1.00 lot (runner after the     |
 //| partial close 0.10, as v2.23 cent_1lot).                           |
 //| V6S_ICT_OB_v5.00 (2026-10-03) -- COMBINATION series:               |
@@ -2673,6 +2677,7 @@ bool     g_otReady = false;
 double   g_oxBullP = 0, g_oxBearP = 0, g_oxPO = 0, g_oxPC = 0;
 int      g_oxBullI = -1, g_oxBearI = -1, g_oxN = 0;
 bool     g_oxPrev = false;
+datetime g_oxEvT[]; int g_oxEvD[];   // close time / direction of recent M5 LuxAlgo CISDs (restart safety)
 
 void OTLog(const string m) { if(VerboseLog) Print("[V6S-OB] ", m); }
 
@@ -2695,10 +2700,16 @@ void OTInit()
    ArrayResize(g_ot, 0); ArrayResize(g_otSeen, 0);
    g_otM1 = 0; g_otM5 = 0; g_otReady = false;
    g_oxBullI = -1; g_oxBearI = -1; g_oxN = 0; g_oxPrev = false;
+   ArrayResize(g_oxEvT, 0); ArrayResize(g_oxEvD, 0);
+}
+
+void OTDeinit()
+{
+   for(int t = 0; t < g_otN; t++) if(g_otH[t] != INVALID_HANDLE) { IndicatorRelease(g_otH[t]); g_otH[t] = INVALID_HANDLE; }
 }
 
 // LuxAlgo Classic CISD on M5 (same rule as the DZ slot's, own state)
-int OXStep(const double o, const double c)
+int OXStep(const double o, const double c, const datetime ce)
 {
    int i = g_oxN++;
    if(g_oxPrev)
@@ -2710,6 +2721,12 @@ int OXStep(const double o, const double c)
    if(g_oxBullI >= 0) { if(i - g_oxBullI > OBLuxMaxBars) g_oxBullI = -1; else if(c < g_oxBullP) { lx = -1; g_oxBullI = -1; } }
    if(g_oxBearI >= 0) { if(i - g_oxBearI > OBLuxMaxBars) g_oxBearI = -1; else if(c > g_oxBearP) { lx = 1;  g_oxBearI = -1; } }
    g_oxPO = o; g_oxPC = c; g_oxPrev = true;
+   if(lx != 0)
+   {
+      int n = ArraySize(g_oxEvT);
+      if(n >= 1000) { ArrayRemove(g_oxEvT, 0, 500); ArrayRemove(g_oxEvD, 0, 500); n = ArraySize(g_oxEvT); }
+      ArrayResize(g_oxEvT, n + 1); ArrayResize(g_oxEvD, n + 1); g_oxEvT[n] = ce; g_oxEvD[n] = lx;
+   }
    return lx;
 }
 
@@ -2733,6 +2750,13 @@ bool OTBusy()
       if(tk == 0) continue;
       if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == OBMagicNumber) return true;
    }
+   return false;
+}
+
+// restart safety: has an M5 LuxAlgo CISD in direction d already closed after the retest minute rt?
+bool OTDecided(const int d, const datetime rt)
+{
+   for(int k = ArraySize(g_oxEvT) - 1; k >= 0 && g_oxEvT[k] > rt; k--) if(g_oxEvD[k] == d) return true;
    return false;
 }
 
@@ -2778,6 +2802,11 @@ void OTPoll(const int t)
          {
             z.rt = (datetime)((long)rtest / 60 * 60);
             if(TimeCurrent() > z.rt + 60 + OBCISDWindowMin * 60) continue;
+            if(OTDecided(z.d, z.rt))   // its first CISD already happened (EA restarted / reloaded) -- already decided
+            {
+               OTLog(StringFormat("%s OB %.2f-%.2f: retested %s and its CISD already came -- not re-armed", g_otName[t], z.btm, z.top, TimeToString(z.rt)));
+               continue;
+            }
             if(!OTHeightOK(z)) continue;
             z.st = 1;
          }
@@ -2832,7 +2861,7 @@ void OBSlotTick()
       for(int t = 0; t < g_otN; t++) if(g_otH[t] == INVALID_HANDLE || BarsCalculated(g_otH[t]) < 10) return;
       int cnt = MathMin(600, Bars(_Symbol, PERIOD_M5) - 2);
       if(cnt < 200) return;
-      for(int s = cnt; s >= 1; s--) OXStep(iOpen(_Symbol, PERIOD_M5, s), iClose(_Symbol, PERIOD_M5, s));
+      for(int s = cnt; s >= 1; s--) OXStep(iOpen(_Symbol, PERIOD_M5, s), iClose(_Symbol, PERIOD_M5, s), iTime(_Symbol, PERIOD_M5, s) + 300);
       g_otM5 = iTime(_Symbol, PERIOD_M5, 1);
       for(int t = 0; t < g_otN; t++) g_otBar[t] = iTime(_Symbol, g_otTF[t], 0);
       g_otReady = true;
@@ -2874,8 +2903,8 @@ void OBSlotTick()
       int from = (sh > 1) ? sh - 1 : 1;
       for(int s = from; s >= 1; s--)
       {
-         int lx = OXStep(iOpen(_Symbol, PERIOD_M5, s), iClose(_Symbol, PERIOD_M5, s));
          datetime ce = iTime(_Symbol, PERIOD_M5, s) + 300;
+         int lx = OXStep(iOpen(_Symbol, PERIOD_M5, s), iClose(_Symbol, PERIOD_M5, s), ce);
          bool fresh = (s == 1) && now - ce <= MaxSignalDelaySec;
          for(int t = 0; t < g_otN; t++)          // OB timeframe order: higher first
             for(int k = 0; k < ArraySize(g_ot); k++)
@@ -2950,6 +2979,7 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    if(!MQLInfoInteger(MQL_TESTER)) ObjectsDeleteAll(0, "V6SICT_");
+   OTDeinit();   // OB retest slot: release the detector handles
 }
 
 bool WarmupM5()
