@@ -70,7 +70,7 @@ Separate lineage from V6S-ICT v2.x (the live v2.2x files are never touched from 
   `V6S_ICT_OB_v5.00` = combination series: `v6s_ict/V6S_ICT_v2.25` (v2.23 logic, new comments
   `V6S-ICT-ALG-<TFs>` / `ALG-BO|BD-<TFs>` / `TRP` / `EXLEG` / `DYZ-BO|BD`) + the OB slot. Each has cent (lots ×3)
   and half copies; `V6S-ICT_OB_v5.00_1LOT` = every slot 1 lot (cent). Installed in "MetaTrader 5" (Real7) and
-  MetaTrader5-5, all in `Experts\V6S_ICT\` (the `V6S_ICT_3` terminal folder was merged into it 2026-10-03).
+  MetaTrader5-5, in `Experts\V6S_ICT\`: the 4 v5.00 copies in the main folder, older lines in subfolders `v2.25\`, `OB_3.25\`, `BTC_tester\` (2026-10-03).
 - Real7 tester Jan 2024 – Sep 2026 (test5.1 = v5.00 logic): +$67,554, PF 1.65, max DD 7.2 %, 3 losing months of 33
   (v2.23 part +$53,492, OB part +$14,061). Month-by-month runs vs sims: `test5_monthly.csv` (`test5_compare.py`).
 - History: 3.0–3.15 (OB/CISD and fresh-Major MSS experiments, 3.15 tester +$868), test5.0–5.3 (combination drafts).
