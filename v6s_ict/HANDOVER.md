@@ -323,6 +323,13 @@ session per server day** (BTC is 24/7 → the H1-gap rule never splits). Setting
   vs v1.00 setup +87,222, drop 82 %, 19/44. Windows were found on the same data → tester run is the check.
   Other ranked variants: C 1:1.5 + windows + rev +135.6k, 14.6 %, 13/44; C no-00:00–05:30 + rev +152.6k, 19.4 %, 13/44.
   sim: `s_dz.py ... MaxDay=1 SQ=0 DZBER=1.0 NoLondon=1 FriNight=2 Win=330-750/1110-1260`, book `LVL>=1R`.
+- **Tester v1.02 result** (Trial12, Jan 2024 – Sep 2026, $5k, 0.02 lot): +$937, PF 1.49, drop 2.5 % (v1.00 11 %), 8/33
+  losing months, every year up (+236 / +307 / +394); DZ +$734, reversals +$203; ≈ 82 % of the sim.
+- **v5.00's OB-retest slot on BTC (3 Oct 2026) — REJECTED.** Rules ×35 (H2/H1 OB first retest → M5 LuxAlgo CISD ≤ 4 h,
+  SL OB ± 17.5 cap 700, TP 2R, height < 700 and < 0.25 × ADR10, stop ≥ 175, no Friday, one at a time), BTC tick volume
+  from Real7 ticks (2023–25) + 2026 real ticks: Feb 2023 – Sep 2026 **−58,146 USC, drop 93 %, 26/44 losing months**.
+  Every per-signal R/trade is negative for H2/H1 × LuxAlgo/AlgoAlpha × 1R/2R/3R; best variant (TP = aligning level
+  beyond 2R) −1,353 with 21/44 losing; only 2026 is positive. On BTC the v5.00 combination = tester v1.02 (no OB slot).
 
 ## 7. Live history so far (cent account, 1.00 lot)
 
