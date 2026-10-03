@@ -330,6 +330,15 @@ session per server day** (BTC is 24/7 → the H1-gap rule never splits). Setting
   from Real7 ticks (2023–25) + 2026 real ticks: Feb 2023 – Sep 2026 **−58,146 USC, drop 93 %, 26/44 losing months**.
   Every per-signal R/trade is negative for H2/H1 × LuxAlgo/AlgoAlpha × 1R/2R/3R; best variant (TP = aligning level
   beyond 2R) −1,353 with 21/44 losing; only 2026 is positive. On BTC the v5.00 combination = tester v1.02 (no OB slot).
+  Why (4 Oct): after a BTC OB retest price reaches +1R before the SL 47 % (gold 53 %) and +2R 31 % (gold 39 %, break-even
+  33 %) — no subset (TF, H4/H1/M15 trend, overlap, year, IST hour, CISD delay, stop size) clears break-even. The chart
+  looks better because OB_Detector deletes broken OBs (only survivors stay drawn).
+- **OB stop-hunt / trap variants on BTC (4 Oct) — REJECTED.** Feb 2023 – Sep 2026, one at a time, 2.00 lots: wider stop
+  (OB edge − 0.5 / 1.0 × OB height) −27k to −183k; **sweep & reclaim** (OB wicked through, then an M5 LuxAlgo CISD closing
+  back beyond the edge, SL = sweep extreme ± 17.5) on small OBs: +0.06R/trade ± 0.043 (not significant), TP2R +33.3k but
+  22/44 losing months, 2025 −9.5k; added to v1.02: TP1R +140.9k but drop 13.4k → 24.0k, losing months 10 → 10; TP2R 16/44.
+  **Trap** (trade the OB break with an opposite CISD, SL beyond the failed bounce) TP3R +29.8k but 2024 −47.6k, drop 91k;
+  with v1.02 20/44 losing. v1.02 stays without any OB slot.
 
 ## 7. Live history so far (cent account, 1.00 lot)
 
