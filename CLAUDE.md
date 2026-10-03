@@ -61,13 +61,22 @@ XAUUSDc M5 on the real cent account from 2 Oct 2026 17:16 IST; v2.23 copies plac
 working conventions). Python backtest simulators + data: `v6s_ict/sim/` (see its README). The previous assistant's
 saved notes for this whole repo: `docs/claude_context/`.
 
-### v6s_ict_3/ — V6S_ICT_3.0, order block + CISD EA (MQL5, tester only)
-Separate EA from V6S-ICT v2.x (v2.21 live — never touched by this one). Reads zones from
-`mql5/OB_Detector_v1.07.mq5` (volume-pivot OBs, live first-retest, 30 EA buffers) via iCustom. Most recent OB takes
-control (flip closes opposite trades), CISD in that direction (LuxAlgo Classic default, AlgoAlpha selectable) →
-entry, SL OB ± 0.5, TP 1:2, draws zones + CISDs. Magic 26100101. MetaTrader5-5 `Experts\V6S_ICT_3\`; not run live.
-(Renamed 2026-10-02 from the earlier test EA; the old `V6S_ICT_EA_v3.00/3.01` hedge-basket files in `v6s_ict/` are
-unrelated.) Sims (`v6s_ict/sim/s_ob.py`) found no month-on-month consistent edge.
+### v6s_ict_3/ — order-block EAs + the V6S/OB combination series (MQL5, tester only)
+Separate lineage from V6S-ICT v2.x (the live v2.2x files are never touched from here). OBs come from
+`mql5/OB_Detector_v1.07.mq5` (volume-pivot OBs, live first-retest, 30 EA buffers) via iCustom.
+- **Current (3 Oct 2026):** `V6S_ICT_OB_3.25` = OB retest EA alone: H2/H1 OB → first retest → first M5 LuxAlgo
+  CISD within 4 h → entry, SL OB edge ± 0.5 capped 20, TP 2R, OB height < 20 pts and < 0.25 × 10-day ADR, stop
+  ≥ 5 pts, no Friday (IST), one trade at a time; magic 26100601, comment `V6S-ICT-OB-H1|H2`.
+  `V6S_ICT_OB_v5.00` = combination series: `v6s_ict/V6S_ICT_v2.25` (v2.23 logic, new comments
+  `V6S-ICT-ALG-<TFs>` / `ALG-BO|BD-<TFs>` / `TRP` / `EXLEG` / `DYZ-BO|BD`) + the OB slot. Each has cent (lots ×3)
+  and half copies; `V6S-ICT_OB_v5.00_1LOT` = every slot 1 lot (cent). Installed in "MetaTrader 5" (Real7) and
+  MetaTrader5-5 (`Experts\V6S_ICT_3\`, v2.25 in `Experts\V6S_ICT\`).
+- Real7 tester Jan 2024 – Sep 2026 (test5.1 = v5.00 logic): +$67,554, PF 1.65, max DD 7.2 %, 3 losing months of 33
+  (v2.23 part +$53,492, OB part +$14,061). Month-by-month runs vs sims: `test5_monthly.csv` (`test5_compare.py`).
+- History: 3.0–3.15 (OB/CISD and fresh-Major MSS experiments, 3.15 tester +$868), test5.0–5.3 (combination drafts).
+- Sims in `v6s_ict/sim/`: `s_obr.py` + `an_obr.py` / `pf_obr.py` / `pf2_obr.py` (OB retest study; only H2/H1 OBs
+  have an edge), `s_mss.py` (3.15), `s_algov2.py` (algo_v2 replay + filters). Real7 data extended to Jan 2024:
+  `build_real7.py extend` → `ticks_real7x.npz` / `m1_real7x_tv.npy` (sims take `Data=real7x`).
 
 ### v5s_ict/ — V5S-ICT grid EA (MQL5, superseded)
 M3/M5 dual-ATR + CISD hedged ladder grid EA; tested in simulation only, not run live.
