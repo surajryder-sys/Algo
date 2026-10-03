@@ -198,6 +198,15 @@ months −$2,565, but drop $4,133, BO +4.8k vs +12.8k)** · strict M1 +$47,032 (
 wash. DZ entry (aligning = v2.22): IFVG M15 +$29,199 (151 DZ trades) · loose M15 +$28,419 · M10 +$21,862 · loose M10
 +$21,789. IFVG entries are late/rare and miss clean breakouts. Untested idea: loose M3 IFVG for reversals only.
 
+**Dual ATR Trail flip instead of CISD (3 Oct 2026, v2.23 sim, Trial12 $5k, Jan 2024 – Sep 2026) — ALL REJECTED, CISD kept.**
+Trail = V5S lines ATR(2)×2 (fast) + ATR(300)×2 (slow); DUAL flip = close above/below both lines; PART flip = close across
+the fast line. Flip exit = opposite flip closes the trade (replaces the CISD square-off; SL/TP unchanged).
+Aligning slot (v2.23 +$19,638, drop $2,005, 9 losing months): M5 CISD entry + DUAL exit +$13,210 · M3 CISD + DUAL exit
++$11,351 (drop $1,113, 8 losing) · CISD + PART exit +$9.6–10.7k · DUAL entry + CISD exit M3 +$9,120 / M5 +$5,024 (7 losing)
+· flip entry + flip exit +$0.5–4.2k. DZ slot (v2.23 +$34,452, drop $3,289, 8 losing): M15 CISD entry + DUAL exit +$18,428 ·
++ PART exit +$14,670 · M15 flip entries −$0.5k to −$1.6k · M5 flip entries +$0.5k to +$8.4k (DUAL/CISD drop $6,552).
+Flip entries come late (the move is already made); flip exits cut the winners that reach the level/pivot TP.
+
 ## 5b. Second clean-data batch (1 Oct 2026, base v2.20 +471,828, drop 35.1k, 5 losing months −51.2k)
 
 Adopted in v2.21: DZ SL buffer 6 (+513.1k; 5 +503.1k, 8 +503.4k, 10 +513.6k), Monday reversal block (+477.1k, milder
