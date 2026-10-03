@@ -197,6 +197,10 @@ months −$2,565, but drop $4,133, BO +4.8k vs +12.8k)** · strict M1 +$47,032 (
 +$42,809. Exit by opposite IFVG instead of the CISD square-off: aligning +$51,570 (6 losing months), DZ +$51,038 — a
 wash. DZ entry (aligning = v2.22): IFVG M15 +$29,199 (151 DZ trades) · loose M15 +$28,419 · M10 +$21,862 · loose M10
 +$21,789. IFVG entries are late/rare and miss clean breakouts. Untested idea: loose M3 IFVG for reversals only.
+**v2.23 on Real7 (3 Oct, standard $5k, Oct 2024 → 2 Oct 2026): +$52,162, drop $3,322, low $4,907, 3 losing months
+(−$2,428: May 25, Aug 25, Jul 26)** vs v2.22 +$51,558 / 5 (−$3,122) — the quiet filter skips Dec 24 – Jan 25.
+Trap recheck on it: trap on +$52,346 (+$184 only by knock-on effects); the 67 trap trades themselves −$135, 27 % win →
+stays OFF.
 
 **Dual ATR Trail flip instead of CISD (3 Oct 2026, v2.23 sim, Trial12 $5k, Jan 2024 – Sep 2026) — ALL REJECTED, CISD kept.**
 Trail = V5S lines ATR(2)×2 (fast) + ATR(300)×2 (slow); DUAL flip = close above/below both lines; PART flip = close across
